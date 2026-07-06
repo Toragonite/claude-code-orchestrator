@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { WorkerManager } from './workerManager';
 import { TasksProvider, WorkersProvider } from './views';
 import { clearTaskLog, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
@@ -25,6 +26,40 @@ function ensureStableServerCopy(context: vscode.ExtensionContext): string {
   }
 }
 
+let cachedNodeCommand: string | undefined;
+
+/**
+ * Absolute path to the node binary. The MCP server is spawned by the Claude
+ * Code CLI, which on macOS/Linux may not inherit the user's shell PATH (nvm,
+ * homebrew) — a bare "node" command then fails the server's health check.
+ * Resolve through the user's login shell; fall back to "node".
+ */
+function resolveNodeCommand(): string {
+  if (cachedNodeCommand) {
+    return cachedNodeCommand;
+  }
+  if (process.platform !== 'win32') {
+    try {
+      const shell = process.env.SHELL || '/bin/sh';
+      const out = execFileSync(shell, ['-lc', 'command -v node'], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      })
+        .trim()
+        .split('\n')
+        .pop();
+      if (out && fs.existsSync(out)) {
+        cachedNodeCommand = out;
+        return out;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  cachedNodeCommand = 'node';
+  return cachedNodeCommand;
+}
+
 function mcpRegisteredIn(folder: vscode.WorkspaceFolder): boolean {
   try {
     const json = JSON.parse(fs.readFileSync(path.join(folder.uri.fsPath, '.mcp.json'), 'utf8'));
@@ -44,7 +79,7 @@ function registerMcp(folder: vscode.WorkspaceFolder, serverPath: string): void {
   }
   json.mcpServers = {
     ...json.mcpServers,
-    [MCP_SERVER_NAME]: { command: 'node', args: [serverPath] },
+    [MCP_SERVER_NAME]: { command: resolveNodeCommand(), args: [serverPath] },
   };
   fs.writeFileSync(mcpFile, JSON.stringify(json, null, 2) + '\n');
 }
