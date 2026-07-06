@@ -26,7 +26,24 @@ export interface Registry {
   permissionMode: string;
   /** Path or name of the claude executable. */
   claudePath: string;
+  /** Minutes a worker sits out after a quota/rate-limit error. */
+  cooldownMinutes: number;
 }
+
+/** Cumulative per-worker usage, tracked from CLI JSON results. */
+export interface WorkerStats {
+  tasks: number;
+  errors: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  lastUsedAt?: number;
+  /** Epoch ms until which this worker is skipped (set on quota errors). */
+  cooldownUntil?: number;
+  lastError?: string;
+}
+
+export type StatsFile = Record<string, WorkerStats>;
 
 export interface TaskEvent {
   ts: number;
@@ -44,11 +61,13 @@ export const ROOT_DIR = path.join(os.homedir(), '.fable-orchestrator');
 export const REGISTRY_FILE = path.join(ROOT_DIR, 'registry.json');
 export const TASKS_LOG_FILE = path.join(ROOT_DIR, 'tasks.jsonl');
 export const TASKS_DIR = path.join(ROOT_DIR, 'tasks');
+export const STATS_FILE = path.join(ROOT_DIR, 'stats.json');
 
 const DEFAULTS: Registry = {
   workers: [],
   permissionMode: 'acceptEdits',
   claudePath: 'claude',
+  cooldownMinutes: 30,
 };
 
 export function ensureDirs(): void {
@@ -92,4 +111,21 @@ export function clearTaskLog(): void {
   } catch {
     // nothing to clear
   }
+}
+
+export function emptyStats(): WorkerStats {
+  return { tasks: 0, errors: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
+}
+
+export function readStats(): StatsFile {
+  try {
+    return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')) as StatsFile;
+  } catch {
+    return {};
+  }
+}
+
+export function writeStats(stats: StatsFile): void {
+  ensureDirs();
+  fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
 }
