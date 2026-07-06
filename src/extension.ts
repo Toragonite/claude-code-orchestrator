@@ -5,8 +5,12 @@ import { execFileSync } from 'child_process';
 import { WorkerManager } from './workerManager';
 import { TasksProvider, WorkersProvider } from './views';
 import { clearTaskLog, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
+import { hasPolicy, upsertPolicy } from './prompts';
+import { openDashboard } from './dashboard';
 
-const MCP_SERVER_NAME = 'fable-dispatch';
+const MCP_SERVER_NAME = 'cco-dispatch';
+/** Pre-rename server key — removed from .mcp.json when re-registering. */
+const LEGACY_MCP_SERVER_NAME = 'fable-dispatch';
 
 /**
  * Copy the bundled MCP server to a version-independent path. Installed
@@ -81,7 +85,43 @@ function registerMcp(folder: vscode.WorkspaceFolder, serverPath: string): void {
     ...json.mcpServers,
     [MCP_SERVER_NAME]: { command: resolveNodeCommand(), args: [serverPath] },
   };
+  delete json.mcpServers[LEGACY_MCP_SERVER_NAME];
   fs.writeFileSync(mcpFile, JSON.stringify(json, null, 2) + '\n');
+}
+
+/** Write/refresh the dispatch policy block in the workspace's CLAUDE.md. */
+function writeDispatchPolicy(folder: vscode.WorkspaceFolder): void {
+  const file = path.join(folder.uri.fsPath, 'CLAUDE.md');
+  let existing = '';
+  try {
+    existing = fs.readFileSync(file, 'utf8');
+  } catch {
+    // new file
+  }
+  fs.writeFileSync(file, upsertPolicy(existing));
+}
+
+async function offerDispatchPolicy(folder: vscode.WorkspaceFolder): Promise<void> {
+  const file = path.join(folder.uri.fsPath, 'CLAUDE.md');
+  let existing = '';
+  try {
+    existing = fs.readFileSync(file, 'utf8');
+  } catch {
+    // no CLAUDE.md yet
+  }
+  if (hasPolicy(existing)) {
+    return;
+  }
+  const choice = await vscode.window.showInformationMessage(
+    'Add the dispatch policy to this workspace\'s CLAUDE.md? It tells the main session to delegate ' +
+      'all implementation to workers (it only designs, integrates, and verifies), batch subtasks in ' +
+      'parallel, and write per-task system prompts.',
+    'Add to CLAUDE.md',
+    'Skip',
+  );
+  if (choice === 'Add to CLAUDE.md') {
+    writeDispatchPolicy(folder);
+  }
 }
 
 /** One-time-per-workspace offer to register the MCP server automatically. */
@@ -108,6 +148,7 @@ async function maybeOfferMcpRegistration(
     vscode.window.showInformationMessage(
       'Registered. Restart the Claude Code session here and approve the project MCP server.',
     );
+    await offerDispatchPolicy(folder);
   } else if (choice === 'Not in this workspace') {
     await context.workspaceState.update(dismissKey, true);
   }
@@ -122,11 +163,16 @@ export function activate(context: vscode.ExtensionContext): void {
   const workersProvider = new WorkersProvider(workers);
   const tasksProvider = new TasksProvider();
 
+  const tasksView = vscode.window.createTreeView('fableOrchestrator.tasks', {
+    treeDataProvider: tasksProvider,
+  });
+  tasksView.description = 'this workspace';
+
   context.subscriptions.push(
     tasksProvider,
     workersProvider,
+    tasksView,
     vscode.window.registerTreeDataProvider('fableOrchestrator.workers', workersProvider),
-    vscode.window.registerTreeDataProvider('fableOrchestrator.tasks', tasksProvider),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('fableOrchestrator')) {
         workers.syncSettings();
@@ -254,8 +300,9 @@ export function activate(context: vscode.ExtensionContext): void {
       registerMcp(folder, serverPath);
       vscode.window.showInformationMessage(
         `Registered "${MCP_SERVER_NAME}" in .mcp.json. Restart the Claude Code session in this workspace ` +
-          'and approve the project MCP server — dispatch_task / list_workers will then be available.',
+          'and approve the project MCP server — dispatch_tasks / dispatch_task / list_workers will then be available.',
       );
+      await offerDispatchPolicy(folder);
     }),
 
     vscode.commands.registerCommand('fableOrchestrator.showTaskOutput', async (outputFile: string) => {
@@ -270,6 +317,26 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('fableOrchestrator.clearTasks', () => {
       clearTaskLog();
       tasksProvider.refresh();
+    }),
+
+    vscode.commands.registerCommand('fableOrchestrator.toggleTaskScope', () => {
+      tasksProvider.scopeToWorkspace = !tasksProvider.scopeToWorkspace;
+      tasksView.description = tasksProvider.scopeToWorkspace ? 'this workspace' : 'all workspaces';
+      tasksProvider.refresh();
+    }),
+
+    vscode.commands.registerCommand('fableOrchestrator.openDashboard', () => openDashboard()),
+
+    vscode.commands.registerCommand('fableOrchestrator.addDispatchPolicy', () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      if (!folder) {
+        vscode.window.showErrorMessage('Open a workspace folder first.');
+        return;
+      }
+      writeDispatchPolicy(folder);
+      vscode.window.showInformationMessage(
+        'Dispatch policy written to CLAUDE.md (existing policy block updated in place).',
+      );
     }),
   );
 }

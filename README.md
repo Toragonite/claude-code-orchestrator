@@ -1,4 +1,6 @@
-# Fable Orchestrator
+# Claude Code Orchestrator
+
+> 비공식(unofficial) 확장입니다. 구 이름: Fable Orchestrator.
 
 **기존 Claude Code 익스텐션을 멀티 계정으로 확장**하는 VS Code 익스텐션입니다. 평소처럼 Claude Code 패널(메인 계정, Fable)에서 대화하고, 메인 세션이 MCP 도구로 **다른 Claude 계정들(워커)** 에게 작업을 병렬 분배합니다.
 
@@ -6,7 +8,7 @@
 Claude Code 패널 (메인 계정, Fable 5)          ← 평소처럼 사용
    │  MCP 도구: dispatch_task / list_workers
    ▼
-fable-dispatch MCP 서버 (.mcp.json에 등록)
+cco-dispatch MCP 서버 (.mcp.json에 등록)
    │  CLAUDE_CONFIG_DIR=<워커 dir> 로 Claude Code 실행 (같은 워크스페이스)
    ├────────────┬────────────┐
    ▼            ▼            ▼
@@ -19,11 +21,11 @@ fable-dispatch MCP 서버 (.mcp.json에 등록)
 ## 설정 순서
 
 1. `npm install && npm run compile`, F5로 익스텐션 실행 (또는 vsix 패키징 후 설치)
-2. 액티비티 바 **Fable Orchestrator** → **Add Worker Account**
+2. 액티비티 바 **Claude Code Orchestrator** → **Add Worker Account**
    - 이름 입력(예: `w1`) → 기본 모델 선택(`claude-opus-4-8` / `claude-sonnet-5`)
    - 열리는 터미널에서 해당 슬롯에 쓸 Claude 계정으로 **1회 로그인**
    - 이미 로그인해둔 `~/.claude-*` 디렉토리가 있다면 **Import Existing Claude Config Directories**로 한 번에 등록
-3. **Register Dispatch MCP Server in This Workspace** — 워크스페이스 루트 `.mcp.json`에 `fable-dispatch` 서버를 등록합니다
+3. **Register Dispatch MCP Server in This Workspace** — 워크스페이스 루트 `.mcp.json`에 `cco-dispatch` 서버를 등록합니다
 4. Claude Code 패널 세션을 재시작하고 프로젝트 MCP 서버를 승인 → 메인 세션에 `dispatch_task`, `list_workers` 도구가 생깁니다
 
 이후에는 그냥 Claude Code 패널에서 대화하면 됩니다. 큰 작업을 주면서 "독립적인 부분은 워커에게 병렬로 dispatch해서 진행해줘"라고 하면 메인(Fable)이 알아서 fan-out 합니다. `CLAUDE.md`에 디스패치 방침(언제/무엇을 위임할지)을 적어두면 더 일관되게 동작합니다.
@@ -37,7 +39,10 @@ fable-dispatch MCP 서버 (.mcp.json에 등록)
   - 백그라운드 워커는 권한 프롬프트에 답할 수 없으므로 기본 `--permission-mode acceptEdits`로 실행 (설정 가능; 셸 명령 실행이 필요한 태스크는 `bypassPermissions` 필요 — 보안 영향 이해하고 사용)
 - **쿼터 추적/자동 분산** — 워커별 누적 사용량(태스크 수, 토큰, 비용)을 CLI 결과에서 집계해 기록합니다. quota/rate-limit 에러가 감지되면 그 워커를 일정 시간 쿨다운시키고 **다른 워커로 자동 재시도**합니다. 워커가 하나뿐이면 재시도 없이 명확한 에러로 알려줍니다. `list_workers`로 워커별 사용량·쿨다운 상태를 조회할 수 있습니다.
 - **계정별 사용량 드롭다운** — Worker Accounts 뷰에서 워커를 펼치면 상태(가용/쿨다운), Claude 플랜 한도 윈도우에 맞춘 **Session(5h)/Weekly(7d) 디스패치 사용량**, 전체 누적, 에러가 행으로 표시됩니다. 이 수치는 이 익스텐션이 보낸 디스패치 기준이며, 계정의 실제 플랜 쿼터 %는 "Plan quota" 행을 클릭해 열리는 해당 계정 터미널에서 `/usage`로 확인합니다.
-- **Dispatched Tasks 뷰** — MCP 서버가 남기는 태스크 로그(`~/.fable-orchestrator/tasks.jsonl`)를 실시간 표시. 클릭하면 해당 태스크의 프롬프트/결과 마크다운이 열립니다.
+- **내장 워커 시스템 프롬프트** — 모든 디스패치에 서버가 고성능 자율 엔지니어 원칙(계약 준수, 완주, 근거 있는 보고, 스코프 절제, 결과 우선 보고)을 담은 기본 시스템 프롬프트를 자동으로 깔아줍니다. 태스크별 `system_prompt`는 그 뒤에 이어 붙습니다. 워커 모델(Opus/Sonnet)의 결과 품질을 프론티어 에이전트 스타일로 끌어올리는 장치입니다.
+- **CLAUDE.md 디스패치 정책 자동 추가** — MCP 등록 시(또는 "Add Dispatch Policy to CLAUDE.md" 커맨드로) 워크스페이스 CLAUDE.md에 정책 블록을 주입합니다. 핵심: **오케스트레이터는 구현하지 않는다** — 설계·계약·통합·검증만 직접 하고 코드/문서/테스트 작성은 전부 워커에 위임. 마커 주석으로 감싸 멱등 업데이트됩니다.
+- **Dispatched Tasks 뷰** — 태스크 로그를 실시간 표시하며 기본적으로 **현재 워크스페이스의 태스크만** 보여줍니다(디스패치가 실행된 cwd 기록 기반). 뷰 툴바의 필터 버튼으로 전체 워크스페이스 보기로 전환할 수 있습니다. 클릭하면 프롬프트/결과 마크다운이 열립니다.
+- **대시보드 탭** — "Open Orchestrator Dashboard" 커맨드(Tasks 뷰 툴바에도 있음)로 에디터 탭에 워커 사용량 테이블(5h/7d/전체) + 태스크 피드를 크게 볼 수 있습니다. 2초마다 자동 갱신.
 - **Open Interactive Worker Session** — 워커를 백그라운드가 아니라 **통합 터미널의 인터랙티브 Claude Code 세션**으로 띄웁니다(선택적으로 초기 태스크 주입). 눈으로 보면서 개입하고 싶은 작업용.
 
 ## 커맨드
@@ -46,9 +51,12 @@ fable-dispatch MCP 서버 (.mcp.json에 등록)
 |---|---|
 | Add Worker Account | 워커 생성 (config dir 생성 + 로그인 터미널) |
 | Import Existing Claude Config Directories | `~/.claude*` 디렉토리 스캔 후 일괄 등록 |
-| Register Dispatch MCP Server in This Workspace | `.mcp.json`에 fable-dispatch 등록 |
+| Register Dispatch MCP Server in This Workspace | `.mcp.json`에 cco-dispatch 등록 |
 | Open Worker Session in Terminal | 워커를 보이는 터미널 세션으로 실행 (항목의 인라인 터미널 버튼) |
 | Re-login Worker Account | 워커 계정 재로그인 (항목 우클릭) |
+| Open Orchestrator Dashboard | 에디터 탭 대시보드 (워커 사용량 + 태스크 피드) |
+| Toggle Task Scope | Tasks 뷰: 현재 워크스페이스 ↔ 전체 전환 |
+| Add Dispatch Policy to CLAUDE.md | 디스패치 정책 블록 주입/갱신 |
 | Remove Worker Account / Clear Task History | 정리 (항목 우클릭 / Tasks 뷰 버튼) |
 
 ## 설정
@@ -63,7 +71,7 @@ fable-dispatch MCP 서버 (.mcp.json에 등록)
 
 | 파일 | 역할 |
 |---|---|
-| `src/mcp/server.ts` | fable-dispatch MCP 서버 (stdio, 의존성 없음) — dispatch_task/list_workers, 워커 실행, 태스크 로그 |
+| `src/mcp/server.ts` | cco-dispatch MCP 서버 (stdio, 의존성 없음) — dispatch_task/list_workers, 워커 실행, 태스크 로그 |
 | `src/registry.ts` | 익스텐션 ↔ MCP 서버 공유 상태 (`~/.fable-orchestrator/`): 워커 목록, 설정, 태스크 로그 |
 | `src/workerManager.ts` | 워커 프로필 관리, config dir 탐색, 로그인/인터랙티브 터미널 |
 | `src/views.ts` | Worker Accounts / Dispatched Tasks 트리 뷰 |

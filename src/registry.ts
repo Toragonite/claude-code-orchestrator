@@ -59,6 +59,8 @@ export interface TaskEvent {
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /** Workspace the dispatch ran in (server cwd) — enables per-workspace views. */
+  cwd?: string;
 }
 
 export const ROOT_DIR = path.join(os.homedir(), '.fable-orchestrator');
@@ -115,6 +117,24 @@ export function clearTaskLog(): void {
   } catch {
     // nothing to clear
   }
+}
+
+/** Dispatch usage for one worker within a trailing time window. */
+export function windowUsage(worker: string, windowMs: number) {
+  const since = Date.now() - windowMs;
+  let tasks = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costUsd = 0;
+  for (const e of readTaskEvents()) {
+    if (e.worker === worker && e.status === 'done' && e.ts >= since) {
+      tasks++;
+      inputTokens += e.inputTokens ?? 0;
+      outputTokens += e.outputTokens ?? 0;
+      costUsd += e.costUsd ?? 0;
+    }
+  }
+  return { tasks, inputTokens, outputTokens, costUsd };
 }
 
 export function emptyStats(): WorkerStats {

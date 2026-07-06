@@ -14,6 +14,7 @@ import {
   WorkerProfile,
   writeStats,
 } from '../registry';
+import { WORKER_BASE_PROMPT } from '../prompts';
 
 /**
  * fable-dispatch — a minimal MCP stdio server the Claude Code panel connects
@@ -30,7 +31,7 @@ import {
  * implemented directly to keep the server dependency-free.
  */
 
-const SERVER_INFO = { name: 'fable-dispatch', version: '0.3.0' };
+const SERVER_INFO = { name: 'cco-dispatch', version: '0.4.0' };
 const WORKER_TIMEOUT_MS = 30 * 60 * 1000;
 
 let rrIndex = 0;
@@ -132,9 +133,10 @@ function runClaude(
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     let args = ['-p', '--output-format', 'json', '--model', model, '--permission-mode', registry.permissionMode];
-    if (systemPrompt) {
-      args.push('--append-system-prompt', systemPrompt);
-    }
+    // Every worker gets the base engineering prompt; task-specific guidance
+    // from the orchestrator (if any) is appended after it.
+    const combinedSystemPrompt = [WORKER_BASE_PROMPT, systemPrompt].filter(Boolean).join('\n\n---\n\n');
+    args.push('--append-system-prompt', combinedSystemPrompt);
     const useShell = process.platform === 'win32';
     if (useShell) {
       args = args.map((a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a));
@@ -225,7 +227,7 @@ async function dispatchTask(args: DispatchArgs): Promise<string> {
     attempted.add(worker.name);
     const model =
       args.model && (WORKER_MODELS as readonly string[]).includes(args.model) ? args.model : worker.model;
-    const base = { id, title, worker: worker.name, model, outputFile };
+    const base = { id, title, worker: worker.name, model, outputFile, cwd: process.cwd() };
     appendTaskEvent({ ...base, ts: Date.now(), status: 'running' });
 
     try {
@@ -276,6 +278,7 @@ async function dispatchTask(args: DispatchArgs): Promise<string> {
     worker: [...attempted].join(',') || (args.worker ?? '-'),
     model: args.model ?? '-',
     outputFile,
+    cwd: process.cwd(),
     ts: Date.now(),
     status: 'error',
     error: message,
