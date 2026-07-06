@@ -7,6 +7,7 @@ import {
   STATS_FILE,
   TaskEvent,
   TASKS_LOG_FILE,
+  windowUsage,
   WorkerProfile,
 } from './registry';
 
@@ -28,24 +29,6 @@ function isStatRow(node: WorkerNode): node is WorkerStatRow {
 
 function fmtTokens(n: number): string {
   return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
-}
-
-/** Dispatch usage for one worker within a trailing time window. */
-function windowUsage(worker: string, windowMs: number) {
-  const since = Date.now() - windowMs;
-  let tasks = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let costUsd = 0;
-  for (const e of readTaskEvents()) {
-    if (e.worker === worker && e.status === 'done' && e.ts >= since) {
-      tasks++;
-      inputTokens += e.inputTokens ?? 0;
-      outputTokens += e.outputTokens ?? 0;
-      costUsd += e.costUsd ?? 0;
-    }
-  }
-  return { tasks, inputTokens, outputTokens, costUsd };
 }
 
 /**
@@ -190,12 +173,15 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
 }
 
 /**
- * Tails ~/.fable-orchestrator/tasks.jsonl, which the MCP dispatch server
- * appends to as the main session fans tasks out.
+ * Tails the shared tasks.jsonl, which the MCP dispatch server appends to as
+ * the main session fans tasks out. Scoped to the current workspace by
+ * default (dispatches record their cwd); toggleable to show all workspaces.
  */
 export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode.Disposable {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+  /** true → only tasks dispatched from the current workspace. */
+  scopeToWorkspace = true;
 
   constructor() {
     fs.watchFile(TASKS_LOG_FILE, { interval: 1500 }, () => this._onDidChangeTreeData.fire());
@@ -234,6 +220,11 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
     for (const event of readTaskEvents()) {
       byId.set(event.id, event);
     }
-    return [...byId.values()].sort((a, b) => b.ts - a.ts);
+    let events = [...byId.values()];
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (this.scopeToWorkspace && root) {
+      events = events.filter((e) => e.cwd && (e.cwd === root || e.cwd.startsWith(root + '/')));
+    }
+    return events.sort((a, b) => b.ts - a.ts);
   }
 }
