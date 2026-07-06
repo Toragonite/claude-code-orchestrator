@@ -2,7 +2,35 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { readRegistry, writeRegistry, WorkerModel, WorkerProfile } from './registry';
+
+/**
+ * Resolve a bare command name to an absolute path via the user's login shell.
+ * The MCP server (and the workers it spawns) may run without the shell PATH
+ * that nvm/homebrew set up, so bare names can fail there.
+ */
+function resolveViaLoginShell(command: string): string {
+  if (process.platform === 'win32' || path.isAbsolute(command)) {
+    return command;
+  }
+  try {
+    const shell = process.env.SHELL || '/bin/sh';
+    const out = execFileSync(shell, ['-lc', `command -v ${command}`], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+      .trim()
+      .split('\n')
+      .pop();
+    if (out && fs.existsSync(out)) {
+      return out;
+    }
+  } catch {
+    // fall through
+  }
+  return command;
+}
 
 /**
  * Extension-side management of worker accounts. A worker account is simply a
@@ -58,7 +86,7 @@ export class WorkerManager {
     const cfg = vscode.workspace.getConfiguration('fableOrchestrator');
     const registry = readRegistry();
     registry.permissionMode = cfg.get<string>('workerPermissionMode', 'acceptEdits');
-    registry.claudePath = cfg.get<string>('claudePath', 'claude');
+    registry.claudePath = resolveViaLoginShell(cfg.get<string>('claudePath', 'claude'));
     writeRegistry(registry);
   }
 
