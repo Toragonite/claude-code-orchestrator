@@ -237,7 +237,14 @@ async function dispatchTask(args: DispatchArgs): Promise<string> {
           (run.costUsd ? ` (~$${run.costUsd.toFixed(4)})` : '') +
           `\n\n---\n\n## Prompt\n\n${prompt}\n\n## Result\n\n${run.text}\n`,
       );
-      appendTaskEvent({ ...base, ts: Date.now(), status: 'done' });
+      appendTaskEvent({
+        ...base,
+        ts: Date.now(),
+        status: 'done',
+        inputTokens: run.inputTokens,
+        outputTokens: run.outputTokens,
+        costUsd: run.costUsd,
+      });
       return `[worker: ${worker.name}, model: ${model}]\n\n${run.text}`;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
