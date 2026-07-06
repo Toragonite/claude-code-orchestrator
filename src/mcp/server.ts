@@ -368,7 +368,10 @@ const TASK_PROPERTIES = {
     type: 'string',
     enum: [...WORKER_MODELS],
     description:
-      "claude-opus-4-8 for hard reasoning/coding subtasks; claude-sonnet-5 for simpler or high-volume ones. Defaults to the worker's configured model.",
+      'claude-opus-4-8 for hard reasoning/coding subtasks; claude-sonnet-5 for simpler or ' +
+      'high-volume ones; claude-fable-5 ONLY for the highest-leverage dispatches — contract ' +
+      'design/consult and adversarial review — since it draws a scarce separate weekly quota ' +
+      "and requires the account to have Fable access. Defaults to the worker's configured model.",
   },
   worker: {
     type: 'string',

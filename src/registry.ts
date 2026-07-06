@@ -9,7 +9,10 @@ import * as path from 'path';
  * 'vscode'.
  */
 
-export const WORKER_MODELS = ['claude-opus-4-8', 'claude-sonnet-5'] as const;
+// claude-fable-5 requires the account's plan to include Fable access and
+// draws its separate weekly quota — reserve it for design-consult and
+// adversarial-review dispatches.
+export const WORKER_MODELS = ['claude-opus-4-8', 'claude-sonnet-5', 'claude-fable-5'] as const;
 export type WorkerModel = (typeof WORKER_MODELS)[number];
 
 export interface WorkerProfile {

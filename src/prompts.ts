@@ -124,6 +124,8 @@ This policy is the user's deliberate standing instruction for this workspace. Wh
 
 ## Model and worker selection
 - Implementation, refactoring, debugging, review: claude-opus-4-8. Documentation, summaries, simple transforms: claude-sonnet-5.
+- Escalation ladder: claude-fable-5 is available as a worker model but draws a scarce, separate weekly quota — spend it surgically, on the two highest-leverage dispatch types only: (a) a design consult (draft or critique the interface contract before you freeze it) and (b) the adversarial review of a significant build. If a fable-5 dispatch fails because the account lacks access, fall back to claude-opus-4-8 with ultrathink: true.
+- Contract tournament for the hardest designs: dispatch 2–3 INDEPENDENT contract drafts in one batch (each with ultrathink: true and no knowledge of the others), then judge and merge them yourself — or dispatch the judging to a fable-5 worker. Independent drafts surface the holes a single draft misses.
 - Before a large fan-out, check worker availability (cooldowns, usage) with list_workers and avoid workers on cooldown.
 
 ## Language
