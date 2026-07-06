@@ -31,7 +31,7 @@ export function openDashboard(): void {
     const workers = registry.workers.map((w) => {
       const s = stats[w.name];
       return {
-        name: w.name,
+        name: (w.preferred ? '★ ' : '') + w.name,
         model: w.model,
         coolingDown: (s?.cooldownUntil ?? 0) > now,
         cooldownUntil: s?.cooldownUntil,

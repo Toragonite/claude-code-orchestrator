@@ -69,8 +69,12 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     }
     const stats = readStats()[node.name];
     const coolingDown = (stats?.cooldownUntil ?? 0) > Date.now();
-    const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.Collapsed);
-    item.description = node.model + (coolingDown ? ' · ⏸ cooldown' : '');
+    const item = new vscode.TreeItem(
+      (node.preferred ? '★ ' : '') + node.name,
+      vscode.TreeItemCollapsibleState.Collapsed,
+    );
+    item.description =
+      node.model + (node.preferred ? ' · preferred' : '') + (coolingDown ? ' · ⏸ cooldown' : '');
     item.tooltip =
       `CLAUDE_CONFIG_DIR=${node.configDir}\n` +
       'Expand for per-account usage · terminal button opens a live session · right-click for re-login / remove';

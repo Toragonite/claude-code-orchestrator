@@ -10,6 +10,7 @@ import {
   readStats,
   recordOrchestrator,
   Registry,
+  runningCounts,
   TASKS_DIR,
   WORKER_MODELS,
   WorkerProfile,
@@ -93,6 +94,23 @@ function pickWorker(
           'Wait for the cooldown, add another worker account, or retry with an explicit "worker".'
         : 'No eligible worker available.',
     );
+  }
+  // Preferred worker (usually the main session's own account) wins when it
+  // isn't busier than the least-busy alternative — favored, never flooded.
+  const starred = eligible.find((w) => w.preferred);
+  if (starred) {
+    const others = eligible.filter((w) => !w.preferred);
+    if (others.length === 0) {
+      return starred;
+    }
+    const running = runningCounts();
+    const minOther = Math.min(...others.map((w) => running[w.name] ?? 0));
+    if ((running[starred.name] ?? 0) <= minOther) {
+      return starred;
+    }
+    const worker = others[rrIndex % others.length];
+    rrIndex++;
+    return worker;
   }
   const worker = eligible[rrIndex % eligible.length];
   rrIndex++;
@@ -316,7 +334,7 @@ function listWorkers(): string {
   return registry.workers
     .map((w) => {
       const s = stats[w.name];
-      let line = `- ${w.name}: default model ${w.model}`;
+      let line = `- ${w.name}${w.preferred ? ' ★preferred' : ''}: default model ${w.model}`;
       if (s && s.tasks + s.errors > 0) {
         line += ` — ${s.tasks} tasks done, ${s.errors} errors, ${s.inputTokens} in / ${s.outputTokens} out tokens`;
         if (s.costUsd) {

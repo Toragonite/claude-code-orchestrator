@@ -268,6 +268,19 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
+    vscode.commands.registerCommand('fableOrchestrator.togglePreferred', async (item?: { id?: string }) => {
+      const worker = await resolveWorker(workers, item);
+      if (!worker) {
+        return;
+      }
+      const enabled = workers.togglePreferred(worker.name);
+      vscode.window.showInformationMessage(
+        enabled
+          ? `"${worker.name}" is now the preferred worker — automatic assignment favors it unless it's busier than the alternatives.`
+          : `"${worker.name}" is no longer preferred.`,
+      );
+    }),
+
     vscode.commands.registerCommand('fableOrchestrator.loginWorker', async (item?: { id?: string }) => {
       const worker = await resolveWorker(workers, item);
       if (worker) {
