@@ -44,6 +44,8 @@ interface DispatchArgs {
   model?: string;
   worker?: string;
   system_prompt?: string;
+  /** Escalate the worker to maximum reasoning depth via the thinking keyword. */
+  ultrathink?: boolean;
 }
 
 interface BatchArgs {
@@ -249,12 +251,17 @@ async function dispatchTask(args: DispatchArgs): Promise<string> {
     const base = { id, title, worker: worker.name, model, outputFile, cwd: process.cwd() };
     appendTaskEvent({ ...base, ts: Date.now(), status: 'running' });
 
+    // The harness scans the user message for thinking keywords; for a
+    // headless worker the dispatched prompt IS the user message, so
+    // appending the keyword mechanically raises its reasoning budget.
+    const workerPrompt = args.ultrathink ? `${prompt}\n\nultrathink` : prompt;
+
     try {
-      const run = await runClaude(registry, worker.configDir, model, prompt, args.system_prompt?.trim() || undefined);
+      const run = await runClaude(registry, worker.configDir, model, workerPrompt, args.system_prompt?.trim() || undefined);
       recordSuccess(worker.name, run);
       fs.writeFileSync(
         outputFile,
-        `# ${title}\n\n- worker: ${worker.name}\n- model: ${model}\n- tokens: ${run.inputTokens} in / ${run.outputTokens} out` +
+        `# ${title}\n\n- worker: ${worker.name}\n- model: ${model}${args.ultrathink ? '\n- ultrathink: true' : ''}\n- tokens: ${run.inputTokens} in / ${run.outputTokens} out` +
           (run.costUsd ? ` (~$${run.costUsd.toFixed(4)})` : '') +
           `\n\n---\n\n## Prompt\n\n${prompt}\n\n## Result\n\n${run.text}\n`,
       );
@@ -374,6 +381,13 @@ const TASK_PROPERTIES = {
       'Optional system prompt appended to the worker session. Use it to give the worker a role, ' +
       'quality bar, constraints, and output format — a well-crafted system prompt here substantially ' +
       'improves worker output on complex tasks.',
+  },
+  ultrathink: {
+    type: 'boolean',
+    description:
+      'Escalate this worker to its maximum reasoning depth. Set true for contract-critical ' +
+      'implementation, subtle debugging, and adversarial reviews; leave unset for routine tasks ' +
+      '(it spends substantially more thinking tokens).',
   },
 };
 
