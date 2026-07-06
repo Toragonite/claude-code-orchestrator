@@ -124,6 +124,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     tasksProvider,
+    workersProvider,
     vscode.window.registerTreeDataProvider('fableOrchestrator.workers', workersProvider),
     vscode.window.registerTreeDataProvider('fableOrchestrator.tasks', tasksProvider),
     vscode.workspace.onDidChangeConfiguration((e) => {

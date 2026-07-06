@@ -30,9 +30,12 @@ fable-dispatch MCP 서버 (.mcp.json에 등록)
 
 ## 동작 방식
 
-- **dispatch_task** — 메인 세션이 호출하면 MCP 서버가 워커의 `CLAUDE_CONFIG_DIR`로 Claude Code를 백그라운드 실행합니다(같은 워크스페이스 cwd, 파일/셸 접근 가능). 결과 텍스트가 도구 응답으로 메인 대화에 돌아옵니다. 한 턴에 여러 번 호출하면 병렬 실행됩니다.
-  - 워커 미지정 시 라운드로빈 배정, `model` 미지정 시 워커의 기본 모델 사용
-  - 백그라운드 워커는 권한 프롬프트에 답할 수 없으므로 기본 `--permission-mode acceptEdits`로 실행 (설정 가능)
+- **dispatch_tasks (병렬 배치, 권장)** — 여러 개의 독립 태스크를 한 번의 호출로 넘기면 서버가 워커들에 걸쳐 **진짜 병렬로** 실행하고 결과를 모아 반환합니다. 메인 모델이 도구를 순차 호출해도 병렬성이 보장됩니다.
+- **dispatch_task (단건)** — 태스크 하나를 워커에 실행. 워커의 `CLAUDE_CONFIG_DIR`로 Claude Code를 백그라운드 실행합니다(같은 워크스페이스 cwd, 파일/셸 접근 가능).
+  - `system_prompt` 파라미터로 메인 세션(Fable)이 워커에게 역할·품질 기준·출력 형식 시스템 프롬프트를 직접 내려보낼 수 있습니다 (`--append-system-prompt`로 전달) — 복잡한 작업 품질에 큰 차이를 만듭니다
+  - 워커 미지정 시 **쿼터 인지 라운드로빈** 배정, `model` 미지정 시 워커의 기본 모델 사용
+  - 백그라운드 워커는 권한 프롬프트에 답할 수 없으므로 기본 `--permission-mode acceptEdits`로 실행 (설정 가능; 셸 명령 실행이 필요한 태스크는 `bypassPermissions` 필요 — 보안 영향 이해하고 사용)
+- **쿼터 추적/자동 분산** — 워커별 누적 사용량(태스크 수, 토큰, 비용)을 CLI 결과에서 집계해 기록합니다. quota/rate-limit 에러가 감지되면 그 워커를 일정 시간 쿨다운시키고 **다른 워커로 자동 재시도**합니다. 워커가 하나뿐이면 재시도 없이 명확한 에러로 알려줍니다. `list_workers`로 워커별 사용량·쿨다운 상태를 조회할 수 있고, Worker Accounts 뷰에도 표시됩니다.
 - **Dispatched Tasks 뷰** — MCP 서버가 남기는 태스크 로그(`~/.fable-orchestrator/tasks.jsonl`)를 실시간 표시. 클릭하면 해당 태스크의 프롬프트/결과 마크다운이 열립니다.
 - **Open Interactive Worker Session** — 워커를 백그라운드가 아니라 **통합 터미널의 인터랙티브 Claude Code 세션**으로 띄웁니다(선택적으로 초기 태스크 주입). 눈으로 보면서 개입하고 싶은 작업용.
 
@@ -43,9 +46,9 @@ fable-dispatch MCP 서버 (.mcp.json에 등록)
 | Add Worker Account | 워커 생성 (config dir 생성 + 로그인 터미널) |
 | Import Existing Claude Config Directories | `~/.claude*` 디렉토리 스캔 후 일괄 등록 |
 | Register Dispatch MCP Server in This Workspace | `.mcp.json`에 fable-dispatch 등록 |
-| Open Interactive Worker Session (Terminal) | 워커를 보이는 터미널 세션으로 실행 |
-| Open Login Terminal for Worker | 워커 계정 재로그인 |
-| Remove Worker Account / Clear Task History | 정리 |
+| Open Worker Session in Terminal | 워커를 보이는 터미널 세션으로 실행 (항목의 인라인 터미널 버튼) |
+| Re-login Worker Account | 워커 계정 재로그인 (항목 우클릭) |
+| Remove Worker Account / Clear Task History | 정리 (항목 우클릭 / Tasks 뷰 버튼) |
 
 ## 설정
 
@@ -53,6 +56,7 @@ fable-dispatch MCP 서버 (.mcp.json에 등록)
 |---|---|---|
 | `fableOrchestrator.workerPermissionMode` | `acceptEdits` | 백그라운드 워커의 `--permission-mode` (`default`는 편집 승인 대기로 멈추므로 비추천) |
 | `fableOrchestrator.claudePath` | `claude` | Claude Code CLI 경로 |
+| `fableOrchestrator.quotaCooldownMinutes` | `30` | 쿼터 에러 후 해당 워커를 배정에서 제외하는 시간(분) |
 
 ## 코드 구조
 

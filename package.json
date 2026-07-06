@@ -2,7 +2,7 @@
   "name": "fable-orchestrator",
   "displayName": "Fable Orchestrator",
   "description": "Multi-account dispatch for the Claude Code extension: your main session (Fable) fans tasks out to worker Claude accounts running Opus/Sonnet via an MCP dispatch tool.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -74,13 +74,13 @@
       },
       {
         "command": "fableOrchestrator.loginWorker",
-        "title": "Open Login Terminal for Worker",
+        "title": "Re-login Worker Account (opens terminal to sign in)",
         "category": "Fable Orchestrator",
         "icon": "$(sign-in)"
       },
       {
         "command": "fableOrchestrator.openWorkerSession",
-        "title": "Open Interactive Worker Session (Terminal)",
+        "title": "Open Worker Session in Terminal (watch & steer this account)",
         "category": "Fable Orchestrator",
         "icon": "$(terminal)"
       },
@@ -129,17 +129,17 @@
         {
           "command": "fableOrchestrator.openWorkerSession",
           "when": "view == fableOrchestrator.workers && viewItem == worker",
-          "group": "inline@1"
+          "group": "inline"
         },
         {
           "command": "fableOrchestrator.loginWorker",
           "when": "view == fableOrchestrator.workers && viewItem == worker",
-          "group": "inline@2"
+          "group": "1_manage@1"
         },
         {
           "command": "fableOrchestrator.removeWorker",
           "when": "view == fableOrchestrator.workers && viewItem == worker",
-          "group": "inline@3"
+          "group": "1_manage@2"
         }
       ]
     },
@@ -201,6 +201,11 @@
           "type": "string",
           "default": "claude",
           "description": "Path to the Claude Code CLI executable."
+        },
+        "fableOrchestrator.quotaCooldownMinutes": {
+          "type": "number",
+          "default": 30,
+          "description": "Minutes a worker account sits out after a quota/rate-limit error before dispatches are routed to it again."
         }
       }
     }
