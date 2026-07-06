@@ -206,7 +206,8 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && npm run bundle-server",
+    "bundle-server": "esbuild src/mcp/server.ts --bundle --platform=node --target=node18 --outfile=out/mcp/server.js",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package",
@@ -216,6 +217,7 @@
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.6.0"
   }
 }
