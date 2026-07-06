@@ -1,0 +1,148 @@
+{
+  "name": "fable-orchestrator",
+  "displayName": "Fable Orchestrator",
+  "description": "Multi-account Claude orchestration: a main Fable 5 account plans and dispatches tasks to worker accounts running Opus/Sonnet.",
+  "version": "0.1.0",
+  "publisher": "toragonite",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "fableOrchestrator",
+          "title": "Fable Orchestrator",
+          "icon": "$(organization)"
+        }
+      ]
+    },
+    "views": {
+      "fableOrchestrator": [
+        {
+          "id": "fableOrchestrator.accounts",
+          "name": "Accounts",
+          "icon": "$(account)"
+        },
+        {
+          "id": "fableOrchestrator.tasks",
+          "name": "Tasks",
+          "icon": "$(checklist)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "fableOrchestrator.addAccount",
+        "title": "Add Account",
+        "category": "Fable Orchestrator",
+        "icon": "$(add)"
+      },
+      {
+        "command": "fableOrchestrator.removeAccount",
+        "title": "Remove Account",
+        "category": "Fable Orchestrator",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "fableOrchestrator.runTask",
+        "title": "Run Orchestrated Task (Fable plans, workers execute)",
+        "category": "Fable Orchestrator",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "fableOrchestrator.dispatchDirect",
+        "title": "Dispatch Task Directly to a Worker",
+        "category": "Fable Orchestrator",
+        "icon": "$(send)"
+      },
+      {
+        "command": "fableOrchestrator.showTaskOutput",
+        "title": "Show Task Output",
+        "category": "Fable Orchestrator"
+      },
+      {
+        "command": "fableOrchestrator.clearTasks",
+        "title": "Clear Finished Tasks",
+        "category": "Fable Orchestrator",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "fableOrchestrator.addAccount",
+          "when": "view == fableOrchestrator.accounts",
+          "group": "navigation"
+        },
+        {
+          "command": "fableOrchestrator.runTask",
+          "when": "view == fableOrchestrator.tasks",
+          "group": "navigation"
+        },
+        {
+          "command": "fableOrchestrator.clearTasks",
+          "when": "view == fableOrchestrator.tasks",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "fableOrchestrator.removeAccount",
+          "when": "view == fableOrchestrator.accounts && viewItem =~ /account/",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Fable Orchestrator",
+      "properties": {
+        "fableOrchestrator.mainModel": {
+          "type": "string",
+          "default": "claude-fable-5",
+          "description": "Model used by the main (orchestrator) account."
+        },
+        "fableOrchestrator.defaultWorkerModel": {
+          "type": "string",
+          "default": "claude-opus-4-8",
+          "enum": [
+            "claude-opus-4-8",
+            "claude-sonnet-5"
+          ],
+          "description": "Default model for worker accounts when the orchestrator does not specify one."
+        },
+        "fableOrchestrator.maxOutputTokens": {
+          "type": "number",
+          "default": 64000,
+          "description": "max_tokens for streamed requests (orchestrator and workers)."
+        },
+        "fableOrchestrator.enableRefusalFallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "On a Fable 5 safety refusal, transparently re-serve the request with Claude Opus 4.8 via the server-side fallbacks beta."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.0"
+  }
+}
