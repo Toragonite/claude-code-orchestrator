@@ -59,6 +59,12 @@
         "icon": "$(sign-in)"
       },
       {
+        "command": "fableOrchestrator.importLogins",
+        "title": "Import Stored Logins (Claude Code / ant profiles)",
+        "category": "Fable Orchestrator",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "fableOrchestrator.runTask",
         "title": "Run Orchestrated Task (Fable plans, workers execute)",
         "category": "Fable Orchestrator",
@@ -86,6 +92,11 @@
       "view/title": [
         {
           "command": "fableOrchestrator.addAccount",
+          "when": "view == fableOrchestrator.accounts",
+          "group": "navigation"
+        },
+        {
+          "command": "fableOrchestrator.importLogins",
           "when": "view == fableOrchestrator.accounts",
           "group": "navigation"
         },

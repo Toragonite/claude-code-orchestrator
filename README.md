@@ -13,7 +13,18 @@ Claude Code와 동일한 claude.ai OAuth(authorization code + PKCE) 플로우를
 2. 콜백 페이지에 표시되는 코드(`code#state` 형태)를 VS Code 입력창에 붙여넣기
 3. 액세스/리프레시 토큰 쌍이 VS Code Secret Storage에 저장되고, 만료 임박 시 리프레시 토큰으로 자동 갱신
 
-계정별로 다른 Claude 계정으로 로그인하면 되므로 계정 수 제한 없이 추가할 수 있습니다. 리프레시 토큰까지 만료되면 **Re-authenticate Account** 커맨드로 다시 로그인하면 됩니다. (Console API 키를 쓰고 싶은 계정은 추가 시 "Anthropic API key"를 선택할 수도 있습니다.)
+계정별로 다른 Claude 계정으로 로그인하면 되므로 계정 수 제한 없이 추가할 수 있습니다. **로그인은 최초 등록 때 1회뿐**이고 이후에는 저장된 토큰이 계속 재사용됩니다. 리프레시 토큰까지 만료되면 **Re-authenticate Account** 커맨드로 다시 로그인하면 됩니다. (Console API 키를 쓰고 싶은 계정은 추가 시 "Anthropic API key"를 선택할 수도 있습니다.)
+
+### 저장된 로그인 가져오기
+
+이미 다른 도구로 로그인해둔 계정이 있다면 브라우저 로그인 없이 **Import Stored Logins** 커맨드로 바로 가져올 수 있습니다. 스캔 대상:
+
+- **Claude Code** — `~/.claude/.credentials.json`, `$CLAUDE_CONFIG_DIR`, 그리고 멀티 계정 용도로 흔히 쓰는 `~/.claude-*` 디렉토리들
+- **ant CLI 프로필** — `ant auth login --profile <이름>`으로 만든 `~/.config/anthropic/credentials/*.json`
+
+발견된 로그인 중 원하는 것들을 골라 각각 Main / Worker(opus) / Worker(sonnet) 역할을 지정하면 됩니다. 즉, 미리 `ant auth login --profile w1`, `--profile w2` ... 식으로 여러 계정을 로그인해두고 한 번에 임포트하는 흐름이 가능합니다.
+
+주의: 토큰은 Secret Storage로 **복사**되며, 이후 익스텐션이 자체적으로 토큰을 갱신하면 원본 도구(Claude Code 등)의 토큰과 갈라져 원본 쪽에서 재로그인이 필요해질 수 있습니다. macOS에서는 Claude Code가 토큰을 Keychain에 보관하는 경우 파일 스캔으로 발견되지 않으니 브라우저 로그인을 사용하세요.
 
 > 참고: 구독(OAuth) 토큰은 요청에 `anthropic-beta: oauth-2025-04-20` 헤더와 Claude Code 아이덴티티 시스템 블록이 필요하며, 익스텐션이 자동으로 처리합니다. 구독 계정의 사용량 한도는 각 계정의 플랜을 따릅니다.
 
@@ -69,6 +80,7 @@ Claude Code와 동일한 claude.ai OAuth(authorization code + PKCE) 플로우를
 | 파일 | 역할 |
 |---|---|
 | `src/oauth.ts` | claude.ai OAuth (PKCE) — 로그인 URL, 코드 교환, 토큰 리프레시 |
+| `src/importers.ts` | 로컬에 저장된 로그인 발견 (Claude Code / ant 프로필) |
 | `src/accounts.ts` | 계정 관리 (메타데이터: globalState, 토큰/키: SecretStorage, 자동 리프레시) |
 | `src/orchestrator.ts` | Fable 5 에이전틱 루프 + `dispatch_task` 도구 정의 |
 | `src/workers.ts` | 워커 풀 — 라운드로빈 배정, Opus/Sonnet 스트리밍 실행 |

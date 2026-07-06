@@ -7,6 +7,7 @@ import { AccountsProvider, TasksProvider, TaskDocumentProvider } from './views';
 import { config, WORKER_MODELS, WorkerModel } from './models';
 import { Credentials } from './accounts';
 import { authorizeUrl, exchangeCode, generatePkce } from './oauth';
+import { discoverStoredLogins } from './importers';
 
 /**
  * Browser sign-in for one Claude account: open the authorize URL, then accept
@@ -132,6 +133,78 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Account "${name.trim()}" added.`);
       } catch (err) {
         vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      }
+    }),
+
+    vscode.commands.registerCommand('fableOrchestrator.importLogins', async () => {
+      const logins = discoverStoredLogins();
+      if (logins.length === 0) {
+        vscode.window.showInformationMessage(
+          'No stored Claude logins found on this machine. Looked for Claude Code credentials ' +
+            '(~/.claude*/.credentials.json, $CLAUDE_CONFIG_DIR) and ant CLI profiles ' +
+            '(~/.config/anthropic/credentials). On macOS, Claude Code may store tokens in the ' +
+            'Keychain instead — use "Add Account" to sign in via the browser.',
+        );
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(
+        logins.map((l) => ({ label: l.label, description: l.source, login: l })),
+        { placeHolder: 'Stored logins to import as accounts', canPickMany: true },
+      );
+      if (!picked || picked.length === 0) {
+        return;
+      }
+
+      const usedNames = new Set(accounts.list().map((a) => a.name));
+      const uniqueName = (base: string) => {
+        let name = base;
+        for (let i = 2; usedNames.has(name); i++) {
+          name = `${base}-${i}`;
+        }
+        usedNames.add(name);
+        return name;
+      };
+
+      let imported = 0;
+      for (const { login } of picked) {
+        const roleOptions: { label: string; description?: string; value: 'main' | WorkerModel | 'skip' }[] = [];
+        if (!accounts.main()) {
+          roleOptions.push({ label: 'Main (Fable orchestrator)', value: 'main' });
+        }
+        roleOptions.push(
+          { label: 'Worker — claude-opus-4-8', value: 'claude-opus-4-8' },
+          { label: 'Worker — claude-sonnet-5', value: 'claude-sonnet-5' },
+          { label: 'Skip this login', value: 'skip' },
+        );
+        const assignment = await vscode.window.showQuickPick(roleOptions, {
+          placeHolder: `Role for "${login.label}"`,
+          ignoreFocusOut: true,
+        });
+        if (!assignment || assignment.value === 'skip') {
+          continue;
+        }
+        const base = login.label
+          .replace(/[^\w~./ -]+/g, '')
+          .replace(/\s+/g, '-')
+          .toLowerCase();
+        try {
+          if (assignment.value === 'main') {
+            await accounts.add(uniqueName(base), 'main', login.tokens);
+          } else {
+            await accounts.add(uniqueName(base), 'worker', login.tokens, assignment.value);
+          }
+          imported++;
+        } catch (err) {
+          vscode.window.showErrorMessage(
+            `Failed to import "${login.label}": ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+      if (imported > 0) {
+        vscode.window.showInformationMessage(
+          `Imported ${imported} account(s). Tokens were copied into Secret Storage — after the ` +
+            'extension refreshes them, the original tool may need to sign in again.',
+        );
       }
     }),
 
