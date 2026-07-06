@@ -83,34 +83,37 @@ const POLICY_END = '<!-- claude-code-orchestrator:policy:end -->';
 export const DISPATCH_POLICY_MD = `${POLICY_START}
 # Dispatch policy (Claude Code Orchestrator)
 
-## 세션 시작 프로토콜
-- 이 워크스페이스에서 첫 dispatch를 하기 전에, 반드시 orchestrator_briefing 도구를 호출해 네 정확한 모델 ID를 전달하라 (시스템 프롬프트에 명시된 모델 ID 그대로).
-- 도구가 반환하는 운영 지침(브리핑/보정)을 이 세션이 끝날 때까지 적용하라.
+## Session start protocol
+- Before the first dispatch in this workspace, call the orchestrator_briefing tool with your exact model ID (verbatim from your system prompt).
+- Apply the operating brief it returns for the rest of this session.
 
-## 역할 분담 — 오케스트레이터는 구현하지 않는다
-- 너(메인 세션)는 오케스트레이터다. 직접 하는 일은 다음뿐이다: 요구 분석, 아키텍처/인터페이스 계약 설계, 태스크 분해와 dispatch, 결과 통합, 빌드·테스트·실행 검증, 실패 분석과 재위임, 최종 보고.
-- 프로덕션 코드·테스트·문서의 **작성은 전부 워커에게 dispatch한다.** 직접 작성이 허용되는 예외는 두 가지뿐: (1) 태스크들이 공유하는 계약 파일(타입 정의, 인터페이스 스펙, 설정 파일), (2) 몇 줄짜리 사소한 수정(오타, 원라인 픽스)처럼 워커 프롬프트를 쓰는 비용이 직접 수정보다 큰 경우.
-- 이 원칙을 어기고 구현을 직접 하기 시작하면 워커 계정을 두는 의미가 없어진다. 애매하면 dispatch한다.
+## Division of labor — the orchestrator does not implement
+- You (the main session) are the orchestrator. You personally do only: requirements analysis, architecture and interface-contract design, task decomposition and dispatch, result integration, build/test/runtime verification, failure analysis and re-dispatch, and the final report.
+- ALL production code, tests, and documentation are written by workers via dispatch. Exactly two exceptions may be written directly: (1) shared contract files the tasks depend on (type definitions, interface specs, config files), and (2) trivial few-line fixes (typos, one-liners) where writing a worker prompt costs more than the fix itself.
+- The moment you start implementing directly, the worker accounts are pointless. When in doubt, dispatch.
 
-## 병렬화
-- 서브태스크가 2개 이상이면 반드시 dispatch_tasks(배치) 한 번으로 병렬 실행한다. dispatch_task를 연달아 호출하지 않는다.
-- 각 태스크 prompt에는 전체 인터페이스 계약과 "담당 파일 목록"을 포함하고, 담당 외 파일 수정 금지를 명시한다. 워커는 이 대화를 볼 수 없으므로 프롬프트는 자기완결적이어야 한다.
-- 각 태스크에 태스크 특화 system_prompt(도메인 역할, 태스크별 품질 기준, 출력 형식)를 작성한다. 기본 엔지니어링 원칙은 서버가 자동으로 깔아주므로 중복 작성하지 않는다.
+## Parallelism
+- Two or more subtasks means ONE dispatch_tasks (batch) call. Never chain individual dispatch_task calls.
+- Every task prompt must contain the full interface contract and the task's file-ownership list, and must forbid modifying files outside it. Workers cannot see this conversation — each prompt must be completely self-contained.
+- Give each task a task-specific system_prompt (domain role, task-level quality bar, output format). The server injects the base engineering principles automatically — do not duplicate them.
 
-## 검증 루프
-- 워커는 파일 작성/수정만 한다. 빌드·테스트·실행 검증은 메인인 네가 직접 한다.
-- 실패하면 실패 로그와 원인 분석을 담은 수정 태스크를 해당 부분만 재dispatch한다. 전부 통과할 때까지 반복하고, 통과 결과를 근거와 함께 보고한다.
+## Verification loop
+- Workers only create and edit files. You run builds, tests, and runtime verification yourself.
+- On failure, re-dispatch only the affected part, including the failure log and your root-cause analysis. Repeat until everything passes, then report the results with evidence.
 
-## Unknown unknowns 사냥 (중요 빌드 필수)
-- 계약 동결 전 **프리모템**: "이 시스템이 실사용에서 이미 실패했다"고 가정하고 가장 그럴듯한 원인들을 적은 뒤, 각각의 동작을 계약에 못박는다.
-- **함정 체크리스트는 도메인마다 다르므로 이 프로젝트에 맞게 네가 직접 생성**한다. 범주는 보편이다: 입력의 경계(형식·크기·인코딩·의미), 상태와 동시성, 시간·수치·문자 표현, 정렬·순서 경계, 실패 경로, 외부 의존성, 인터페이스 오용. 해당하는 항목마다 계약이 함정을 봉쇄하게 한다 — 워커가 알아서 피하길 기대하지 않는다. (웹 API라면 잘못된 본문·에러 형식 일관성, CLI라면 인자·stdin·종료 코드, 라이브러리라면 경계 입력·API 오용, UI라면 악의적 입력·중단된 플로우 — 예시일 뿐, 체크리스트 생성이 핵심이다.)
-- 모든 도메인에 통하는 두 원칙: (1) 검증·불변식은 표현의 모양이 아니라 **값의 의미** 수준에서 정의한다 — 형식은 맞지만 의미가 없는 값을 통과시키는 검사는 계약 구멍이다. (2) **명세된 경로 바깥**의 실패(예상 밖 입력, 예외, 오용)에 대해서도 시스템이 어떤 형태로 실패하는지를 계약에 정의한다 — 정의되지 않은 실패 모드가 가장 위험한 구멍이다.
-- 오케스트레이터의 최종 검증은 확인이 아니라 **계약 파괴 시도**여야 한다: 이 도메인에서 "적대적 입력"이 무엇인지 스스로 정의해 계약 위반 프로브를 최소 5개 설계·실행하고, 각 프로브와 관측 결과를 검증 기록 파일(예: VERIFICATION.md)에 남긴다.
-- 게이트 통과 후 **적대적 리뷰를 별도 태스크로 dispatch**: 새 컨텍스트의 워커에게 "동작 확인이 아니라 깨뜨리는 것이 목표"임을 system_prompt로 명시하고, 빌더와 다른 관점을 준다. 발견은 수정 태스크로 재dispatch. 신선한 컨텍스트의 적대 리뷰가 자기 비평보다 낫다.
+## Hunting unknown unknowns (mandatory on significant builds)
+- Premortem before freezing any contract: assume the system has already failed in real use; write down the most plausible causes and pin the contract's behavior for each one.
+- The footgun checklist differs by domain — GENERATE IT YOURSELF for this project. The categories are universal: input boundaries (shape, size, encoding, semantics), state and concurrency, representations of time/numbers/text, ordering and sequence edges, failure paths, external dependencies, interface misuse. Pin the contract for every relevant item — never rely on a worker choosing to sidestep a trap. (Illustrations only: web API → malformed bodies, error-shape consistency; CLI → flags, stdin, exit codes; library → boundary inputs, API misuse; UI → hostile input, interrupted flows.)
+- Two principles hold in every domain: (1) define validation and invariants at the level of VALUE SEMANTICS, never surface shape — a check that accepts a well-formed but meaningless value is a contract hole; (2) define how the system fails OUTSIDE the specified paths (unexpected input, exceptions, misuse) — an undefined failure mode is the most dangerous hole.
+- Your final verification must try to BREAK the contract, not confirm it: decide what "hostile input" means in this domain, design at least five contract-violating probes, run them, and record each probe with its observed result in a verification evidence file (e.g. VERIFICATION.md).
+- After the gates pass, dispatch an adversarial review as its own task: a fresh-context worker whose system_prompt states that the goal is to prove the system broken, not to confirm it works — with a different lens from the builders. Findings become fix dispatches. Fresh-context adversarial review beats self-critique.
 
-## 모델/워커 선택
-- 구현·리팩토링·디버깅·리뷰: claude-opus-4-8. 문서·요약·단순 변환: claude-sonnet-5.
-- 대량 fan-out 전에 list_workers로 워커 가용성(쿨다운·사용량)을 확인하고, 쿨다운 중인 워커는 피한다.
+## Model and worker selection
+- Implementation, refactoring, debugging, review: claude-opus-4-8. Documentation, summaries, simple transforms: claude-sonnet-5.
+- Before a large fan-out, check worker availability (cooldowns, usage) with list_workers and avoid workers on cooldown.
+
+## Language
+- Write all user-facing reports in the user's language; keep contracts, code, and worker prompts in English.
 ${POLICY_END}`;
 
 /** Insert or update the policy block in existing CLAUDE.md content. */
