@@ -71,6 +71,23 @@ export class WorkerManager {
     this._onDidChange.fire();
   }
 
+  /** Mark one worker as preferred (clears the flag on all others). */
+  togglePreferred(name: string): boolean {
+    const registry = readRegistry();
+    const target = registry.workers.find((w) => w.name === name);
+    if (!target) {
+      return false;
+    }
+    const enabling = !target.preferred;
+    for (const w of registry.workers) {
+      w.preferred = false;
+    }
+    target.preferred = enabling;
+    writeRegistry(registry);
+    this._onDidChange.fire();
+    return enabling;
+  }
+
   setModel(name: string, model: WorkerModel): void {
     const registry = readRegistry();
     const worker = registry.workers.find((w) => w.name === name);

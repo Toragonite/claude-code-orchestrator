@@ -18,6 +18,12 @@ export interface WorkerProfile {
   configDir: string;
   /** Default model when a dispatch doesn't specify one. */
   model: WorkerModel;
+  /**
+   * Preferred worker (typically the same account as the main session): wins
+   * automatic assignment whenever it isn't busier than the least-busy
+   * alternative, so it's favored without being flooded.
+   */
+  preferred?: boolean;
 }
 
 export interface Registry {
@@ -141,6 +147,21 @@ export function clearTaskLog(): void {
   } catch {
     // nothing to clear
   }
+}
+
+/** Currently-running dispatch count per worker (latest event per task id). */
+export function runningCounts(): Record<string, number> {
+  const latest = new Map<string, TaskEvent>();
+  for (const e of readTaskEvents()) {
+    latest.set(e.id, e);
+  }
+  const counts: Record<string, number> = {};
+  for (const e of latest.values()) {
+    if (e.status === 'running') {
+      counts[e.worker] = (counts[e.worker] ?? 0) + 1;
+    }
+  }
+  return counts;
 }
 
 /** Dispatch usage for one worker within a trailing time window. */
