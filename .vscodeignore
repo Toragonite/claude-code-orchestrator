@@ -5,3 +5,4 @@ out/**/*.map
 tsconfig.json
 .gitignore
 *.vsix
+package-lock.json
