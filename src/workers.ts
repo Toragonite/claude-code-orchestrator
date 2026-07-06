@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Account, AccountManager } from './accounts';
 import { config, WorkerModel, WORKER_MODELS } from './models';
+import { CLAUDE_CODE_IDENTITY } from './oauth';
 
 export interface WorkerResult {
   account: Account;
@@ -49,10 +50,17 @@ export class WorkerPool {
     onText?: (chunk: string) => void,
   ): Promise<WorkerResult> {
     const client = await this.accounts.client(account);
+    // Subscription OAuth tokens require the Claude Code identity as the first
+    // system block; harmless to include, but only add it where required.
+    const system =
+      account.auth === 'oauth'
+        ? [{ type: 'text' as const, text: CLAUDE_CODE_IDENTITY }]
+        : undefined;
     const stream = client.messages.stream({
       model,
       max_tokens: config().maxOutputTokens,
       thinking: { type: 'adaptive' },
+      ...(system ? { system } : {}),
       messages: [{ role: 'user', content: prompt }],
     });
     if (onText) {
