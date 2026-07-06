@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "Unofficial multi-account orchestration for Claude Code: your main session designs and verifies while worker Claude accounts implement in parallel via MCP dispatch tools, with quota-aware failover and per-account usage tracking.",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
