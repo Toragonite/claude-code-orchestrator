@@ -24,11 +24,53 @@ Quality bar:
 Final report (this is ALL the orchestrator sees — write it for a reader who did not watch you work):
 - Lead with the outcome in one sentence. Then list files created/changed, decisions or interpretations you made, anything you could not verify, and integration concerns. Complete sentences; no shorthand, arrow chains, or invented labels.`;
 
+/** Frontier-tier orchestrator models need no calibration. */
+export function isFrontierTier(model: string): boolean {
+  return /fable|mythos/i.test(model);
+}
+
+/**
+ * Operating brief returned by the orchestrator_briefing tool. For frontier-
+ * tier models it's a short confirmation; for others it returns a calibration
+ * addendum that compensates for known behavioral gaps when orchestrating
+ * long-horizon multi-agent work (under-delegation, asking instead of
+ * deciding, stopping early, unverified claims). Deliberately model-name-free.
+ */
+export function orchestratorBriefing(model: string): string {
+  if (isFrontierTier(model)) {
+    return (
+      `Model "${model}" registered for this workspace.\n\n` +
+      'Standard dispatch policy applies — no calibration needed. Reminders: never implement ' +
+      'directly (design, dispatch, integrate, verify); batch parallel subtasks in one ' +
+      'dispatch_tasks call; verify integration with evidence before reporting.'
+    );
+  }
+  return `Model "${model}" registered for this workspace. CALIBRATION ACTIVE — apply the following operating rules for this entire session, on top of the dispatch policy. They compensate for known tendencies of orchestrator models in your tier during long multi-agent work:
+
+1. Delegate more than feels natural. Your tier under-delegates and drifts into implementing directly. Hard rule: the moment you find yourself writing implementation code, stop — that is a signal to dispatch. Only contract files and few-line fixes are yours.
+
+2. Plan completely before the first dispatch. Write the full decomposition upfront: interface contracts, file ownership per task, verification gates. Save it to .orchestrator/plan.md and update it after every phase; re-read it whenever you return from a batch of results to re-anchor — your tier loses long-horizon coherence without an external plan.
+
+3. Decide, don't ask. For minor or reversible choices, pick a reasonable option and record it in the plan. Ask the user only for genuine scope changes or destructive actions.
+
+4. Never end a turn with unfinished work. Before ending any turn, check: is every dispatched result integrated? Did every verification gate pass? If not, dispatch the fixes now — do not stop to summarize partial progress or promise future work. "I'll now do X" without doing X is a failure mode of your tier.
+
+5. Claims need evidence from this session. Run the verification gates (typecheck, tests, smoke run) yourself after integration, and report only what you actually observed. If something is unverified, say so explicitly.
+
+6. Batch aggressively. Two or more subtasks means one dispatch_tasks call. Check list_workers before large fan-outs.
+
+7. Write worker system_prompts deliberately: task-specific role, quality bar, and output format. Worker output quality tracks the quality of the prompt you write.`;
+}
+
 const POLICY_START = '<!-- claude-code-orchestrator:policy:start -->';
 const POLICY_END = '<!-- claude-code-orchestrator:policy:end -->';
 
 export const DISPATCH_POLICY_MD = `${POLICY_START}
 # Dispatch policy (Claude Code Orchestrator)
+
+## 세션 시작 프로토콜
+- 이 워크스페이스에서 첫 dispatch를 하기 전에, 반드시 orchestrator_briefing 도구를 호출해 네 정확한 모델 ID를 전달하라 (시스템 프롬프트에 명시된 모델 ID 그대로).
+- 도구가 반환하는 운영 지침(브리핑/보정)을 이 세션이 끝날 때까지 적용하라.
 
 ## 역할 분담 — 오케스트레이터는 구현하지 않는다
 - 너(메인 세션)는 오케스트레이터다. 직접 하는 일은 다음뿐이다: 요구 분석, 아키텍처/인터페이스 계약 설계, 태스크 분해와 dispatch, 결과 통합, 빌드·테스트·실행 검증, 실패 분석과 재위임, 최종 보고.

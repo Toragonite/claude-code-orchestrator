@@ -8,13 +8,14 @@ import {
   ensureDirs,
   readRegistry,
   readStats,
+  recordOrchestrator,
   Registry,
   TASKS_DIR,
   WORKER_MODELS,
   WorkerProfile,
   writeStats,
 } from '../registry';
-import { WORKER_BASE_PROMPT } from '../prompts';
+import { orchestratorBriefing, WORKER_BASE_PROMPT } from '../prompts';
 
 /**
  * fable-dispatch — a minimal MCP stdio server the Claude Code panel connects
@@ -399,6 +400,24 @@ const TOOLS = [
     },
   },
   {
+    name: 'orchestrator_briefing',
+    description:
+      'REQUIRED once per session, BEFORE the first dispatch: register which model this ' +
+      'orchestrator session is running (pass your exact model ID from your system prompt). ' +
+      'Returns the operating brief for your model tier — apply the returned rules for the rest ' +
+      'of the session. Also surfaces the main-session model in the orchestrator dashboard.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          description: 'Exact model ID of this (main/orchestrator) session, e.g. from your system prompt.',
+        },
+      },
+      required: ['model'],
+    },
+  },
+  {
     name: 'list_workers',
     description:
       'List registered worker Claude accounts with their default models, cumulative usage ' +
@@ -469,6 +488,13 @@ async function handleRequest(msg: {
           text = await dispatchTask(args);
         } else if (name === 'dispatch_tasks') {
           text = await dispatchTasksParallel(args);
+        } else if (name === 'orchestrator_briefing') {
+          const model = ((args as { model?: string }).model ?? '').trim();
+          if (!model) {
+            throw new Error('orchestrator_briefing requires "model".');
+          }
+          recordOrchestrator(process.cwd(), model);
+          text = orchestratorBriefing(model);
         } else if (name === 'list_workers') {
           text = listWorkers();
         } else {

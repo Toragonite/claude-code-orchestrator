@@ -68,6 +68,30 @@ export const REGISTRY_FILE = path.join(ROOT_DIR, 'registry.json');
 export const TASKS_LOG_FILE = path.join(ROOT_DIR, 'tasks.jsonl');
 export const TASKS_DIR = path.join(ROOT_DIR, 'tasks');
 export const STATS_FILE = path.join(ROOT_DIR, 'stats.json');
+export const ORCHESTRATORS_FILE = path.join(ROOT_DIR, 'orchestrators.json');
+
+/** Self-reported main-session model per workspace (via orchestrator_briefing). */
+export interface OrchestratorCheckin {
+  model: string;
+  ts: number;
+}
+
+export type OrchestratorsFile = Record<string, OrchestratorCheckin>;
+
+export function readOrchestrators(): OrchestratorsFile {
+  try {
+    return JSON.parse(fs.readFileSync(ORCHESTRATORS_FILE, 'utf8')) as OrchestratorsFile;
+  } catch {
+    return {};
+  }
+}
+
+export function recordOrchestrator(cwd: string, model: string): void {
+  ensureDirs();
+  const all = readOrchestrators();
+  all[cwd] = { model, ts: Date.now() };
+  fs.writeFileSync(ORCHESTRATORS_FILE, JSON.stringify(all, null, 2));
+}
 
 const DEFAULTS: Registry = {
   workers: [],

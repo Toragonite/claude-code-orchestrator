@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import {
+  readOrchestrators,
   readRegistry,
   readStats,
   readTaskEvents,
   TaskEvent,
   windowUsage,
 } from './registry';
+import { isFrontierTier } from './prompts';
 
 /**
  * Editor-tab dashboard: worker accounts with quota-window usage plus the
@@ -49,7 +51,17 @@ export function openDashboard(): void {
         ...e,
         inWorkspace: Boolean(root && e.cwd && (e.cwd === root || e.cwd.startsWith(root + '/'))),
       }));
-    void panel.webview.postMessage({ type: 'data', workers, tasks, workspace: root ?? null });
+    const checkin = root ? readOrchestrators()[root] : undefined;
+    const orchestrator = checkin
+      ? { model: checkin.model, ts: checkin.ts, calibrated: !isFrontierTier(checkin.model) }
+      : null;
+    void panel.webview.postMessage({
+      type: 'data',
+      workers,
+      tasks,
+      workspace: root ?? null,
+      orchestrator,
+    });
   };
 
   const timer = setInterval(send, 2000);
@@ -115,8 +127,13 @@ function dashboardHtml(): string {
     : u.tasks + ' tasks · ' + tok(u.inputTokens) + '/' + tok(u.outputTokens);
 
   function render() {
-    document.getElementById('meta').textContent = data.workspace
-      ? 'workspace: ' + data.workspace : 'no workspace open';
+    const o = data.orchestrator;
+    const main = o
+      ? 'main session: ' + o.model + (o.calibrated ? ' (calibration active)' : ' (frontier tier)')
+        + ' · checked in ' + new Date(o.ts).toLocaleTimeString()
+      : 'main session: not checked in yet — the policy tells it to call orchestrator_briefing before the first dispatch';
+    document.getElementById('meta').textContent =
+      (data.workspace ? 'workspace: ' + data.workspace : 'no workspace open') + '  |  ' + main;
 
     document.querySelector('#workers tbody').innerHTML = data.workers.map((w) => {
       const status = w.coolingDown
