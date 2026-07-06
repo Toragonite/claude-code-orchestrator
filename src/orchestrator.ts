@@ -3,6 +3,7 @@ import { AccountManager } from './accounts';
 import { WorkerPool } from './workers';
 import { TaskRegistry } from './tasks';
 import { config, REFUSAL_FALLBACK_MODEL, SERVER_SIDE_FALLBACK_BETA, WORKER_MODELS } from './models';
+import { CLAUDE_CODE_IDENTITY, OAUTH_BETA } from './oauth';
 
 const DISPATCH_TOOL_NAME = 'dispatch_task';
 
@@ -52,7 +53,20 @@ function dispatchTool(workerNames: string[]): Anthropic.Beta.BetaTool {
   };
 }
 
-function systemPrompt(workerSummary: string): string {
+function systemBlocks(
+  workerSummary: string,
+  oauth: boolean,
+): Anthropic.Beta.BetaTextBlockParam[] {
+  const blocks: Anthropic.Beta.BetaTextBlockParam[] = [];
+  if (oauth) {
+    // Subscription OAuth tokens require this exact identity as the first block.
+    blocks.push({ type: 'text', text: CLAUDE_CODE_IDENTITY });
+  }
+  blocks.push({ type: 'text', text: orchestratorPrompt(workerSummary) });
+  return blocks;
+}
+
+function orchestratorPrompt(workerSummary: string): string {
   return [
     'You are the orchestrator in a multi-account setup inside a VS Code extension.',
     'You run on the main account. One or more worker accounts run Claude Opus / Claude Sonnet, and you can',
@@ -90,7 +104,6 @@ export async function runOrchestratedTask(
   if (!main) {
     throw new Error('No main (Fable) account configured. Add a main account first.');
   }
-  const client = await accounts.client(main);
   const cfg = config();
 
   const workers = accounts.workers();
@@ -102,20 +115,30 @@ export async function runOrchestratedTask(
 
   const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: userRequest }];
 
+  // OAuth bearer tokens need the oauth beta on every request; pass it in the
+  // betas param too so it survives the SDK's beta-header computation.
+  const isOAuth = main.auth === 'oauth';
+  const betas: string[] = [];
+  if (isOAuth) {
+    betas.push(OAUTH_BETA);
+  }
+  if (cfg.enableRefusalFallback) {
+    betas.push(SERVER_SIDE_FALLBACK_BETA);
+  }
+
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    // A fresh client per round keeps the OAuth access token current across
+    // long orchestrations (AccountManager refreshes near expiry).
+    const client = await accounts.client(main);
     // Fable 5: thinking is always on — omit the `thinking` param entirely.
     // Opt into server-side refusal fallbacks so a benign false positive is
     // transparently re-served by Opus 4.8 in the same call.
     const stream = client.beta.messages.stream({
       model: cfg.mainModel,
       max_tokens: cfg.maxOutputTokens,
-      ...(cfg.enableRefusalFallback
-        ? {
-            betas: [SERVER_SIDE_FALLBACK_BETA],
-            fallbacks: [{ model: REFUSAL_FALLBACK_MODEL }],
-          }
-        : {}),
-      system: systemPrompt(workerSummary),
+      ...(betas.length > 0 ? { betas } : {}),
+      ...(cfg.enableRefusalFallback ? { fallbacks: [{ model: REFUSAL_FALLBACK_MODEL }] } : {}),
+      system: systemBlocks(workerSummary, isOAuth),
       tools,
       messages,
     });
