@@ -4,8 +4,20 @@
   "description": "Multi-account dispatch for the Claude Code extension: your main session (Fable) fans tasks out to worker Claude accounts running Opus/Sonnet via an MCP dispatch tool.",
   "version": "0.2.0",
   "publisher": "toragonite",
-  "private": true,
   "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Toragonite/fable-orchestrator.git"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "multi-account",
+    "orchestration",
+    "agent"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -14,7 +26,9 @@
     "Other"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -129,6 +143,46 @@
         }
       ]
     },
+    "walkthroughs": [
+      {
+        "id": "fableOrchestrator.gettingStarted",
+        "title": "Multi-account dispatch for Claude Code",
+        "description": "Fan work out from your Claude Code panel to worker Claude accounts running Opus/Sonnet.",
+        "steps": [
+          {
+            "id": "addWorker",
+            "title": "Add a worker account",
+            "description": "Create a config directory for another Claude account and sign in once.\n[Add Worker Account](command:fableOrchestrator.addWorker)\n[Import Existing Directories](command:fableOrchestrator.importWorkers)",
+            "media": {
+              "markdown": "media/walkthrough/add-worker.md"
+            },
+            "completionEvents": [
+              "onCommand:fableOrchestrator.addWorker",
+              "onCommand:fableOrchestrator.importWorkers"
+            ]
+          },
+          {
+            "id": "registerMcp",
+            "title": "Register the dispatch MCP server",
+            "description": "Give your Claude Code session the dispatch_task tool in this workspace.\n[Register MCP Server](command:fableOrchestrator.installMcp)",
+            "media": {
+              "markdown": "media/walkthrough/register-mcp.md"
+            },
+            "completionEvents": [
+              "onCommand:fableOrchestrator.installMcp"
+            ]
+          },
+          {
+            "id": "useDispatch",
+            "title": "Dispatch from your Claude Code panel",
+            "description": "Restart the Claude Code session, approve the MCP server, and ask it to fan out work.",
+            "media": {
+              "markdown": "media/walkthrough/use-dispatch.md"
+            }
+          }
+        ]
+      }
+    ],
     "configuration": {
       "title": "Fable Orchestrator",
       "properties": {
@@ -154,11 +208,14 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "npm run compile"
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
     "typescript": "^5.6.0"
   }
 }
