@@ -3,13 +3,86 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkerManager } from './workerManager';
 import { TasksProvider, WorkersProvider } from './views';
-import { clearTaskLog, WORKER_MODELS, WorkerModel } from './registry';
+import { clearTaskLog, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
 
 const MCP_SERVER_NAME = 'fable-dispatch';
+
+/**
+ * Copy the bundled MCP server to a version-independent path. Installed
+ * extensions live in a per-version directory, so registering the bundled path
+ * in .mcp.json would break on every extension update; the stable copy under
+ * ~/.fable-orchestrator survives updates and is refreshed on each activation.
+ */
+function ensureStableServerCopy(context: vscode.ExtensionContext): string {
+  const bundled = context.asAbsolutePath(path.join('out', 'mcp', 'server.js'));
+  const stable = path.join(ROOT_DIR, 'mcp', 'server.js');
+  try {
+    fs.mkdirSync(path.dirname(stable), { recursive: true });
+    fs.copyFileSync(bundled, stable);
+    return stable;
+  } catch {
+    return bundled;
+  }
+}
+
+function mcpRegisteredIn(folder: vscode.WorkspaceFolder): boolean {
+  try {
+    const json = JSON.parse(fs.readFileSync(path.join(folder.uri.fsPath, '.mcp.json'), 'utf8'));
+    return Boolean(json?.mcpServers?.[MCP_SERVER_NAME]);
+  } catch {
+    return false;
+  }
+}
+
+function registerMcp(folder: vscode.WorkspaceFolder, serverPath: string): void {
+  const mcpFile = path.join(folder.uri.fsPath, '.mcp.json');
+  let json: { mcpServers?: Record<string, unknown> } = {};
+  try {
+    json = JSON.parse(fs.readFileSync(mcpFile, 'utf8'));
+  } catch {
+    // new file
+  }
+  json.mcpServers = {
+    ...json.mcpServers,
+    [MCP_SERVER_NAME]: { command: 'node', args: [serverPath] },
+  };
+  fs.writeFileSync(mcpFile, JSON.stringify(json, null, 2) + '\n');
+}
+
+/** One-time-per-workspace offer to register the MCP server automatically. */
+async function maybeOfferMcpRegistration(
+  context: vscode.ExtensionContext,
+  serverPath: string,
+): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder || readRegistry().workers.length === 0 || mcpRegisteredIn(folder)) {
+    return;
+  }
+  const dismissKey = `fableOrchestrator.mcpOfferDismissed:${folder.uri.fsPath}`;
+  if (context.workspaceState.get<boolean>(dismissKey)) {
+    return;
+  }
+  const choice = await vscode.window.showInformationMessage(
+    'Fable Orchestrator: worker accounts are configured, but the dispatch MCP server is not ' +
+      'registered in this workspace. Register it so your Claude Code session can dispatch tasks?',
+    'Register',
+    'Not in this workspace',
+  );
+  if (choice === 'Register') {
+    registerMcp(folder, serverPath);
+    vscode.window.showInformationMessage(
+      'Registered. Restart the Claude Code session here and approve the project MCP server.',
+    );
+  } else if (choice === 'Not in this workspace') {
+    await context.workspaceState.update(dismissKey, true);
+  }
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   const workers = new WorkerManager();
   workers.syncSettings();
+  const serverPath = ensureStableServerCopy(context);
+  void maybeOfferMcpRegistration(context, serverPath);
 
   const workersProvider = new WorkersProvider(workers);
   const tasksProvider = new TasksProvider();
@@ -57,6 +130,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (login === 'Open Login Terminal') {
           workers.openTerminal(worker);
         }
+        void maybeOfferMcpRegistration(context, serverPath);
       } catch (err) {
         vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       }
@@ -137,23 +211,11 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showErrorMessage('Open a workspace folder first.');
         return;
       }
-      const serverPath = context.asAbsolutePath(path.join('out', 'mcp', 'server.js'));
       if (!fs.existsSync(serverPath)) {
-        vscode.window.showErrorMessage(`MCP server not built yet (missing ${serverPath}). Run "npm run compile".`);
+        vscode.window.showErrorMessage(`MCP server missing (${serverPath}). Reinstall the extension or run "npm run compile".`);
         return;
       }
-      const mcpFile = path.join(folder.uri.fsPath, '.mcp.json');
-      let json: { mcpServers?: Record<string, unknown> } = {};
-      try {
-        json = JSON.parse(fs.readFileSync(mcpFile, 'utf8'));
-      } catch {
-        // new file
-      }
-      json.mcpServers = {
-        ...json.mcpServers,
-        [MCP_SERVER_NAME]: { command: 'node', args: [serverPath] },
-      };
-      fs.writeFileSync(mcpFile, JSON.stringify(json, null, 2) + '\n');
+      registerMcp(folder, serverPath);
       vscode.window.showInformationMessage(
         `Registered "${MCP_SERVER_NAME}" in .mcp.json. Restart the Claude Code session in this workspace ` +
           'and approve the project MCP server — dispatch_task / list_workers will then be available.',
