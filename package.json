@@ -2,7 +2,7 @@
   "name": "fable-orchestrator",
   "displayName": "Fable Orchestrator",
   "description": "Multi-account dispatch for the Claude Code extension: your main session (Fable) fans tasks out to worker Claude accounts running Opus/Sonnet via an MCP dispatch tool.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",

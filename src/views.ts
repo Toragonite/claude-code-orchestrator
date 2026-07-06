@@ -10,7 +10,50 @@ import {
   WorkerProfile,
 } from './registry';
 
-export class WorkersProvider implements vscode.TreeDataProvider<WorkerProfile>, vscode.Disposable {
+interface WorkerStatRow {
+  kind: 'stat';
+  worker: string;
+  label: string;
+  description: string;
+  icon: string;
+  tooltip?: string;
+  command?: vscode.Command;
+}
+
+export type WorkerNode = WorkerProfile | WorkerStatRow;
+
+function isStatRow(node: WorkerNode): node is WorkerStatRow {
+  return (node as WorkerStatRow).kind === 'stat';
+}
+
+function fmtTokens(n: number): string {
+  return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
+}
+
+/** Dispatch usage for one worker within a trailing time window. */
+function windowUsage(worker: string, windowMs: number) {
+  const since = Date.now() - windowMs;
+  let tasks = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costUsd = 0;
+  for (const e of readTaskEvents()) {
+    if (e.worker === worker && e.status === 'done' && e.ts >= since) {
+      tasks++;
+      inputTokens += e.inputTokens ?? 0;
+      outputTokens += e.outputTokens ?? 0;
+      costUsd += e.costUsd ?? 0;
+    }
+  }
+  return { tasks, inputTokens, outputTokens, costUsd };
+}
+
+/**
+ * Two-level tree: worker accounts expand into per-account usage rows —
+ * availability, dispatch usage in Claude's quota windows (5h session / 7d),
+ * lifetime totals, and a shortcut to check the account's real plan quota.
+ */
+export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vscode.Disposable {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
@@ -18,57 +61,131 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerProfile>, 
     workers.onDidChange(() => this._onDidChangeTreeData.fire());
     // Usage/cooldown is written by the MCP server process — watch for changes.
     fs.watchFile(STATS_FILE, { interval: 2000 }, () => this._onDidChangeTreeData.fire());
+    fs.watchFile(TASKS_LOG_FILE, { interval: 2000 }, () => this._onDidChangeTreeData.fire());
   }
 
   dispose(): void {
     fs.unwatchFile(STATS_FILE);
+    fs.unwatchFile(TASKS_LOG_FILE);
   }
 
   refresh(): void {
     this._onDidChangeTreeData.fire();
   }
 
-  getTreeItem(worker: WorkerProfile): vscode.TreeItem {
-    const stats = readStats()[worker.name];
-    const coolingDown = (stats?.cooldownUntil ?? 0) > Date.now();
-    const item = new vscode.TreeItem(worker.name);
-    item.description =
-      worker.model +
-      (stats && stats.tasks > 0 ? ` · ${stats.tasks} tasks` : '') +
-      (coolingDown ? ' · ⏸ cooldown' : '');
-    const tooltip = new vscode.MarkdownString();
-    tooltip.appendMarkdown(`**${worker.name}** — worker Claude account\n\n`);
-    tooltip.appendMarkdown(`- config: \`${worker.configDir}\`\n`);
-    tooltip.appendMarkdown(`- default model: \`${worker.model}\`\n`);
-    if (stats) {
-      tooltip.appendMarkdown(
-        `- usage: ${stats.tasks} tasks, ${stats.errors} errors, ` +
-          `${stats.inputTokens.toLocaleString()} in / ${stats.outputTokens.toLocaleString()} out tokens` +
-          (stats.costUsd ? ` (~$${stats.costUsd.toFixed(2)})` : '') +
-          '\n',
-      );
-      if (coolingDown) {
-        tooltip.appendMarkdown(
-          `- ⏸ cooling down until ${new Date(stats.cooldownUntil!).toLocaleTimeString()} (quota error)\n`,
-        );
-      }
-      if (stats.lastError) {
-        tooltip.appendMarkdown(`- last error: ${stats.lastError}\n`);
-      }
+  getTreeItem(node: WorkerNode): vscode.TreeItem {
+    if (isStatRow(node)) {
+      const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+      item.id = `${node.worker}:${node.label}`;
+      item.description = node.description;
+      item.iconPath = new vscode.ThemeIcon(node.icon);
+      item.tooltip = node.tooltip;
+      item.command = node.command;
+      item.contextValue = 'workerStat';
+      return item;
     }
-    tooltip.appendMarkdown(
-      '\n$(terminal) opens an interactive session · right-click for re-login / remove',
-    );
-    tooltip.supportThemeIcons = true;
-    item.tooltip = tooltip;
+    const stats = readStats()[node.name];
+    const coolingDown = (stats?.cooldownUntil ?? 0) > Date.now();
+    const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.Collapsed);
+    item.description = node.model + (coolingDown ? ' · ⏸ cooldown' : '');
+    item.tooltip =
+      `CLAUDE_CONFIG_DIR=${node.configDir}\n` +
+      'Expand for per-account usage · terminal button opens a live session · right-click for re-login / remove';
     item.iconPath = new vscode.ThemeIcon(coolingDown ? 'debug-pause' : 'server-process');
     item.contextValue = 'worker';
-    item.id = worker.name;
+    item.id = node.name;
     return item;
   }
 
-  getChildren(element?: WorkerProfile): WorkerProfile[] {
-    return element ? [] : this.workers.list();
+  getChildren(node?: WorkerNode): WorkerNode[] {
+    if (!node) {
+      return this.workers.list();
+    }
+    if (isStatRow(node)) {
+      return [];
+    }
+    return this.statRows(node);
+  }
+
+  private statRows(worker: WorkerProfile): WorkerStatRow[] {
+    const stats = readStats()[worker.name];
+    const now = Date.now();
+    const coolingDown = (stats?.cooldownUntil ?? 0) > now;
+    const session = windowUsage(worker.name, 5 * 60 * 60 * 1000);
+    const week = windowUsage(worker.name, 7 * 24 * 60 * 60 * 1000);
+    const rows: WorkerStatRow[] = [];
+
+    rows.push({
+      kind: 'stat',
+      worker: worker.name,
+      label: 'Status',
+      description: coolingDown
+        ? `cooling down until ${new Date(stats!.cooldownUntil!).toLocaleTimeString()} (quota error)`
+        : 'available',
+      icon: coolingDown ? 'debug-pause' : 'check',
+      tooltip: coolingDown
+        ? 'Skipped by automatic assignment until the cooldown ends. Dispatches naming this worker explicitly still run.'
+        : 'Eligible for automatic assignment.',
+    });
+    rows.push({
+      kind: 'stat',
+      worker: worker.name,
+      label: 'Session (5h)',
+      description:
+        session.tasks === 0
+          ? 'no dispatches'
+          : `${session.tasks} tasks · ${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out`,
+      icon: 'history',
+      tooltip: 'Dispatch usage in the last 5 hours — the window of Claude plans\' session limit.',
+    });
+    rows.push({
+      kind: 'stat',
+      worker: worker.name,
+      label: 'Weekly (7d)',
+      description:
+        week.tasks === 0
+          ? 'no dispatches'
+          : `${week.tasks} tasks · ${fmtTokens(week.inputTokens)} in / ${fmtTokens(week.outputTokens)} out`,
+      icon: 'calendar',
+      tooltip: 'Dispatch usage in the last 7 days — the window of Claude plans\' weekly limit.',
+    });
+    rows.push({
+      kind: 'stat',
+      worker: worker.name,
+      label: 'All time',
+      description: stats
+        ? `${stats.tasks} tasks · ${fmtTokens(stats.inputTokens)} in / ${fmtTokens(stats.outputTokens)} out` +
+          (stats.costUsd ? ` · ~$${stats.costUsd.toFixed(2)}` : '')
+        : 'no dispatches yet',
+      icon: 'graph',
+    });
+    if (stats && stats.errors > 0) {
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: 'Errors',
+        description: `${stats.errors}${stats.lastError ? ` · last: ${stats.lastError.slice(0, 60)}` : ''}`,
+        icon: 'warning',
+        tooltip: stats.lastError,
+      });
+    }
+    rows.push({
+      kind: 'stat',
+      worker: worker.name,
+      label: 'Plan quota',
+      description: 'open terminal → type /usage',
+      icon: 'link-external',
+      tooltip:
+        "The numbers above only count this extension's dispatches. The account's real plan quota " +
+        '(session %, weekly %) is only visible inside Claude Code — this opens a terminal on this ' +
+        'account; type /usage there.',
+      command: {
+        command: 'fableOrchestrator.loginWorker',
+        title: 'Check plan quota',
+        arguments: [{ id: worker.name }],
+      },
+    });
+    return rows;
   }
 }
 

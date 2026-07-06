@@ -55,6 +55,10 @@ export interface TaskEvent {
   /** Markdown file holding the worker's output. */
   outputFile: string;
   error?: string;
+  /** Usage of this run — set on 'done' events; feeds per-window quota views. */
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
 }
 
 export const ROOT_DIR = path.join(os.homedir(), '.fable-orchestrator');
