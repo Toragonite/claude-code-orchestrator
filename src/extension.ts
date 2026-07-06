@@ -5,6 +5,38 @@ import { WorkerPool } from './workers';
 import { runOrchestratedTask } from './orchestrator';
 import { AccountsProvider, TasksProvider, TaskDocumentProvider } from './views';
 import { config, WORKER_MODELS, WorkerModel } from './models';
+import { Credentials } from './accounts';
+import { authorizeUrl, exchangeCode, generatePkce } from './oauth';
+
+/**
+ * Browser sign-in for one Claude account: open the authorize URL, then accept
+ * the pasted code from the callback page. Returns undefined if cancelled.
+ */
+async function signInWithClaude(accountName: string): Promise<Credentials | undefined> {
+  const pkce = generatePkce();
+  const url = authorizeUrl(pkce);
+  const open = await vscode.window.showInformationMessage(
+    `Sign in to Claude for account "${accountName}". ` +
+      'A browser will open — log in with the Claude account you want to use for this slot, ' +
+      'then copy the code shown on the callback page.',
+    { modal: true },
+    'Open Browser',
+  );
+  if (open !== 'Open Browser') {
+    return undefined;
+  }
+  await vscode.env.openExternal(vscode.Uri.parse(url));
+  const pasted = await vscode.window.showInputBox({
+    prompt: `Paste the authorization code for "${accountName}" (looks like "code#state")`,
+    ignoreFocusOut: true,
+    password: true,
+    validateInput: (v) => (v.trim() ? undefined : 'Authorization code is required'),
+  });
+  if (!pasted) {
+    return undefined;
+  }
+  return exchangeCode(pasted, pkce);
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   const accounts = new AccountManager(context);
@@ -61,17 +93,74 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         model = picked.label as WorkerModel;
       }
-      const apiKey = await vscode.window.showInputBox({
-        prompt: `Anthropic API key for "${name.trim()}" (stored in VS Code Secret Storage)`,
-        password: true,
-        validateInput: (v) => (v.trim() ? undefined : 'API key is required'),
-      });
-      if (!apiKey) {
+      const method = await vscode.window.showQuickPick(
+        [
+          {
+            label: 'Sign in with Claude (OAuth)',
+            description: 'Browser login with this account — recommended',
+            value: 'oauth' as const,
+          },
+          {
+            label: 'Anthropic API key',
+            description: 'Paste a key from the Console instead',
+            value: 'apiKey' as const,
+          },
+        ],
+        { placeHolder: 'Authentication method' },
+      );
+      if (!method) {
         return;
       }
       try {
-        await accounts.add(name.trim(), role.value, apiKey.trim(), model);
+        let credentials: Credentials | undefined;
+        if (method.value === 'oauth') {
+          credentials = await signInWithClaude(name.trim());
+        } else {
+          const apiKey = await vscode.window.showInputBox({
+            prompt: `Anthropic API key for "${name.trim()}" (stored in VS Code Secret Storage)`,
+            password: true,
+            validateInput: (v) => (v.trim() ? undefined : 'API key is required'),
+          });
+          if (apiKey) {
+            credentials = { type: 'apiKey', apiKey: apiKey.trim() };
+          }
+        }
+        if (!credentials) {
+          return;
+        }
+        await accounts.add(name.trim(), role.value, credentials, model);
         vscode.window.showInformationMessage(`Account "${name.trim()}" added.`);
+      } catch (err) {
+        vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      }
+    }),
+
+    vscode.commands.registerCommand('fableOrchestrator.reauthAccount', async (item?: { id?: string }) => {
+      let id = item?.id;
+      if (!id) {
+        const picked = await vscode.window.showQuickPick(
+          accounts
+            .list()
+            .filter((a) => a.auth === 'oauth')
+            .map((a) => ({ label: a.name, description: a.role, id: a.id })),
+          { placeHolder: 'Account to re-authenticate' },
+        );
+        id = picked?.id;
+      }
+      if (!id) {
+        return;
+      }
+      const account = accounts.get(id);
+      if (!account) {
+        return;
+      }
+      try {
+        const credentials = await signInWithClaude(account.name);
+        if (!credentials) {
+          return;
+        }
+        await accounts.storeCredentials(account.id, credentials);
+        vscode.window.showInformationMessage(`Account "${account.name}" re-authenticated.`);
       } catch (err) {
         vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       }

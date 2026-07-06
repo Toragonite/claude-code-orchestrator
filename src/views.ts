@@ -13,11 +13,12 @@ export class AccountsProvider implements vscode.TreeDataProvider<Account> {
 
   getTreeItem(account: Account): vscode.TreeItem {
     const item = new vscode.TreeItem(account.name);
+    const authLabel = account.auth === 'oauth' ? 'oauth' : 'api key';
     if (account.role === 'main') {
-      item.description = `main · ${config().mainModel || FABLE_MODEL}`;
+      item.description = `main · ${config().mainModel || FABLE_MODEL} · ${authLabel}`;
       item.iconPath = new vscode.ThemeIcon('star-full');
     } else {
-      item.description = `worker · ${account.model ?? config().defaultWorkerModel}`;
+      item.description = `worker · ${account.model ?? config().defaultWorkerModel} · ${authLabel}`;
       item.iconPath = new vscode.ThemeIcon('server-process');
     }
     item.contextValue = `account-${account.role}`;

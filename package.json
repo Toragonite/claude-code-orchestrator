@@ -53,6 +53,12 @@
         "icon": "$(trash)"
       },
       {
+        "command": "fableOrchestrator.reauthAccount",
+        "title": "Re-authenticate Account (Sign in with Claude)",
+        "category": "Fable Orchestrator",
+        "icon": "$(sign-in)"
+      },
+      {
         "command": "fableOrchestrator.runTask",
         "title": "Run Orchestrated Task (Fable plans, workers execute)",
         "category": "Fable Orchestrator",
@@ -97,6 +103,11 @@
       "view/item/context": [
         {
           "command": "fableOrchestrator.removeAccount",
+          "when": "view == fableOrchestrator.accounts && viewItem =~ /account/",
+          "group": "inline"
+        },
+        {
+          "command": "fableOrchestrator.reauthAccount",
           "when": "view == fableOrchestrator.accounts && viewItem =~ /account/",
           "group": "inline"
         }
