@@ -1,8 +1,8 @@
 {
   "name": "fable-orchestrator",
   "displayName": "Fable Orchestrator",
-  "description": "Multi-account Claude orchestration: a main Fable 5 account plans and dispatches tasks to worker accounts running Opus/Sonnet.",
-  "version": "0.1.0",
+  "description": "Multi-account dispatch for the Claude Code extension: your main session (Fable) fans tasks out to worker Claude accounts running Opus/Sonnet via an MCP dispatch tool.",
+  "version": "0.2.0",
   "publisher": "toragonite",
   "private": true,
   "license": "MIT",
@@ -28,53 +28,53 @@
     "views": {
       "fableOrchestrator": [
         {
-          "id": "fableOrchestrator.accounts",
-          "name": "Accounts",
-          "icon": "$(account)"
+          "id": "fableOrchestrator.workers",
+          "name": "Worker Accounts",
+          "icon": "$(server-process)"
         },
         {
           "id": "fableOrchestrator.tasks",
-          "name": "Tasks",
+          "name": "Dispatched Tasks",
           "icon": "$(checklist)"
         }
       ]
     },
     "commands": [
       {
-        "command": "fableOrchestrator.addAccount",
-        "title": "Add Account",
+        "command": "fableOrchestrator.addWorker",
+        "title": "Add Worker Account",
         "category": "Fable Orchestrator",
         "icon": "$(add)"
       },
       {
-        "command": "fableOrchestrator.removeAccount",
-        "title": "Remove Account",
-        "category": "Fable Orchestrator",
-        "icon": "$(trash)"
-      },
-      {
-        "command": "fableOrchestrator.reauthAccount",
-        "title": "Re-authenticate Account (Sign in with Claude)",
-        "category": "Fable Orchestrator",
-        "icon": "$(sign-in)"
-      },
-      {
-        "command": "fableOrchestrator.importLogins",
-        "title": "Import Stored Logins (Claude Code / ant profiles)",
+        "command": "fableOrchestrator.importWorkers",
+        "title": "Import Existing Claude Config Directories",
         "category": "Fable Orchestrator",
         "icon": "$(cloud-download)"
       },
       {
-        "command": "fableOrchestrator.runTask",
-        "title": "Run Orchestrated Task (Fable plans, workers execute)",
+        "command": "fableOrchestrator.removeWorker",
+        "title": "Remove Worker Account",
         "category": "Fable Orchestrator",
-        "icon": "$(rocket)"
+        "icon": "$(trash)"
       },
       {
-        "command": "fableOrchestrator.dispatchDirect",
-        "title": "Dispatch Task Directly to a Worker",
+        "command": "fableOrchestrator.loginWorker",
+        "title": "Open Login Terminal for Worker",
         "category": "Fable Orchestrator",
-        "icon": "$(send)"
+        "icon": "$(sign-in)"
+      },
+      {
+        "command": "fableOrchestrator.openWorkerSession",
+        "title": "Open Interactive Worker Session (Terminal)",
+        "category": "Fable Orchestrator",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "fableOrchestrator.installMcp",
+        "title": "Register Dispatch MCP Server in This Workspace",
+        "category": "Fable Orchestrator",
+        "icon": "$(plug)"
       },
       {
         "command": "fableOrchestrator.showTaskOutput",
@@ -83,7 +83,7 @@
       },
       {
         "command": "fableOrchestrator.clearTasks",
-        "title": "Clear Finished Tasks",
+        "title": "Clear Task History",
         "category": "Fable Orchestrator",
         "icon": "$(clear-all)"
       }
@@ -91,19 +91,19 @@
     "menus": {
       "view/title": [
         {
-          "command": "fableOrchestrator.addAccount",
-          "when": "view == fableOrchestrator.accounts",
-          "group": "navigation"
+          "command": "fableOrchestrator.addWorker",
+          "when": "view == fableOrchestrator.workers",
+          "group": "navigation@1"
         },
         {
-          "command": "fableOrchestrator.importLogins",
-          "when": "view == fableOrchestrator.accounts",
-          "group": "navigation"
+          "command": "fableOrchestrator.importWorkers",
+          "when": "view == fableOrchestrator.workers",
+          "group": "navigation@2"
         },
         {
-          "command": "fableOrchestrator.runTask",
-          "when": "view == fableOrchestrator.tasks",
-          "group": "navigation"
+          "command": "fableOrchestrator.installMcp",
+          "when": "view == fableOrchestrator.workers",
+          "group": "navigation@3"
         },
         {
           "command": "fableOrchestrator.clearTasks",
@@ -113,43 +113,40 @@
       ],
       "view/item/context": [
         {
-          "command": "fableOrchestrator.removeAccount",
-          "when": "view == fableOrchestrator.accounts && viewItem =~ /account/",
-          "group": "inline"
+          "command": "fableOrchestrator.openWorkerSession",
+          "when": "view == fableOrchestrator.workers && viewItem == worker",
+          "group": "inline@1"
         },
         {
-          "command": "fableOrchestrator.reauthAccount",
-          "when": "view == fableOrchestrator.accounts && viewItem =~ /account/",
-          "group": "inline"
+          "command": "fableOrchestrator.loginWorker",
+          "when": "view == fableOrchestrator.workers && viewItem == worker",
+          "group": "inline@2"
+        },
+        {
+          "command": "fableOrchestrator.removeWorker",
+          "when": "view == fableOrchestrator.workers && viewItem == worker",
+          "group": "inline@3"
         }
       ]
     },
     "configuration": {
       "title": "Fable Orchestrator",
       "properties": {
-        "fableOrchestrator.mainModel": {
+        "fableOrchestrator.workerPermissionMode": {
           "type": "string",
-          "default": "claude-fable-5",
-          "description": "Model used by the main (orchestrator) account."
-        },
-        "fableOrchestrator.defaultWorkerModel": {
-          "type": "string",
-          "default": "claude-opus-4-8",
+          "default": "acceptEdits",
           "enum": [
-            "claude-opus-4-8",
-            "claude-sonnet-5"
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions"
           ],
-          "description": "Default model for worker accounts when the orchestrator does not specify one."
+          "description": "--permission-mode for dispatched (background) worker sessions. Background workers cannot answer permission prompts, so 'default' will stall on any edit."
         },
-        "fableOrchestrator.maxOutputTokens": {
-          "type": "number",
-          "default": 64000,
-          "description": "max_tokens for streamed requests (orchestrator and workers)."
-        },
-        "fableOrchestrator.enableRefusalFallback": {
-          "type": "boolean",
-          "default": true,
-          "description": "On a Fable 5 safety refusal, transparently re-serve the request with Claude Opus 4.8 via the server-side fallbacks beta."
+        "fableOrchestrator.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Path to the Claude Code CLI executable."
         }
       }
     }
@@ -158,9 +155,6 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.110.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
