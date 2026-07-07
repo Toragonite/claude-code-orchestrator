@@ -105,6 +105,8 @@ export class WorkerManager {
     registry.permissionMode = cfg.get<string>('workerPermissionMode', 'acceptEdits');
     registry.claudePath = resolveViaLoginShell(cfg.get<string>('claudePath', 'claude'));
     registry.cooldownMinutes = cfg.get<number>('quotaCooldownMinutes', 30);
+    registry.frontierWorkerDispatch =
+      cfg.get<string>('frontierWorkerDispatch', 'block') === 'allow' ? 'allow' : 'block';
     writeRegistry(registry);
   }
 
