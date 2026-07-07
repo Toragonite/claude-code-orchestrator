@@ -16,7 +16,7 @@ import {
   WorkerProfile,
   writeStats,
 } from '../registry';
-import { orchestratorBriefing, WORKER_BASE_PROMPT } from '../prompts';
+import { isFrontierTier, orchestratorBriefing, WORKER_BASE_PROMPT } from '../prompts';
 
 /**
  * fable-dispatch — a minimal MCP stdio server the Claude Code panel connects
@@ -248,6 +248,18 @@ async function dispatchTask(args: DispatchArgs): Promise<string> {
     attempted.add(worker.name);
     const model =
       args.model && (WORKER_MODELS as readonly string[]).includes(args.model) ? args.model : worker.model;
+    // Billing guard: frontier models may bill per use rather than draw from
+    // the subscription quota. The same model would be blocked on every
+    // worker, so this aborts instead of failing over.
+    if (isFrontierTier(model) && registry.frontierWorkerDispatch !== 'allow') {
+      throw new Error(
+        `Dispatch to ${model} is blocked: the operator has disabled frontier worker dispatches ` +
+          '(billing guard — this model may bill per use instead of drawing from the subscription ' +
+          'quota). Re-dispatch this task with model claude-opus-4-8 and ultrathink: true; do NOT ' +
+          'retry with the frontier model. The operator can re-enable it via the ' +
+          '"fableOrchestrator.frontierWorkerDispatch" setting in VS Code.',
+      );
+    }
     const base = { id, title, worker: worker.name, model, outputFile, cwd: process.cwd() };
     appendTaskEvent({ ...base, ts: Date.now(), status: 'running' });
 
@@ -338,6 +350,11 @@ function listWorkers(): string {
   }
   const stats = readStats();
   const now = Date.now();
+  const guard =
+    registry.frontierWorkerDispatch !== 'allow'
+      ? '\n\nFrontier worker dispatch (claude-fable-5) is DISABLED by the operator (billing guard) — ' +
+        'for design consults and adversarial reviews use claude-opus-4-8 with ultrathink: true instead.'
+      : '';
   return registry.workers
     .map((w) => {
       const s = stats[w.name];
@@ -355,7 +372,7 @@ function listWorkers(): string {
       }
       return line;
     })
-    .join('\n');
+    .join('\n') + guard;
 }
 
 const TASK_PROPERTIES = {
@@ -370,8 +387,10 @@ const TASK_PROPERTIES = {
     description:
       'claude-opus-4-8 for hard reasoning/coding subtasks; claude-sonnet-5 for simpler or ' +
       'high-volume ones; claude-fable-5 ONLY for the highest-leverage dispatches — contract ' +
-      'design/consult and adversarial review — since it draws a scarce separate weekly quota ' +
-      "and requires the account to have Fable access. Defaults to the worker's configured model.",
+      'design/consult and adversarial review — and only when list_workers shows frontier ' +
+      'dispatch enabled: it is the most expensive resource here (separate scarce quota, or ' +
+      'pay-per-use billing on some plans) and the server rejects it when the operator has it ' +
+      "blocked. Defaults to the worker's configured model.",
   },
   worker: {
     type: 'string',
