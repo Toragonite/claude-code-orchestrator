@@ -2,6 +2,8 @@
 
 **English** | [한국어](README.ko.md) | [简体中文](README.zh-CN.md)
 
+![Claude Code Orchestrator — multi-account parallel dispatch for Claude Code](media/screenshots/banner.png)
+
 > Unofficial extension — not affiliated with or endorsed by Anthropic. Formerly named *Fable Orchestrator*.
 
 Turn your existing **Claude Code** panel into a multi-account orchestrator. You chat with your main session as usual; it designs and verifies, and fans implementation work out **in parallel** to worker Claude accounts (Opus / Sonnet — or Fable, behind a billing guard) through MCP dispatch tools. Per-account usage tracking, quota-aware failover, and a live dashboard included.

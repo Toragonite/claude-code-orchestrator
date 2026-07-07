@@ -2,6 +2,8 @@
 
 [English](README.md) | **한국어** | [简体中文](README.zh-CN.md)
 
+![Claude Code Orchestrator — Claude Code를 위한 멀티 계정 병렬 디스패치](media/screenshots/banner.png)
+
 > 비공식(unofficial) 확장입니다 — Anthropic과 무관하며 Anthropic의 보증을 받지 않았습니다. 구 이름: *Fable Orchestrator*.
 
 기존 **Claude Code** 패널을 멀티 계정 오케스트레이터로 확장합니다. 평소처럼 메인 세션과 대화하면, 메인은 설계와 검증을 맡고 구현 작업을 MCP 디스패치 도구로 **워커 Claude 계정들**(Opus / Sonnet — 그리고 과금 가드 뒤의 Fable)에 **병렬** 분배합니다. 계정별 사용량 추적, 쿼터 인지 자동 분산, 라이브 대시보드가 포함됩니다.

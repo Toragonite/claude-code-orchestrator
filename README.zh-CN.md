@@ -2,6 +2,8 @@
 
 [English](README.md) | [한국어](README.ko.md) | **简体中文**
 
+![Claude Code Orchestrator — 面向 Claude Code 的多账号并行调度](media/screenshots/banner.png)
+
 > 非官方扩展 — 与 Anthropic 无关，也未获其认可。曾用名：*Fable Orchestrator*。
 
 把你现有的 **Claude Code** 面板变成多账号编排器。像平常一样与主会话对话；它负责设计与验证，并通过 MCP 调度工具把实现工作**并行**分发给工作账号（Opus / Sonnet — 以及计费防护之后的 Fable）。内置按账号的用量统计、配额感知的自动故障转移，以及实时仪表盘。
