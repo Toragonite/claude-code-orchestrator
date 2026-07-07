@@ -100,7 +100,7 @@ export class WorkerManager {
 
   /** Push extension settings the MCP server needs into the shared registry. */
   syncSettings(): void {
-    const cfg = vscode.workspace.getConfiguration('fableOrchestrator');
+    const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
     const registry = readRegistry();
     registry.permissionMode = cfg.get<string>('workerPermissionMode', 'acceptEdits');
     registry.claudePath = resolveViaLoginShell(cfg.get<string>('claudePath', 'claude'));
@@ -143,7 +143,7 @@ export class WorkerManager {
    * account isn't logged in yet, Claude Code prompts for login right there.
    */
   openTerminal(worker: WorkerProfile, initialPrompt?: string): vscode.Terminal {
-    const cfg = vscode.workspace.getConfiguration('fableOrchestrator');
+    const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
     const claudePath = cfg.get<string>('claudePath', 'claude');
     const terminal = vscode.window.createTerminal({
       name: `claude: ${worker.name}`,

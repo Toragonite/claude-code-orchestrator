@@ -19,7 +19,7 @@ import {
 import { isFrontierTier, orchestratorBriefing, WORKER_BASE_PROMPT } from '../prompts';
 
 /**
- * fable-dispatch — a minimal MCP stdio server the Claude Code panel connects
+ * cco-dispatch — a minimal MCP stdio server the Claude Code panel connects
  * to. It exposes dispatch tools so the main session (e.g. Fable 5) can fan
  * work out to other Claude accounts. Each worker run is a Claude Code session
  * under that account's CLAUDE_CONFIG_DIR, in the same workspace cwd.
@@ -220,7 +220,7 @@ async function dispatchTask(args: DispatchArgs): Promise<string> {
   const registry = readRegistry();
   if (registry.workers.length === 0) {
     throw new Error(
-      'No worker accounts registered. In VS Code, run "Fable Orchestrator: Add Worker Account".',
+      'No worker accounts registered. In VS Code, run "Claude Code Orchestrator: Add Worker Account".',
     );
   }
   const title = args.title?.trim() || 'untitled task';
@@ -257,7 +257,7 @@ async function dispatchTask(args: DispatchArgs): Promise<string> {
           '(billing guard — this model may bill per use instead of drawing from the subscription ' +
           'quota). Re-dispatch this task with model claude-opus-4-8 and ultrathink: true; do NOT ' +
           'retry with the frontier model. The operator can re-enable it via the ' +
-          '"fableOrchestrator.frontierWorkerDispatch" setting in VS Code.',
+          '"claudeCodeOrchestrator.frontierWorkerDispatch" setting in VS Code.',
       );
     }
     const base = { id, title, worker: worker.name, model, outputFile, cwd: process.cwd() };

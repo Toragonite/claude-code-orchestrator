@@ -45,7 +45,7 @@ Fable(가능 시) 또는 다른 계정의 Opus가 리뷰. 연구상 40–60% 비
 
 ### P2 — 크로스 세션 lessons 스토어
 Reflexion 계열: `.orchestrator/plan.md`의 lessons를 워크스페이스 횡단
-`~/.fable-orchestrator/lessons.md`로 승격, 브리핑 응답에 최근 lessons 요약을 동봉
+`~/.claude-code-orchestrator/lessons.md`로 승격, 브리핑 응답에 최근 lessons 요약을 동봉
 → 실패가 조직 기억으로 누적. (구현 간단, 효과는 누적형)
 
 ### P2 — 난이도 기반 에스컬레이션 자동화
