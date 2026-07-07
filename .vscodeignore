@@ -1,6 +1,7 @@
 .vscode/**
 src/**
 docs/**
+media/screenshots/**
 README.ko.md
 README.zh-CN.md
 node_modules/**

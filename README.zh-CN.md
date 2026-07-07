@@ -20,6 +20,20 @@ worker w1       worker w2      worker w3
 
 核心思路：**账号 = 一个 Claude Code 配置目录。** 每个 worker 拥有自己的 `~/.claude-<名称>` 目录；登录一次后，保存的登录状态会被持续复用。扩展本身从不接触令牌或凭据 — 登录与刷新完全由 Claude Code 处理。
 
+## 截图
+
+*编排器会话制定计划、通过 `orchestrator_briefing` 报到，并把实现工作分发给各 worker：*
+
+![在 Claude Code 面板中调度的编排器会话](media/screenshots/panel.png)
+
+*带分窗口用量的 worker 账号，以及实时任务流：*
+
+![Worker Accounts 与 Dispatched Tasks 视图](media/screenshots/sidebar.png)
+
+*仪表盘：统计卡片、活动图表、各 worker 用量，以及包含 frontier 计费防护的设置面板：*
+
+![编排器仪表盘](media/screenshots/dashboard.png)
+
 ## 环境要求
 
 - VS Code 1.90+
