@@ -167,7 +167,7 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
         '(session %, weekly %) is only visible inside Claude Code — this opens a terminal on this ' +
         'account; type /usage there.',
       command: {
-        command: 'fableOrchestrator.loginWorker',
+        command: 'claudeCodeOrchestrator.loginWorker',
         title: 'Check plan quota',
         arguments: [{ id: worker.name }],
       },
@@ -208,7 +208,7 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
       event.status === 'running' ? 'sync~spin' : event.status === 'done' ? 'check' : 'error',
     );
     item.command = {
-      command: 'fableOrchestrator.showTaskOutput',
+      command: 'claudeCodeOrchestrator.showTaskOutput',
       title: 'Show Task Output',
       arguments: [event.outputFile],
     };

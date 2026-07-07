@@ -5,7 +5,7 @@ import * as path from 'path';
 /**
  * Shared state between the VS Code extension and the standalone MCP dispatch
  * server (which runs in a separate process, spawned by the Claude Code CLI).
- * Everything lives under ~/.fable-orchestrator. This module must not import
+ * Everything lives under ~/.claude-code-orchestrator. This module must not import
  * 'vscode'.
  */
 
@@ -79,7 +79,16 @@ export interface TaskEvent {
   cwd?: string;
 }
 
-export const ROOT_DIR = path.join(os.homedir(), '.fable-orchestrator');
+/** Pre-rename data directory — migrated to ROOT_DIR on first load. */
+export const LEGACY_ROOT_DIR = path.join(os.homedir(), '.fable-orchestrator');
+export const ROOT_DIR = path.join(os.homedir(), '.claude-code-orchestrator');
+try {
+  if (!fs.existsSync(ROOT_DIR) && fs.existsSync(LEGACY_ROOT_DIR)) {
+    fs.renameSync(LEGACY_ROOT_DIR, ROOT_DIR);
+  }
+} catch {
+  // migration is best-effort; a fresh ROOT_DIR is created on demand
+}
 export const REGISTRY_FILE = path.join(ROOT_DIR, 'registry.json');
 export const TASKS_LOG_FILE = path.join(ROOT_DIR, 'tasks.jsonl');
 export const TASKS_DIR = path.join(ROOT_DIR, 'tasks');
