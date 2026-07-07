@@ -1,5 +1,8 @@
 .vscode/**
 src/**
+docs/**
+README.ko.md
+README.zh-CN.md
 node_modules/**
 out/**/*.map
 tsconfig.json
