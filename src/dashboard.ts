@@ -9,7 +9,12 @@ import {
 } from './registry';
 import { isFrontierTier } from './prompts';
 
-const SETTING_KEYS = ['workerPermissionMode', 'claudePath', 'quotaCooldownMinutes'] as const;
+const SETTING_KEYS = [
+  'workerPermissionMode',
+  'claudePath',
+  'quotaCooldownMinutes',
+  'frontierWorkerDispatch',
+] as const;
 const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks'] as const;
 
 /** Per-day done/error counts for the trailing N days, scoped to a workspace. */
@@ -101,6 +106,7 @@ export function openDashboard(): void {
         workerPermissionMode: cfg.get('workerPermissionMode', 'acceptEdits'),
         claudePath: cfg.get('claudePath', 'claude'),
         quotaCooldownMinutes: cfg.get('quotaCooldownMinutes', 30),
+        frontierWorkerDispatch: cfg.get('frontierWorkerDispatch', 'block'),
       },
     });
   };
@@ -233,6 +239,10 @@ export function dashboardHtml(): string {
       <input id="s-path" type="text" spellcheck="false">
       <label for="s-cool">quota cooldown (minutes)</label>
       <input id="s-cool" type="number" min="1">
+      <label for="s-frontier">frontier worker dispatch (claude-fable-5 — may bill per use)</label>
+      <select id="s-frontier">
+        <option value="block">block (billing guard)</option><option value="allow">allow</option>
+      </select>
       <div class="actions">
         <button data-cmd="installMcp">Register MCP here</button>
         <button data-cmd="addDispatchPolicy">Add policy to CLAUDE.md</button>
@@ -278,6 +288,7 @@ export function dashboardHtml(): string {
   bindSetting('s-perm', 'workerPermissionMode', (v) => v, 'change', 0);
   bindSetting('s-path', 'claudePath', (v) => v.trim(), 'input', 700);
   bindSetting('s-cool', 'quotaCooldownMinutes', (v) => Math.max(1, Number(v) || 30), 'input', 700);
+  bindSetting('s-frontier', 'frontierWorkerDispatch', (v) => v, 'change', 0);
   for (const b of document.querySelectorAll('button[data-cmd]')) {
     b.addEventListener('click', () => vscode.postMessage({ type: 'runCommand', id: b.dataset.cmd }));
   }
@@ -386,6 +397,7 @@ export function dashboardHtml(): string {
     if (editing !== 's-perm') document.getElementById('s-perm').value = data.settings.workerPermissionMode;
     if (editing !== 's-path') document.getElementById('s-path').value = data.settings.claudePath;
     if (editing !== 's-cool') document.getElementById('s-cool').value = data.settings.quotaCooldownMinutes;
+    if (editing !== 's-frontier') document.getElementById('s-frontier').value = data.settings.frontierWorkerDispatch;
   }
 </script>
 </body>

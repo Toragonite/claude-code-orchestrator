@@ -37,6 +37,13 @@ export interface Registry {
   claudePath: string;
   /** Minutes a worker sits out after a quota/rate-limit error. */
   cooldownMinutes: number;
+  /**
+   * Billing guard for frontier worker models (claude-fable-5): 'block'
+   * rejects such dispatches at the server with a fall-back hint. Defaults to
+   * 'block' because frontier models may bill per use instead of drawing from
+   * the subscription quota.
+   */
+  frontierWorkerDispatch: 'allow' | 'block';
 }
 
 /** Cumulative per-worker usage, tracked from CLI JSON results. */
@@ -107,6 +114,7 @@ const DEFAULTS: Registry = {
   permissionMode: 'acceptEdits',
   claudePath: 'claude',
   cooldownMinutes: 30,
+  frontierWorkerDispatch: 'block',
 };
 
 export function ensureDirs(): void {
