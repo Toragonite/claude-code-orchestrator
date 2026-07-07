@@ -20,6 +20,20 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 
 핵심 아이디어: **계정 = Claude Code config 디렉토리.** 워커마다 `~/.claude-<이름>` 디렉토리를 만들고 그 계정으로 한 번만 로그인해두면 저장된 로그인이 계속 재사용됩니다. 이 익스텐션은 토큰이나 자격 증명을 직접 다루지 않습니다 — 로그인/갱신은 전부 Claude Code가 처리합니다.
 
+## 스크린샷
+
+*오케스트레이터 세션이 계획을 세우고 `orchestrator_briefing`으로 체크인한 뒤 구현을 워커들에게 분배하는 모습:*
+
+![Claude Code 패널에서 디스패치하는 오케스트레이터 세션](media/screenshots/panel.png)
+
+*윈도우별 사용량이 표시되는 워커 계정과 라이브 태스크 피드:*
+
+![Worker Accounts와 Dispatched Tasks 뷰](media/screenshots/sidebar.png)
+
+*대시보드: 통계 타일, 활동 차트, 워커별 사용량, frontier 과금 가드를 포함한 설정:*
+
+![오케스트레이터 대시보드](media/screenshots/dashboard.png)
+
 ## 요구 사항
 
 - VS Code 1.90+

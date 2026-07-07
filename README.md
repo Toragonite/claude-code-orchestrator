@@ -20,6 +20,20 @@ worker w1       worker w2      worker w3
 
 The core idea: **an account is just a Claude Code config directory.** Each worker gets its own `~/.claude-<name>` directory; you sign in once and the stored login is reused from then on. The extension never touches tokens or credentials — login and refresh are handled entirely by Claude Code itself.
 
+## Screenshots
+
+*The orchestrator session plans, checks in via `orchestrator_briefing`, and fans implementation out to workers:*
+
+![Orchestrator session dispatching from the Claude Code panel](media/screenshots/panel.png)
+
+*Worker accounts with per-window usage, and the live task feed:*
+
+![Worker Accounts and Dispatched Tasks views](media/screenshots/sidebar.png)
+
+*The dashboard: stat tiles, activity charts, per-worker usage, and settings — including the frontier billing guard:*
+
+![Orchestrator Dashboard](media/screenshots/dashboard.png)
+
 ## Requirements
 
 - VS Code 1.90+
