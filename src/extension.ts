@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { WorkerManager } from './workerManager';
@@ -8,15 +7,16 @@ import { TasksProvider, WorkersProvider } from './views';
 import { clearTaskLog, LEGACY_ROOT_DIR, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
+import { openAssetManager } from './assetManager';
+import { resolvePackSources } from './packSources';
 import {
   AssetPack,
   AssetType,
   assetStatus,
-  loadPack,
-  PackAsset,
+  describeSyncReport,
   readAssetState,
+  relOwners,
   setAssetEnabled,
-  SyncReport,
   syncWorkspace,
 } from './assets';
 
@@ -187,24 +187,15 @@ async function maybeOfferMcpRegistration(
  * any directories in the assetPacks setting (e.g. a private asset-repo clone).
  */
 function loadAssetPacks(context: vscode.ExtensionContext, interactive: boolean): AssetPack[] {
-  const packs: AssetPack[] = [];
-  const bundled = loadPack(context.asAbsolutePath('assets'), 'bundled');
-  if (bundled) {
-    packs.push(bundled);
-  }
-  const extra = vscode.workspace
-    .getConfiguration('claudeCodeOrchestrator')
-    .get<string[]>('assetPacks', []);
-  for (const entry of extra) {
-    const root = entry.startsWith('~') ? path.join(os.homedir(), entry.slice(1)) : entry;
-    const pack = loadPack(root);
-    if (pack) {
-      packs.push(pack);
-    } else if (interactive) {
-      void vscode.window.showWarningMessage(`Asset pack directory not found: ${entry}`);
+  const sources = resolvePackSources(context);
+  if (interactive) {
+    for (const source of sources) {
+      if (source.kind === 'setting' && !source.pack) {
+        void vscode.window.showWarningMessage(`Asset pack directory not found: ${source.entry}`);
+      }
     }
   }
-  return packs;
+  return sources.flatMap((source) => (source.pack ? [source.pack] : []));
 }
 
 const ASSET_TYPE_ICONS: Record<AssetType, string> = {
@@ -213,26 +204,6 @@ const ASSET_TYPE_ICONS: Record<AssetType, string> = {
   command: 'terminal',
   'output-style': 'paintcan',
 };
-
-function describeSyncReport(report: SyncReport): string {
-  const parts: string[] = [];
-  if (report.installed.length) {
-    parts.push(`${report.installed.length} installed`);
-  }
-  if (report.updated.length) {
-    parts.push(`${report.updated.length} updated`);
-  }
-  if (report.removed.length) {
-    parts.push(`${report.removed.length} file(s) removed`);
-  }
-  if (report.customized.length) {
-    parts.push(`${report.customized.length} customized file(s) left untouched`);
-  }
-  if (report.orphaned.length) {
-    parts.push(`${report.orphaned.length} asset(s) missing their pack`);
-  }
-  return parts.length ? parts.join(', ') : 'everything up to date';
-}
 
 /** One-time copy of user-set values from the pre-rename settings namespace. */
 async function migrateLegacySettings(): Promise<void> {
@@ -454,6 +425,10 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
 
+    vscode.commands.registerCommand('claudeCodeOrchestrator.openAssetManager', () =>
+      openAssetManager(context),
+    ),
+
     vscode.commands.registerCommand('claudeCodeOrchestrator.manageAssets', async () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
@@ -471,14 +446,17 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const ws = folder.uri.fsPath;
       const state = readAssetState(ws);
+      const owners = relOwners(assets, state);
       const items = assets.map((asset) => {
-        const status = assetStatus(asset, state, ws);
+        const status = assetStatus(asset, state, ws, owners);
         const statusNote =
           status === 'customized'
             ? ' · customized (sync paused)'
             : status === 'update-available'
               ? ' · update available'
-              : '';
+              : status === 'conflict'
+                ? ' · conflict (same install path as another enabled asset)'
+                : '';
         return {
           label: `$(${ASSET_TYPE_ICONS[asset.type]}) ${asset.id}`,
           description: `${asset.pack} · ${asset.type}${statusNote}`,
@@ -522,9 +500,11 @@ export function activate(context: vscode.ExtensionContext): void {
       const ws = folder.uri.fsPath;
       const packs = loadAssetPacks(context, true);
       const state = readAssetState(ws);
-      const customized = packs
-        .flatMap((p) => p.assets)
-        .filter((asset) => assetStatus(asset, state, ws) === 'customized');
+      const allAssets = packs.flatMap((p) => p.assets);
+      const owners = relOwners(allAssets, state);
+      const customized = allAssets.filter(
+        (asset) => assetStatus(asset, state, ws, owners) === 'customized',
+      );
       if (customized.length === 0) {
         vscode.window.showInformationMessage('No customized assets in this workspace — nothing to reset.');
         return;

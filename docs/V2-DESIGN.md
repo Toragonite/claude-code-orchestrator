@@ -44,13 +44,37 @@ Disabling an asset removes only files whose disk hash matches the ledger;
 customized copies stay. A pre-existing file at an asset's target path is
 treated as customized (never clobbered). An enabled asset whose pack is
 unavailable (private clone missing on this machine) is reported as orphaned
-and its files are left alone. `Reset Customized Asset to Pack Version` is the
+and its files are left alone. Reset (whole asset, or a single file) is the
 explicit escape hatch that force-overwrites.
+
+Hardening (from the adversarial review):
+
+- rel paths are validated (`isSafeRel`) at every write/delete — a tampered or
+  corrupt ledger cannot reach outside `.claude/`.
+- Install-path conflicts (two enabled assets shipping the same rel, e.g. a
+  private override of a bundled command): the first pack in order owns the
+  path; the loser is reported/badged as `conflict`, never mislabeled
+  customized. Disabling the owner hands the recorded hash to the other
+  enabled claimant instead of deleting the file.
+- Pack renames migrate ledger records to the new keys (matched by recorded
+  install paths) instead of orphaning the pack's own installs.
+- The ledger is written atomically (tmp+rename); an unparseable ledger is
+  moved aside to `cco-assets.json.corrupt` rather than silently replaced.
+- A no-op sync in a workspace with nothing managed writes nothing — bare
+  repos stay bare.
 
 ### Surface
 
-- Commands: `manageAssets` (multi-select picker, per workspace),
-  `syncAssets`, `resetAsset`.
+- **Asset Manager panel** (`openAssetManager`, dashboard button, view title
+  icon): pack-source administration (add/remove/reveal), per-workspace toggle
+  table with status badges (synced / update available / customized /
+  conflict / not installed), summary counts, filter (matches status words),
+  per-file detail rows with open / pack version / diff (any out-of-sync
+  installed file) / per-file reset, orphan card with confirmed clean-up, and
+  guided `New asset…` scaffolding into a writable pack. Polling is gated on
+  panel visibility. Destructive actions (reset, orphan clean) confirm via
+  modal listing the affected files.
+- Commands: `manageAssets` (quick pick), `syncAssets`, `resetAsset`.
 - Settings: `assetPacks: string[]`, `assetAutoSync: boolean` (default true —
   silent refresh on activation, notification only when something changed).
 
@@ -58,8 +82,7 @@ explicit escape hatch that force-overwrites.
 
 - Hook/settings-fragment assets (needs JSON merge, not file copy — riskier).
 - Nested command namespaces (`commands/foo/bar.md`).
-- Tree view with per-asset status instead of the QuickPick.
-- Diff view for customized files (ledger hash vs disk vs pack).
+- mtime-keyed hash cache if large packs make the visible-poll noticeable.
 
 ## 2. Main-session check-in freshness
 

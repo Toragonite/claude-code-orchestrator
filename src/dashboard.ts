@@ -16,7 +16,7 @@ const SETTING_KEYS = [
   'quotaCooldownMinutes',
   'frontierWorkerDispatch',
 ] as const;
-const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks'] as const;
+const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks', 'openAssetManager'] as const;
 
 /** Per-day done/error counts for the trailing N days, scoped to a workspace. */
 function dailyCounts(root: string | undefined, days: number) {
@@ -255,6 +255,7 @@ export function dashboardHtml(): string {
         <button data-cmd="installMcp">Register MCP here</button>
         <button data-cmd="addDispatchPolicy">Add policy to CLAUDE.md</button>
         <button data-cmd="addWorker">Add worker</button>
+        <button data-cmd="openAssetManager">Manage assets</button>
         <button data-cmd="clearTasks">Clear task history</button>
         <button id="reset-checkin" title="Clear the recorded main-session check-in for this workspace — use after switching the main account; the next orchestrator_briefing call re-registers it.">Reset session check-in</button>
       </div>

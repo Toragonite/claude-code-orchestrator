@@ -59,7 +59,7 @@ export interface AssetState {
   assets: Record<string, AssetRecord>;
 }
 
-export type AssetStatus = 'not-installed' | 'synced' | 'update-available' | 'customized';
+export type AssetStatus = 'not-installed' | 'synced' | 'update-available' | 'customized' | 'conflict';
 
 export interface SyncReport {
   /** Asset keys installed for the first time. */
@@ -72,10 +72,48 @@ export interface SyncReport {
   customized: string[];
   /** Enabled asset keys whose pack is currently unavailable (files kept as-is). */
   orphaned: string[];
+  /** rel paths skipped because another enabled asset owns the same install path. */
+  conflicts: string[];
 }
 
 export function sha256(content: Buffer | string): string {
   return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+/** One-line human summary of a sync run. */
+export function describeSyncReport(report: SyncReport): string {
+  const parts: string[] = [];
+  if (report.installed.length) {
+    parts.push(`${report.installed.length} installed`);
+  }
+  if (report.updated.length) {
+    parts.push(`${report.updated.length} updated`);
+  }
+  if (report.removed.length) {
+    parts.push(`${report.removed.length} file(s) removed`);
+  }
+  if (report.customized.length) {
+    parts.push(`${report.customized.length} customized file(s) left untouched`);
+  }
+  if (report.orphaned.length) {
+    parts.push(`${report.orphaned.length} asset(s) missing their pack`);
+  }
+  if (report.conflicts.length) {
+    parts.push(`${report.conflicts.length} install-path conflict(s)`);
+  }
+  return parts.length ? parts.join(', ') : 'everything up to date';
+}
+
+/**
+ * A rel path must resolve inside `.claude/`. Pack scanning can only produce
+ * safe components, but rels are also read back from the on-disk ledger, which
+ * a repo or a bad edit could seed with traversal segments.
+ */
+export function isSafeRel(rel: string): boolean {
+  return (
+    rel.length > 0 &&
+    rel.split('/').every((seg) => seg && seg !== '.' && seg !== '..' && !seg.includes('\\') && !seg.includes(':'))
+  );
 }
 
 function tryHashFile(file: string): string | undefined {
@@ -189,10 +227,25 @@ export function assetStateFile(workspaceRoot: string): string {
 }
 
 export function readAssetState(workspaceRoot: string): AssetState {
+  const file = assetStateFile(workspaceRoot);
+  let raw: string;
   try {
-    const raw = JSON.parse(fs.readFileSync(assetStateFile(workspaceRoot), 'utf8')) as Partial<AssetState>;
-    return { version: 1, assets: raw.assets ?? {} };
+    raw = fs.readFileSync(file, 'utf8');
   } catch {
+    return { version: 1, assets: {} }; // no ledger yet — fresh workspace
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<AssetState>;
+    return { version: 1, assets: parsed.assets ?? {} };
+  } catch {
+    // Unparseable ledger: move it aside instead of letting the next write
+    // silently persist an empty one over it. Installed files degrade to
+    // 'customized' (protected), and the backup allows manual recovery.
+    try {
+      fs.renameSync(file, file + '.corrupt');
+    } catch {
+      // best effort — worst case we behave like the old silent-empty path
+    }
     return { version: 1, assets: {} };
   }
 }
@@ -200,7 +253,10 @@ export function readAssetState(workspaceRoot: string): AssetState {
 export function writeAssetState(workspaceRoot: string, state: AssetState): void {
   const file = assetStateFile(workspaceRoot);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(state, null, 2) + '\n');
+  // Atomic replace — a crash mid-write must never leave a half ledger.
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
+  fs.renameSync(tmp, file);
 }
 
 export function setAssetEnabled(workspaceRoot: string, key: string, enabled: boolean): void {
@@ -215,41 +271,169 @@ function targetPath(workspaceRoot: string, rel: string): string {
   return path.join(workspaceRoot, '.claude', ...rel.split('/'));
 }
 
+export const ASSET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+const ASSET_TEMPLATES: Record<AssetType, (id: string) => string> = {
+  skill: (id) =>
+    `---\nname: ${id}\ndescription: TODO — one line stating when to use this skill.\n---\n\n# ${id}\n\nTODO: instructions.\n`,
+  agent: (id) =>
+    `---\nname: ${id}\ndescription: TODO — when this agent should be used.\n---\n\nTODO: system prompt for the ${id} agent.\n`,
+  command: () => `---\ndescription: TODO — what this command does.\n---\n\nTODO: prompt. Use $ARGUMENTS for user input.\n`,
+  'output-style': (id) =>
+    `---\nname: ${id}\ndescription: TODO — what this output style changes.\n---\n\nTODO: style instructions.\n`,
+};
+
+/**
+ * Scaffold a new asset in a pack directory and return the absolute path of
+ * its primary file. Throws when the id is invalid or the asset already exists.
+ */
+export function createAssetTemplate(packRoot: string, type: AssetType, id: string): string {
+  if (!ASSET_ID_PATTERN.test(id)) {
+    throw new Error(`Invalid asset id "${id}" — use letters, digits, ".", "-" or "_".`);
+  }
+  const dir = ASSET_TYPE_DIRS[type];
+  const file =
+    type === 'skill' ? path.join(packRoot, dir, id, 'SKILL.md') : path.join(packRoot, dir, `${id}.md`);
+  if (fs.existsSync(type === 'skill' ? path.dirname(file) : file)) {
+    throw new Error(`Asset "${id}" already exists in ${path.join(packRoot, dir)}.`);
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, ASSET_TEMPLATES[type](id));
+  return file;
+}
+
+/** Sync relationship of one installed file to its pack source. */
+export type FileSyncState =
+  | 'in-sync' // disk matches the pack
+  | 'writable' // missing or untouched since install — sync may write it
+  | 'customized' // edited by hand (or pre-existing) — sync never writes it
+  | 'missing-source'; // pack file unreadable — not the workspace's problem
+
+function fileSyncState(source: string, target: string, recordedHash: string | undefined): FileSyncState {
+  const sourceHash = tryHashFile(source);
+  if (sourceHash === undefined) {
+    return 'missing-source';
+  }
+  const diskHash = tryHashFile(target);
+  if (diskHash === sourceHash) {
+    return 'in-sync';
+  }
+  if (diskHash === undefined || diskHash === recordedHash) {
+    return 'writable';
+  }
+  return 'customized';
+}
+
+export interface AssetFileInfo {
+  /** Install path relative to `.claude/`. */
+  rel: string;
+  /** Absolute pack source path. */
+  source: string;
+  /** Absolute installed path (may not exist yet). */
+  target: string;
+  installed: boolean;
+  state: FileSyncState;
+}
+
+/** Per-file sync detail for one asset — feeds file lists and diff views. */
+export function assetFiles(asset: PackAsset, state: AssetState, workspaceRoot: string): AssetFileInfo[] {
+  const record = state.assets[asset.key];
+  return Object.entries(asset.files).map(([rel, source]) => {
+    const target = targetPath(workspaceRoot, rel);
+    return {
+      rel,
+      source,
+      target,
+      installed: fs.existsSync(target),
+      state: fileSyncState(source, target, record?.files[rel]),
+    };
+  });
+}
+
+/**
+ * First enabled asset claiming each install path, in pack order. Two assets
+ * (e.g. a bundled command and a same-id private override) can target the same
+ * `.claude/` file; sync writes only the owner and reports the rest as
+ * conflicts instead of mislabeling them "customized".
+ */
+export function relOwners(assets: PackAsset[], state: AssetState): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const asset of assets) {
+    if (state.assets[asset.key]?.enabled) {
+      for (const rel of Object.keys(asset.files)) {
+        if (!owners.has(rel)) {
+          owners.set(rel, asset.key);
+        }
+      }
+    }
+  }
+  return owners;
+}
+
 /** Status of one asset in a workspace, for pickers and views. */
-export function assetStatus(asset: PackAsset, state: AssetState, workspaceRoot: string): AssetStatus {
+export function assetStatus(
+  asset: PackAsset,
+  state: AssetState,
+  workspaceRoot: string,
+  owners?: Map<string, string>,
+): AssetStatus {
   const record = state.assets[asset.key];
   if (!record?.enabled) {
     return 'not-installed';
   }
+  if (owners && Object.keys(asset.files).some((rel) => (owners.get(rel) ?? asset.key) !== asset.key)) {
+    return 'conflict';
+  }
   let update = false;
   let customized = false;
   for (const [rel, source] of Object.entries(asset.files)) {
-    const sourceHash = tryHashFile(source);
-    const diskHash = tryHashFile(targetPath(workspaceRoot, rel));
-    if (sourceHash === undefined || diskHash === sourceHash) {
-      continue; // unreadable pack file is not the workspace's problem; equal = in sync
-    }
-    if (diskHash === undefined || diskHash === record.files[rel]) {
-      update = true; // missing or untouched since install — sync may write it
-    } else {
+    const fileState = fileSyncState(source, targetPath(workspaceRoot, rel), record.files[rel]);
+    if (fileState === 'writable') {
+      update = true;
+    } else if (fileState === 'customized') {
       customized = true;
     }
   }
   return customized ? 'customized' : update ? 'update-available' : 'synced';
 }
 
+export interface OrphanedAsset {
+  key: string;
+  /** Recorded install paths (relative to `.claude/`) still tracked for this asset. */
+  files: string[];
+}
+
+/** Enabled assets recorded in the workspace whose pack is not currently loaded. */
+export function orphanedAssets(packs: AssetPack[], workspaceRoot: string): OrphanedAsset[] {
+  const known = new Set(packs.flatMap((pack) => pack.assets.map((asset) => asset.key)));
+  const state = readAssetState(workspaceRoot);
+  return Object.entries(state.assets)
+    .filter(([key, record]) => record.enabled && !known.has(key))
+    .map(([key, record]) => ({ key, files: Object.keys(record.files) }));
+}
+
 /**
  * Reconcile every recorded asset in the workspace with the given packs.
- * Pass keys in `force` to overwrite customized files of those assets with the
- * pack version (explicit reset).
+ * `force` holds asset keys whose customized files should be overwritten with
+ * the pack version (explicit whole-asset reset); `forceFiles` holds
+ * `key\0rel` entries for single-file resets.
  */
 export function syncWorkspace(
   packs: AssetPack[],
   workspaceRoot: string,
   force: Set<string> = new Set(),
+  forceFiles: Set<string> = new Set(),
 ): SyncReport {
   const state = readAssetState(workspaceRoot);
-  const report: SyncReport = { installed: [], updated: [], removed: [], customized: [], orphaned: [] };
+  const before = JSON.stringify(state);
+  const report: SyncReport = {
+    installed: [],
+    updated: [],
+    removed: [],
+    customized: [],
+    orphaned: [],
+    conflicts: [],
+  };
   const byKey = new Map<string, PackAsset>();
   for (const pack of packs) {
     for (const asset of pack.assets) {
@@ -258,6 +442,30 @@ export function syncWorkspace(
       }
     }
   }
+
+  // Pack renames change every asset key (keys embed the pack name). An
+  // enabled record whose key vanished migrates to the single loaded asset
+  // that has no record yet and ships the same install paths, instead of
+  // surfacing as an orphan of a pack that is actually present.
+  for (const [key, record] of Object.entries(state.assets)) {
+    if (!record.enabled || byKey.has(key)) {
+      continue;
+    }
+    const rels = Object.keys(record.files);
+    if (rels.length === 0) {
+      continue;
+    }
+    const candidates = [...byKey.values()].filter(
+      (asset) => !state.assets[asset.key] && rels.some((rel) => rel in asset.files),
+    );
+    if (candidates.length === 1) {
+      state.assets[candidates[0].key] = record;
+      delete state.assets[key];
+    }
+  }
+
+  const owners = relOwners([...byKey.values()], state);
+
   for (const [key, record] of Object.entries(state.assets)) {
     const asset = byKey.get(key);
     if (record.enabled && !asset) {
@@ -268,6 +476,18 @@ export function syncWorkspace(
     }
     if (!record.enabled) {
       for (const rel of Object.keys(record.files)) {
+        const owner = owners.get(rel);
+        if (owner && owner !== key) {
+          // Another enabled asset claims this path — hand the recorded hash
+          // over so the new owner may overwrite the untouched copy, and keep
+          // the file on disk.
+          const ownerRecord = state.assets[owner];
+          if (ownerRecord && ownerRecord.files[rel] === undefined) {
+            ownerRecord.files[rel] = record.files[rel];
+          }
+          delete record.files[rel];
+          continue;
+        }
         removeFileIfOwned(workspaceRoot, record, rel, report);
       }
       if (Object.keys(record.files).length === 0) {
@@ -275,9 +495,17 @@ export function syncWorkspace(
       }
       continue;
     }
-    syncAsset(asset!, record, workspaceRoot, force.has(key), report);
+    syncAsset(asset!, record, workspaceRoot, owners, force.has(key), forceFiles, report);
   }
-  writeAssetState(workspaceRoot, state);
+
+  // Never create (or touch) the ledger when nothing is managed and nothing
+  // changed — a bare workspace must stay bare after a startup auto-sync.
+  const after = JSON.stringify(state);
+  if (after !== before || fs.existsSync(assetStateFile(workspaceRoot))) {
+    if (after !== before || Object.keys(state.assets).length > 0) {
+      writeAssetState(workspaceRoot, state);
+    }
+  }
   return report;
 }
 
@@ -285,12 +513,21 @@ function syncAsset(
   asset: PackAsset,
   record: AssetRecord,
   workspaceRoot: string,
+  owners: Map<string, string>,
   force: boolean,
+  forceFiles: Set<string>,
   report: SyncReport,
 ): void {
   const firstInstall = Object.keys(record.files).length === 0;
   let wrote = false;
   for (const [rel, source] of Object.entries(asset.files)) {
+    if (!isSafeRel(rel)) {
+      continue;
+    }
+    if ((owners.get(rel) ?? asset.key) !== asset.key) {
+      report.conflicts.push(rel);
+      continue;
+    }
     let content: Buffer;
     try {
       content = fs.readFileSync(source);
@@ -306,7 +543,7 @@ function syncAsset(
     }
     // Safe to write only onto nothing or onto our own unmodified copy.
     const safe = diskHash === undefined || diskHash === record.files[rel];
-    if (!safe && !force) {
+    if (!safe && !force && !forceFiles.has(`${asset.key}\0${rel}`)) {
       report.customized.push(rel);
       continue;
     }
@@ -333,6 +570,12 @@ function removeFileIfOwned(
   rel: string,
   report: SyncReport,
 ): void {
+  if (!isSafeRel(rel)) {
+    // A traversal rel can only come from a tampered/corrupt ledger — drop
+    // the record without touching the disk.
+    delete record.files[rel];
+    return;
+  }
   const target = targetPath(workspaceRoot, rel);
   const diskHash = tryHashFile(target);
   if (diskHash !== undefined && diskHash !== record.files[rel]) {

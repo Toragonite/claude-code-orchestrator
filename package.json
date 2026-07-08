@@ -150,10 +150,16 @@
         "icon": "$(book)"
       },
       {
-        "command": "claudeCodeOrchestrator.manageAssets",
-        "title": "Manage Workspace Assets (skills, agents, commands)",
+        "command": "claudeCodeOrchestrator.openAssetManager",
+        "title": "Open Asset Manager (workspace skills, agents, commands)",
         "category": "Claude Code Orchestrator",
         "icon": "$(library)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.manageAssets",
+        "title": "Manage Workspace Assets (quick pick)",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(checklist)"
       },
       {
         "command": "claudeCodeOrchestrator.syncAssets",
@@ -186,7 +192,7 @@
           "group": "navigation@3"
         },
         {
-          "command": "claudeCodeOrchestrator.manageAssets",
+          "command": "claudeCodeOrchestrator.openAssetManager",
           "when": "view == claudeCodeOrchestrator.workers",
           "group": "navigation@4"
         },
@@ -304,7 +310,7 @@
         "claudeCodeOrchestrator.assetAutoSync": {
           "type": "boolean",
           "default": true,
-          "description": "On startup, refresh assets enabled in this workspace when their pack content changed. Files you have edited by hand are never overwritten — they are reported as 'customized' and skipped."
+          "description": "On startup, refresh assets enabled in this workspace when their pack content changed. Files you have edited by hand are never overwritten — the Asset Manager shows them as 'customized', with a diff against the pending pack version."
         },
         "claudeCodeOrchestrator.frontierWorkerDispatch": {
           "type": "string",
