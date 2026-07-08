@@ -1,7 +1,7 @@
 {
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
-  "description": "Unofficial multi-account orchestration for Claude Code: your main session designs and verifies while worker Claude accounts implement in parallel via MCP dispatch tools, with quota-aware failover and per-account usage tracking.",
+  "description": "Run Claude Code across multiple accounts in parallel. Your main session designs and verifies while worker accounts (Opus/Sonnet) implement via MCP dispatch tools — with quota-aware failover and per-account usage tracking. Unofficial.",
   "version": "1.0.0",
   "publisher": "toragonite",
   "license": "MIT",
@@ -10,19 +10,43 @@
     "type": "git",
     "url": "https://github.com/Toragonite/claude-code-orchestrator.git"
   },
+  "homepage": "https://github.com/Toragonite/claude-code-orchestrator#readme",
+  "bugs": {
+    "url": "https://github.com/Toragonite/claude-code-orchestrator/issues"
+  },
+  "qna": "marketplace",
   "keywords": [
     "claude",
     "claude-code",
+    "anthropic",
     "mcp",
+    "model context protocol",
     "multi-account",
     "orchestration",
-    "agent"
+    "orchestrator",
+    "agent",
+    "agents",
+    "subagent",
+    "ai agent",
+    "parallel",
+    "dispatch",
+    "worker",
+    "opus",
+    "sonnet",
+    "quota",
+    "failover",
+    "usage tracking",
+    "dashboard",
+    "cli",
+    "automation",
+    "coding agent",
+    "llm"
   ],
   "engines": {
     "vscode": "^1.90.0"
   },
   "categories": [
-    "AI",
+    "Machine Learning",
     "Other"
   ],
   "main": "./out/extension.js",
