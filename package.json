@@ -148,6 +148,24 @@
         "title": "Add Dispatch Policy to CLAUDE.md",
         "category": "Claude Code Orchestrator",
         "icon": "$(book)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.manageAssets",
+        "title": "Manage Workspace Assets (skills, agents, commands)",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(library)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.syncAssets",
+        "title": "Sync Workspace Assets Now",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.resetAsset",
+        "title": "Reset Customized Asset to Pack Version",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(discard)"
       }
     ],
     "menus": {
@@ -166,6 +184,11 @@
           "command": "claudeCodeOrchestrator.installMcp",
           "when": "view == claudeCodeOrchestrator.workers",
           "group": "navigation@3"
+        },
+        {
+          "command": "claudeCodeOrchestrator.manageAssets",
+          "when": "view == claudeCodeOrchestrator.workers",
+          "group": "navigation@4"
         },
         {
           "command": "claudeCodeOrchestrator.toggleTaskScope",
@@ -269,6 +292,19 @@
           "type": "number",
           "default": 30,
           "description": "Minutes a worker account sits out after a quota/rate-limit error before dispatches are routed to it again."
+        },
+        "claudeCodeOrchestrator.assetPacks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional asset-pack directories ('~' allowed). Each pack mirrors the .claude/ layout — skills/, agents/, commands/, output-styles/ — and its assets become available in 'Manage Workspace Assets'. Point this at a clone of a private asset repo to keep personal assets out of the public extension."
+        },
+        "claudeCodeOrchestrator.assetAutoSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "On startup, refresh assets enabled in this workspace when their pack content changed. Files you have edited by hand are never overwritten — they are reported as 'customized' and skipped."
         },
         "claudeCodeOrchestrator.frontierWorkerDispatch": {
           "type": "string",

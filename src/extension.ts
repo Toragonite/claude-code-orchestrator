@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { WorkerManager } from './workerManager';
@@ -7,6 +8,17 @@ import { TasksProvider, WorkersProvider } from './views';
 import { clearTaskLog, LEGACY_ROOT_DIR, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
+import {
+  AssetPack,
+  AssetType,
+  assetStatus,
+  loadPack,
+  PackAsset,
+  readAssetState,
+  setAssetEnabled,
+  SyncReport,
+  syncWorkspace,
+} from './assets';
 
 const MCP_SERVER_NAME = 'cco-dispatch';
 /** Pre-rename server key — removed from .mcp.json when re-registering. */
@@ -168,6 +180,58 @@ async function maybeOfferMcpRegistration(
   } else if (choice === 'Not in this workspace') {
     await context.workspaceState.update(dismissKey, true);
   }
+}
+
+/**
+ * Asset packs to draw from: the extension's bundled `assets/` directory plus
+ * any directories in the assetPacks setting (e.g. a private asset-repo clone).
+ */
+function loadAssetPacks(context: vscode.ExtensionContext, interactive: boolean): AssetPack[] {
+  const packs: AssetPack[] = [];
+  const bundled = loadPack(context.asAbsolutePath('assets'), 'bundled');
+  if (bundled) {
+    packs.push(bundled);
+  }
+  const extra = vscode.workspace
+    .getConfiguration('claudeCodeOrchestrator')
+    .get<string[]>('assetPacks', []);
+  for (const entry of extra) {
+    const root = entry.startsWith('~') ? path.join(os.homedir(), entry.slice(1)) : entry;
+    const pack = loadPack(root);
+    if (pack) {
+      packs.push(pack);
+    } else if (interactive) {
+      void vscode.window.showWarningMessage(`Asset pack directory not found: ${entry}`);
+    }
+  }
+  return packs;
+}
+
+const ASSET_TYPE_ICONS: Record<AssetType, string> = {
+  skill: 'sparkle',
+  agent: 'hubot',
+  command: 'terminal',
+  'output-style': 'paintcan',
+};
+
+function describeSyncReport(report: SyncReport): string {
+  const parts: string[] = [];
+  if (report.installed.length) {
+    parts.push(`${report.installed.length} installed`);
+  }
+  if (report.updated.length) {
+    parts.push(`${report.updated.length} updated`);
+  }
+  if (report.removed.length) {
+    parts.push(`${report.removed.length} file(s) removed`);
+  }
+  if (report.customized.length) {
+    parts.push(`${report.customized.length} customized file(s) left untouched`);
+  }
+  if (report.orphaned.length) {
+    parts.push(`${report.orphaned.length} asset(s) missing their pack`);
+  }
+  return parts.length ? parts.join(', ') : 'everything up to date';
 }
 
 /** One-time copy of user-set values from the pre-rename settings namespace. */
@@ -389,7 +453,114 @@ export function activate(context: vscode.ExtensionContext): void {
         'Dispatch policy written to CLAUDE.md (existing policy block updated in place).',
       );
     }),
+
+    vscode.commands.registerCommand('claudeCodeOrchestrator.manageAssets', async () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      if (!folder) {
+        vscode.window.showErrorMessage('Open a workspace folder first.');
+        return;
+      }
+      const packs = loadAssetPacks(context, true);
+      const assets = packs.flatMap((p) => p.assets);
+      if (assets.length === 0) {
+        vscode.window.showInformationMessage(
+          'No assets found. Add skills/agents/commands to the bundled pack or point ' +
+            '"claudeCodeOrchestrator.assetPacks" at an asset directory (e.g. a private repo clone).',
+        );
+        return;
+      }
+      const ws = folder.uri.fsPath;
+      const state = readAssetState(ws);
+      const items = assets.map((asset) => {
+        const status = assetStatus(asset, state, ws);
+        const statusNote =
+          status === 'customized'
+            ? ' · customized (sync paused)'
+            : status === 'update-available'
+              ? ' · update available'
+              : '';
+        return {
+          label: `$(${ASSET_TYPE_ICONS[asset.type]}) ${asset.id}`,
+          description: `${asset.pack} · ${asset.type}${statusNote}`,
+          detail: asset.description,
+          picked: state.assets[asset.key]?.enabled === true,
+          asset,
+        };
+      });
+      const picked = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        placeHolder:
+          "Assets to install into this workspace's .claude/ — unchecking removes files you haven't modified",
+      });
+      if (!picked) {
+        return;
+      }
+      const chosen = new Set(picked.map((item) => item.asset.key));
+      for (const asset of assets) {
+        setAssetEnabled(ws, asset.key, chosen.has(asset.key));
+      }
+      const report = syncWorkspace(packs, ws);
+      vscode.window.showInformationMessage(`Workspace assets synced: ${describeSyncReport(report)}.`);
+    }),
+
+    vscode.commands.registerCommand('claudeCodeOrchestrator.syncAssets', () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      if (!folder) {
+        vscode.window.showErrorMessage('Open a workspace folder first.');
+        return;
+      }
+      const report = syncWorkspace(loadAssetPacks(context, true), folder.uri.fsPath);
+      vscode.window.showInformationMessage(`Workspace assets synced: ${describeSyncReport(report)}.`);
+    }),
+
+    vscode.commands.registerCommand('claudeCodeOrchestrator.resetAsset', async () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      if (!folder) {
+        vscode.window.showErrorMessage('Open a workspace folder first.');
+        return;
+      }
+      const ws = folder.uri.fsPath;
+      const packs = loadAssetPacks(context, true);
+      const state = readAssetState(ws);
+      const customized = packs
+        .flatMap((p) => p.assets)
+        .filter((asset) => assetStatus(asset, state, ws) === 'customized');
+      if (customized.length === 0) {
+        vscode.window.showInformationMessage('No customized assets in this workspace — nothing to reset.');
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(
+        customized.map((asset) => ({
+          label: asset.id,
+          description: `${asset.pack} · ${asset.type}`,
+          detail: 'Overwrites your local edits with the pack version.',
+          asset,
+        })),
+        { placeHolder: 'Customized asset to reset to its pack version (local edits are lost)' },
+      );
+      if (!picked) {
+        return;
+      }
+      const report = syncWorkspace(packs, ws, new Set([picked.asset.key]));
+      vscode.window.showInformationMessage(`"${picked.asset.id}" reset: ${describeSyncReport(report)}.`);
+    }),
   );
+
+  // Keep enabled assets fresh on startup: pack updates flow in automatically,
+  // hand-edited files are reported but never overwritten.
+  if (vscode.workspace.getConfiguration('claudeCodeOrchestrator').get<boolean>('assetAutoSync', true)) {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (folder) {
+      try {
+        const report = syncWorkspace(loadAssetPacks(context, false), folder.uri.fsPath);
+        if (report.installed.length || report.updated.length || report.removed.length) {
+          vscode.window.showInformationMessage(`Claude assets synced: ${describeSyncReport(report)}.`);
+        }
+      } catch {
+        // asset sync must never block activation
+      }
+    }
+  }
 }
 
 async function resolveWorker(workers: WorkerManager, item?: { id?: string }) {

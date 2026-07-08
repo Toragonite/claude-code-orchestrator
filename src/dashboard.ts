@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import {
+  clearOrchestrator,
   readOrchestrators,
   readRegistry,
   readStats,
@@ -95,9 +96,10 @@ export function openDashboard(): void {
     void panel.webview.postMessage({
       type: 'data',
       workspace: root ?? null,
-      orchestrator: checkin
+      orchestrator: checkin?.model
         ? { model: checkin.model, ts: checkin.ts, calibrated: !isFrontierTier(checkin.model) }
         : null,
+      sessionLastSeen: checkin?.lastSeen ?? null,
       workers,
       tasks,
       running: all.filter((e) => e.status === 'running').length,
@@ -129,6 +131,12 @@ export function openDashboard(): void {
         send();
       } else if (msg.type === 'runCommand' && (COMMAND_IDS as readonly string[]).includes(msg.id ?? '')) {
         await vscode.commands.executeCommand(`claudeCodeOrchestrator.${msg.id}`);
+        send();
+      } else if (msg.type === 'resetCheckin') {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (root) {
+          clearOrchestrator(root);
+        }
         send();
       }
     },
@@ -248,6 +256,7 @@ export function dashboardHtml(): string {
         <button data-cmd="addDispatchPolicy">Add policy to CLAUDE.md</button>
         <button data-cmd="addWorker">Add worker</button>
         <button data-cmd="clearTasks">Clear task history</button>
+        <button id="reset-checkin" title="Clear the recorded main-session check-in for this workspace — use after switching the main account; the next orchestrator_briefing call re-registers it.">Reset session check-in</button>
       </div>
       <p class="muted" style="font-size:0.8em;margin-top:12px">
         Charts count only dispatches made through this extension. For an account's real plan quota,
@@ -292,6 +301,7 @@ export function dashboardHtml(): string {
   for (const b of document.querySelectorAll('button[data-cmd]')) {
     b.addEventListener('click', () => vscode.postMessage({ type: 'runCommand', id: b.dataset.cmd }));
   }
+  document.getElementById('reset-checkin').addEventListener('click', () => vscode.postMessage({ type: 'resetCheckin' }));
 
   // --- charts (hand-rolled SVG, theme-var colors) ---
   function dailyChart(daily) {
@@ -336,12 +346,26 @@ export function dashboardHtml(): string {
     return s + '</svg>';
   }
 
+  const ago = (t) => {
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    return s < 90 ? s + 's' : s < 5400 ? Math.round(s / 60) + 'm' : Math.round(s / 3600) + 'h';
+  };
+
   function render() {
     if (!data) return;
     const o = data.orchestrator;
+    let session;
+    if (o) {
+      session = o.model + (o.calibrated ? ' (calibration active)' : ' (frontier tier)') +
+        ' · briefed ' + ago(o.ts) + ' ago' +
+        (data.sessionLastSeen && data.sessionLastSeen > o.ts ? ' · active ' + ago(data.sessionLastSeen) + ' ago' : '');
+    } else if (data.sessionLastSeen) {
+      session = 'active ' + ago(data.sessionLastSeen) + ' ago — briefing pending (model unknown)';
+    } else {
+      session = 'not checked in yet';
+    }
     document.getElementById('meta').textContent =
-      (data.workspace ? 'workspace: ' + data.workspace : 'no workspace open') + '   |   main session: ' +
-      (o ? o.model + (o.calibrated ? ' (calibration active)' : ' (frontier tier)') : 'not checked in yet');
+      (data.workspace ? 'workspace: ' + data.workspace : 'no workspace open') + '   |   main session: ' + session;
 
     // tiles
     const d7 = data.daily.slice(-7);

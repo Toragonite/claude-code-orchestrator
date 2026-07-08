@@ -99,6 +99,8 @@ export const ORCHESTRATORS_FILE = path.join(ROOT_DIR, 'orchestrators.json');
 export interface OrchestratorCheckin {
   model: string;
   ts: number;
+  /** Last MCP tool call from this workspace's main session (any tool). */
+  lastSeen?: number;
 }
 
 export type OrchestratorsFile = Record<string, OrchestratorCheckin>;
@@ -114,7 +116,30 @@ export function readOrchestrators(): OrchestratorsFile {
 export function recordOrchestrator(cwd: string, model: string): void {
   ensureDirs();
   const all = readOrchestrators();
-  all[cwd] = { model, ts: Date.now() };
+  const now = Date.now();
+  all[cwd] = { model, ts: now, lastSeen: now };
+  fs.writeFileSync(ORCHESTRATORS_FILE, JSON.stringify(all, null, 2));
+}
+
+/**
+ * Mark the workspace's main session alive on any dispatch-server tool call.
+ * Keeps the dashboard's session indicator fresh even before the session has
+ * (re-)briefed — e.g. right after the main account was switched.
+ */
+export function touchOrchestrator(cwd: string): void {
+  ensureDirs();
+  const all = readOrchestrators();
+  const entry = all[cwd] ?? { model: '', ts: 0 };
+  entry.lastSeen = Date.now();
+  all[cwd] = entry;
+  fs.writeFileSync(ORCHESTRATORS_FILE, JSON.stringify(all, null, 2));
+}
+
+/** Drop a workspace's check-in (dashboard reset after switching accounts). */
+export function clearOrchestrator(cwd: string): void {
+  ensureDirs();
+  const all = readOrchestrators();
+  delete all[cwd];
   fs.writeFileSync(ORCHESTRATORS_FILE, JSON.stringify(all, null, 2));
 }
 

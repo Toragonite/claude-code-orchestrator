@@ -11,6 +11,7 @@ import {
   recordOrchestrator,
   Registry,
   runningCounts,
+  touchOrchestrator,
   TASKS_DIR,
   WORKER_MODELS,
   WorkerProfile,
@@ -535,6 +536,14 @@ async function handleRequest(msg: {
     case 'tools/call': {
       const name = params?.name as string;
       const args = (params?.arguments ?? {}) as DispatchArgs & BatchArgs;
+      // Only the workspace's main session talks to this server, so any tool
+      // call proves it is alive — surfaces activity in the dashboard even
+      // before the session has (re-)briefed.
+      try {
+        touchOrchestrator(process.cwd());
+      } catch {
+        // best-effort liveness marker only
+      }
       pending++;
       try {
         let text: string;
