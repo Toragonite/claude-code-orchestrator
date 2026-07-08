@@ -2,6 +2,8 @@
 
 [English](README.md) | **한국어** | [简体中文](README.zh-CN.md)
 
+![Claude Code Orchestrator — Claude Code를 위한 멀티 계정 병렬 디스패치](media/screenshots/banner.png)
+
 > 비공식(unofficial) 확장입니다 — Anthropic과 무관하며 Anthropic의 보증을 받지 않았습니다. 구 이름: *Fable Orchestrator*.
 
 기존 **Claude Code** 패널을 멀티 계정 오케스트레이터로 확장합니다. 평소처럼 메인 세션과 대화하면, 메인은 설계와 검증을 맡고 구현 작업을 MCP 디스패치 도구로 **워커 Claude 계정들**(Opus / Sonnet — 그리고 과금 가드 뒤의 Fable)에 **병렬** 분배합니다. 계정별 사용량 추적, 쿼터 인지 자동 분산, 라이브 대시보드가 포함됩니다.
@@ -20,6 +22,20 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 
 핵심 아이디어: **계정 = Claude Code config 디렉토리.** 워커마다 `~/.claude-<이름>` 디렉토리를 만들고 그 계정으로 한 번만 로그인해두면 저장된 로그인이 계속 재사용됩니다. 이 익스텐션은 토큰이나 자격 증명을 직접 다루지 않습니다 — 로그인/갱신은 전부 Claude Code가 처리합니다.
 
+## 스크린샷
+
+*오케스트레이터 세션이 계획을 세우고 `orchestrator_briefing`으로 체크인한 뒤 구현을 워커들에게 분배하는 모습:*
+
+![Claude Code 패널에서 디스패치하는 오케스트레이터 세션](media/screenshots/panel.png)
+
+*윈도우별 사용량이 표시되는 워커 계정과 라이브 태스크 피드:*
+
+![Worker Accounts와 Dispatched Tasks 뷰](media/screenshots/sidebar.png)
+
+*대시보드: 통계 타일, 활동 차트, 워커별 사용량, frontier 과금 가드를 포함한 설정:*
+
+![오케스트레이터 대시보드](media/screenshots/dashboard.png)
+
 ## 요구 사항
 
 - VS Code 1.90+
@@ -34,7 +50,7 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 ## 빠른 시작
 
 1. 액티비티 바의 **Claude Code Orchestrator** 뷰 → **Add Worker Account**. 이름(예: `w1`)과 기본 모델을 고르면 터미널이 열립니다 — 그 슬롯에 쓸 Claude 계정으로 **1회 로그인**하세요. 이미 `~/.claude-*` 디렉토리가 있다면 **Import Existing Claude Config Directories**로 일괄 등록.
-2. **Register Dispatch MCP Server in This Workspace** 실행 — 워크스페이스 `.mcp.json`에 `cco-dispatch` 항목을 씁니다 (서버 파일은 `~/.fable-orchestrator/mcp/` 아래 고정 경로에 있어 익스텐션 업데이트로 등록이 깨지지 않습니다).
+2. **Register Dispatch MCP Server in This Workspace** 실행 — 워크스페이스 `.mcp.json`에 `cco-dispatch` 항목을 씁니다 (서버 파일은 `~/.claude-code-orchestrator/mcp/` 아래 고정 경로에 있어 익스텐션 업데이트로 등록이 깨지지 않습니다).
 3. 워크스페이스 `CLAUDE.md`에 **디스패치 정책** 추가 제안을 수락하세요 (나중에 **Add Dispatch Policy to CLAUDE.md**로도 가능).
 4. Claude Code 세션을 재시작하고 프로젝트 MCP 서버를 승인.
 5. 평소처럼 대화하세요. 큰 작업을 주면 메인이 알아서 분배합니다: 독립적인 서브태스크는 워커들에게 병렬로 나가고, 메인은 설계·통합·검증에 집중합니다.
@@ -63,7 +79,7 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 2. **디스패치 정책** (`CLAUDE.md` 블록, 마커 주석 사이에 멱등 업서트) — *메인* 세션의 상시 지침. 핵심은 **오케스트레이터는 구현하지 않는다** — 설계·분해·디스패치·통합·검증만 직접 하고, 프로덕션 코드·테스트·문서는 전부 워커가 작성합니다. 배치 병렬성, 검증 루프, unknown unknowns 사냥, frontier 에스컬레이션 래더, 보고 언어 규칙 포함.
 3. **모델 보정** (`orchestrator_briefing` 응답) — 프론티어 티어 오케스트레이터에는 짧은 확인만 주고 최대한의 자유를 보장합니다. 그 외 티어에는 긴 멀티 에이전트 작업에서 같은 운영 수준을 유지하게 하는 보정 지침이 붙습니다 (위임 강제, 외부화된 계획, 프로브로 추적되는 premortem, dismissal 절차가 있는 적대적 리뷰, 문서 정합 게이트, 근거 기반 주장).
 
-이 스택은 벤치마크로 튜닝되었습니다: 난이도를 올려가며 진행한 4회의 오케스트레이터 A/B 빌드(실행 기반 프로브로 블라인드 판정)에서 프론티어 오케스트레이터와 보정된 Opus 오케스트레이터의 점수 격차가 ~11.5점에서 **기능 결함 양쪽 0인 3점**까지 좁혀졌습니다. [docs/benchmarks.md](docs/benchmarks.md) 참고.
+이 스택은 벤치마크로 튜닝되었습니다: 난이도를 올려가며 진행한 4회의 오케스트레이터 A/B 빌드(실행 기반 프로브로 블라인드 판정)에서 프론티어 오케스트레이터와 보정된 Opus 오케스트레이터의 점수 격차가 ~11.5점에서 **기능 결함 양쪽 0인 3점**까지 좁혀졌습니다. [docs/benchmarks.ko.md](docs/benchmarks.ko.md) 참고.
 
 ## 쿼터 인지 스케줄링과 자동 분산
 
@@ -78,7 +94,7 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 
 - 기본값: **block** — frontier 디스패치를 거부하고, 오케스트레이터를 `claude-opus-4-8` + `ultrathink`로 유도하는 안내 에러를 반환합니다 (재시도·페일오버 없음).
 - `list_workers`와 도구 스키마가 디스패치 시도 전에 가드 상태를 보여줍니다.
-- 의도적으로 열 때만: `fableOrchestrator.frontierWorkerDispatch` 설정 또는 대시보드의 드롭다운. 잘 작동하는 외과적 패턴: 열고 → 중요한 빌드의 적대적 리뷰 1건 디스패치 → 닫기.
+- 의도적으로 열 때만: `claudeCodeOrchestrator.frontierWorkerDispatch` 설정 또는 대시보드의 드롭다운. 잘 작동하는 외과적 패턴: 열고 → 중요한 빌드의 적대적 리뷰 1건 디스패치 → 닫기.
 
 ## 뷰와 대시보드
 
@@ -106,14 +122,14 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 
 | 설정 | 기본값 | 설명 |
 |---|---|---|
-| `fableOrchestrator.workerPermissionMode` | `acceptEdits` | 백그라운드 워커의 `--permission-mode` (`default`는 편집 승인 대기로 멈춤) |
-| `fableOrchestrator.claudePath` | `claude` | Claude Code CLI 경로 |
-| `fableOrchestrator.quotaCooldownMinutes` | `30` | 쿼터 에러 후 해당 워커 배정 제외 시간(분) |
-| `fableOrchestrator.frontierWorkerDispatch` | `block` | frontier 워커 모델 과금 가드 (위 참고) |
+| `claudeCodeOrchestrator.workerPermissionMode` | `acceptEdits` | 백그라운드 워커의 `--permission-mode` (`default`는 편집 승인 대기로 멈춤) |
+| `claudeCodeOrchestrator.claudePath` | `claude` | Claude Code CLI 경로 |
+| `claudeCodeOrchestrator.quotaCooldownMinutes` | `30` | 쿼터 에러 후 해당 워커 배정 제외 시간(분) |
+| `claudeCodeOrchestrator.frontierWorkerDispatch` | `block` | frontier 워커 모델 과금 가드 (위 참고) |
 
 ## 데이터와 프라이버시
 
-모든 것이 로컬에 머뭅니다. 익스텐션과 서버는 `~/.fable-orchestrator/` 아래 상태를 공유합니다: 워커 레지스트리(이름, config dir 경로, 기본 모델 — **토큰·자격 증명 없음**), 워커별 사용량 통계, 태스크 로그, 태스크 결과 마크다운. 사용자가 디스패치한 Claude Code CLI 호출 외에는 아무것도 외부로 전송되지 않습니다. 익스텐션을 제거해도 이 디렉토리는 남습니다 — 완전히 지우려면 직접 삭제하세요.
+모든 것이 로컬에 머뭅니다. 익스텐션과 서버는 `~/.claude-code-orchestrator/` 아래 상태를 공유합니다: 워커 레지스트리(이름, config dir 경로, 기본 모델 — **토큰·자격 증명 없음**), 워커별 사용량 통계, 태스크 로그, 태스크 결과 마크다운. 사용자가 디스패치한 Claude Code CLI 호출 외에는 아무것도 외부로 전송되지 않습니다. 익스텐션을 제거해도 이 디렉토리는 남습니다 — 완전히 지우려면 직접 삭제하세요.
 
 ## 트러블슈팅
 

@@ -2,13 +2,13 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "Unofficial multi-account orchestration for Claude Code: your main session designs and verifies while worker Claude accounts implement in parallel via MCP dispatch tools, with quota-aware failover and per-account usage tracking.",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Toragonite/fable-orchestrator.git"
+    "url": "https://github.com/Toragonite/claude-code-orchestrator.git"
   },
   "keywords": [
     "claude",
@@ -33,21 +33,21 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "fableOrchestrator",
+          "id": "claudeCodeOrchestrator",
           "title": "Claude Code Orchestrator",
           "icon": "$(organization)"
         }
       ]
     },
     "views": {
-      "fableOrchestrator": [
+      "claudeCodeOrchestrator": [
         {
-          "id": "fableOrchestrator.workers",
+          "id": "claudeCodeOrchestrator.workers",
           "name": "Worker Accounts",
           "icon": "$(server-process)"
         },
         {
-          "id": "fableOrchestrator.tasks",
+          "id": "claudeCodeOrchestrator.tasks",
           "name": "Dispatched Tasks",
           "icon": "$(checklist)"
         }
@@ -55,72 +55,72 @@
     },
     "commands": [
       {
-        "command": "fableOrchestrator.addWorker",
+        "command": "claudeCodeOrchestrator.addWorker",
         "title": "Add Worker Account",
         "category": "Claude Code Orchestrator",
         "icon": "$(add)"
       },
       {
-        "command": "fableOrchestrator.importWorkers",
+        "command": "claudeCodeOrchestrator.importWorkers",
         "title": "Import Existing Claude Config Directories",
         "category": "Claude Code Orchestrator",
         "icon": "$(cloud-download)"
       },
       {
-        "command": "fableOrchestrator.removeWorker",
+        "command": "claudeCodeOrchestrator.removeWorker",
         "title": "Remove Worker Account",
         "category": "Claude Code Orchestrator",
         "icon": "$(trash)"
       },
       {
-        "command": "fableOrchestrator.loginWorker",
+        "command": "claudeCodeOrchestrator.loginWorker",
         "title": "Re-login Worker Account (opens terminal to sign in)",
         "category": "Claude Code Orchestrator",
         "icon": "$(sign-in)"
       },
       {
-        "command": "fableOrchestrator.openWorkerSession",
+        "command": "claudeCodeOrchestrator.openWorkerSession",
         "title": "Open Worker Session in Terminal (watch & steer this account)",
         "category": "Claude Code Orchestrator",
         "icon": "$(terminal)"
       },
       {
-        "command": "fableOrchestrator.installMcp",
+        "command": "claudeCodeOrchestrator.installMcp",
         "title": "Register Dispatch MCP Server in This Workspace",
         "category": "Claude Code Orchestrator",
         "icon": "$(plug)"
       },
       {
-        "command": "fableOrchestrator.showTaskOutput",
+        "command": "claudeCodeOrchestrator.showTaskOutput",
         "title": "Show Task Output",
         "category": "Claude Code Orchestrator"
       },
       {
-        "command": "fableOrchestrator.clearTasks",
+        "command": "claudeCodeOrchestrator.clearTasks",
         "title": "Clear Task History",
         "category": "Claude Code Orchestrator",
         "icon": "$(clear-all)"
       },
       {
-        "command": "fableOrchestrator.togglePreferred",
+        "command": "claudeCodeOrchestrator.togglePreferred",
         "title": "Toggle Preferred Worker (same account as main — favored when idle)",
         "category": "Claude Code Orchestrator",
         "icon": "$(star)"
       },
       {
-        "command": "fableOrchestrator.toggleTaskScope",
+        "command": "claudeCodeOrchestrator.toggleTaskScope",
         "title": "Toggle Task Scope (This Workspace / All)",
         "category": "Claude Code Orchestrator",
         "icon": "$(filter)"
       },
       {
-        "command": "fableOrchestrator.openDashboard",
+        "command": "claudeCodeOrchestrator.openDashboard",
         "title": "Open Orchestrator Dashboard",
         "category": "Claude Code Orchestrator",
         "icon": "$(dashboard)"
       },
       {
-        "command": "fableOrchestrator.addDispatchPolicy",
+        "command": "claudeCodeOrchestrator.addDispatchPolicy",
         "title": "Add Dispatch Policy to CLAUDE.md",
         "category": "Claude Code Orchestrator",
         "icon": "$(book)"
@@ -129,86 +129,86 @@
     "menus": {
       "view/title": [
         {
-          "command": "fableOrchestrator.addWorker",
-          "when": "view == fableOrchestrator.workers",
+          "command": "claudeCodeOrchestrator.addWorker",
+          "when": "view == claudeCodeOrchestrator.workers",
           "group": "navigation@1"
         },
         {
-          "command": "fableOrchestrator.importWorkers",
-          "when": "view == fableOrchestrator.workers",
+          "command": "claudeCodeOrchestrator.importWorkers",
+          "when": "view == claudeCodeOrchestrator.workers",
           "group": "navigation@2"
         },
         {
-          "command": "fableOrchestrator.installMcp",
-          "when": "view == fableOrchestrator.workers",
+          "command": "claudeCodeOrchestrator.installMcp",
+          "when": "view == claudeCodeOrchestrator.workers",
           "group": "navigation@3"
         },
         {
-          "command": "fableOrchestrator.toggleTaskScope",
-          "when": "view == fableOrchestrator.tasks",
+          "command": "claudeCodeOrchestrator.toggleTaskScope",
+          "when": "view == claudeCodeOrchestrator.tasks",
           "group": "navigation@1"
         },
         {
-          "command": "fableOrchestrator.openDashboard",
-          "when": "view == fableOrchestrator.tasks",
+          "command": "claudeCodeOrchestrator.openDashboard",
+          "when": "view == claudeCodeOrchestrator.tasks",
           "group": "navigation@2"
         },
         {
-          "command": "fableOrchestrator.clearTasks",
-          "when": "view == fableOrchestrator.tasks",
+          "command": "claudeCodeOrchestrator.clearTasks",
+          "when": "view == claudeCodeOrchestrator.tasks",
           "group": "navigation@3"
         }
       ],
       "view/item/context": [
         {
-          "command": "fableOrchestrator.openWorkerSession",
-          "when": "view == fableOrchestrator.workers && viewItem == worker",
+          "command": "claudeCodeOrchestrator.openWorkerSession",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "inline"
         },
         {
-          "command": "fableOrchestrator.togglePreferred",
-          "when": "view == fableOrchestrator.workers && viewItem == worker",
+          "command": "claudeCodeOrchestrator.togglePreferred",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "1_manage@0"
         },
         {
-          "command": "fableOrchestrator.loginWorker",
-          "when": "view == fableOrchestrator.workers && viewItem == worker",
+          "command": "claudeCodeOrchestrator.loginWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "1_manage@1"
         },
         {
-          "command": "fableOrchestrator.removeWorker",
-          "when": "view == fableOrchestrator.workers && viewItem == worker",
+          "command": "claudeCodeOrchestrator.removeWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "1_manage@2"
         }
       ]
     },
     "walkthroughs": [
       {
-        "id": "fableOrchestrator.gettingStarted",
+        "id": "claudeCodeOrchestrator.gettingStarted",
         "title": "Multi-account dispatch for Claude Code",
         "description": "Fan work out from your Claude Code panel to worker Claude accounts running Opus/Sonnet.",
         "steps": [
           {
             "id": "addWorker",
             "title": "Add a worker account",
-            "description": "Create a config directory for another Claude account and sign in once.\n[Add Worker Account](command:fableOrchestrator.addWorker)\n[Import Existing Directories](command:fableOrchestrator.importWorkers)",
+            "description": "Create a config directory for another Claude account and sign in once.\n[Add Worker Account](command:claudeCodeOrchestrator.addWorker)\n[Import Existing Directories](command:claudeCodeOrchestrator.importWorkers)",
             "media": {
               "markdown": "media/walkthrough/add-worker.md"
             },
             "completionEvents": [
-              "onCommand:fableOrchestrator.addWorker",
-              "onCommand:fableOrchestrator.importWorkers"
+              "onCommand:claudeCodeOrchestrator.addWorker",
+              "onCommand:claudeCodeOrchestrator.importWorkers"
             ]
           },
           {
             "id": "registerMcp",
             "title": "Register the dispatch MCP server",
-            "description": "Give your Claude Code session the dispatch_task tool in this workspace.\n[Register MCP Server](command:fableOrchestrator.installMcp)",
+            "description": "Give your Claude Code session the dispatch_task tool in this workspace.\n[Register MCP Server](command:claudeCodeOrchestrator.installMcp)",
             "media": {
               "markdown": "media/walkthrough/register-mcp.md"
             },
             "completionEvents": [
-              "onCommand:fableOrchestrator.installMcp"
+              "onCommand:claudeCodeOrchestrator.installMcp"
             ]
           },
           {
@@ -223,9 +223,9 @@
       }
     ],
     "configuration": {
-      "title": "Fable Orchestrator",
+      "title": "Claude Code Orchestrator",
       "properties": {
-        "fableOrchestrator.workerPermissionMode": {
+        "claudeCodeOrchestrator.workerPermissionMode": {
           "type": "string",
           "default": "acceptEdits",
           "enum": [
@@ -236,17 +236,17 @@
           ],
           "description": "--permission-mode for dispatched (background) worker sessions. Background workers cannot answer permission prompts, so 'default' will stall on any edit."
         },
-        "fableOrchestrator.claudePath": {
+        "claudeCodeOrchestrator.claudePath": {
           "type": "string",
           "default": "claude",
           "description": "Path to the Claude Code CLI executable."
         },
-        "fableOrchestrator.quotaCooldownMinutes": {
+        "claudeCodeOrchestrator.quotaCooldownMinutes": {
           "type": "number",
           "default": 30,
           "description": "Minutes a worker account sits out after a quota/rate-limit error before dispatches are routed to it again."
         },
-        "fableOrchestrator.frontierWorkerDispatch": {
+        "claudeCodeOrchestrator.frontierWorkerDispatch": {
           "type": "string",
           "default": "block",
           "enum": [
@@ -276,5 +276,9 @@
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.28.1",
     "typescript": "^5.6.0"
+  },
+  "galleryBanner": {
+    "color": "#1b1b2f",
+    "theme": "dark"
   }
 }

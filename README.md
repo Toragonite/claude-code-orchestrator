@@ -2,6 +2,8 @@
 
 **English** | [한국어](README.ko.md) | [简体中文](README.zh-CN.md)
 
+![Claude Code Orchestrator — multi-account parallel dispatch for Claude Code](media/screenshots/banner.png)
+
 > Unofficial extension — not affiliated with or endorsed by Anthropic. Formerly named *Fable Orchestrator*.
 
 Turn your existing **Claude Code** panel into a multi-account orchestrator. You chat with your main session as usual; it designs and verifies, and fans implementation work out **in parallel** to worker Claude accounts (Opus / Sonnet — or Fable, behind a billing guard) through MCP dispatch tools. Per-account usage tracking, quota-aware failover, and a live dashboard included.
@@ -20,6 +22,20 @@ worker w1       worker w2      worker w3
 
 The core idea: **an account is just a Claude Code config directory.** Each worker gets its own `~/.claude-<name>` directory; you sign in once and the stored login is reused from then on. The extension never touches tokens or credentials — login and refresh are handled entirely by Claude Code itself.
 
+## Screenshots
+
+*The orchestrator session plans, checks in via `orchestrator_briefing`, and fans implementation out to workers:*
+
+![Orchestrator session dispatching from the Claude Code panel](media/screenshots/panel.png)
+
+*Worker accounts with per-window usage, and the live task feed:*
+
+![Worker Accounts and Dispatched Tasks views](media/screenshots/sidebar.png)
+
+*The dashboard: stat tiles, activity charts, per-worker usage, and settings — including the frontier billing guard:*
+
+![Orchestrator Dashboard](media/screenshots/dashboard.png)
+
 ## Requirements
 
 - VS Code 1.90+
@@ -34,7 +50,7 @@ The core idea: **an account is just a Claude Code config directory.** Each worke
 ## Quick start
 
 1. Open the **Claude Code Orchestrator** view in the activity bar → **Add Worker Account**. Pick a name (e.g. `w1`) and a default model; a terminal opens — sign in **once** with the Claude account for that slot. Already have `~/.claude-*` directories? Use **Import Existing Claude Config Directories** instead.
-2. Run **Register Dispatch MCP Server in This Workspace** — writes a `cco-dispatch` entry into the workspace `.mcp.json` (the server binary lives at a stable path under `~/.fable-orchestrator/mcp/`, so extension updates never break the registration).
+2. Run **Register Dispatch MCP Server in This Workspace** — writes a `cco-dispatch` entry into the workspace `.mcp.json` (the server binary lives at a stable path under `~/.claude-code-orchestrator/mcp/`, so extension updates never break the registration).
 3. Accept the offer to add the **dispatch policy** to your workspace `CLAUDE.md` (or run **Add Dispatch Policy to CLAUDE.md** later).
 4. Restart the Claude Code session and approve the project MCP server.
 5. Chat as usual. Give the main session a big task and it fans out: independent subtasks are dispatched to workers in parallel while it designs, integrates, and verifies.
@@ -78,7 +94,7 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 
 - Default: **block** — frontier dispatches are rejected with an instructive error that steers the orchestrator to `claude-opus-4-8` + `ultrathink` (no retry, no failover).
 - `list_workers` and the tool schema surface the guard state before any dispatch is attempted.
-- Flip it deliberately: the `fableOrchestrator.frontierWorkerDispatch` setting, or the dropdown in the dashboard. A surgical pattern that works well: enable, dispatch one adversarial review of a significant build, disable.
+- Flip it deliberately: the `claudeCodeOrchestrator.frontierWorkerDispatch` setting, or the dropdown in the dashboard. A surgical pattern that works well: enable, dispatch one adversarial review of a significant build, disable.
 
 ## Views and dashboard
 
@@ -106,14 +122,14 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 
 | Setting | Default | Description |
 |---|---|---|
-| `fableOrchestrator.workerPermissionMode` | `acceptEdits` | `--permission-mode` for background workers (`default` stalls on any edit approval) |
-| `fableOrchestrator.claudePath` | `claude` | Path to the Claude Code CLI |
-| `fableOrchestrator.quotaCooldownMinutes` | `30` | Minutes a worker sits out after a quota error |
-| `fableOrchestrator.frontierWorkerDispatch` | `block` | Billing guard for frontier worker models (see above) |
+| `claudeCodeOrchestrator.workerPermissionMode` | `acceptEdits` | `--permission-mode` for background workers (`default` stalls on any edit approval) |
+| `claudeCodeOrchestrator.claudePath` | `claude` | Path to the Claude Code CLI |
+| `claudeCodeOrchestrator.quotaCooldownMinutes` | `30` | Minutes a worker sits out after a quota error |
+| `claudeCodeOrchestrator.frontierWorkerDispatch` | `block` | Billing guard for frontier worker models (see above) |
 
 ## Data and privacy
 
-Everything stays on your machine. The extension and server share state under `~/.fable-orchestrator/`: the worker registry (names, config-dir paths, default models — **no tokens, no credentials**), per-worker usage stats, the task log, and task outputs as markdown. Nothing is sent anywhere except the Claude Code CLI calls you dispatch. Uninstalling the extension leaves that directory; delete it to remove all traces.
+Everything stays on your machine. The extension and server share state under `~/.claude-code-orchestrator/`: the worker registry (names, config-dir paths, default models — **no tokens, no credentials**), per-worker usage stats, the task log, and task outputs as markdown. Nothing is sent anywhere except the Claude Code CLI calls you dispatch. Uninstalling the extension leaves that directory; delete it to remove all traces.
 
 ## Troubleshooting
 

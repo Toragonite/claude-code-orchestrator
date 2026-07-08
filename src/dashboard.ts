@@ -91,7 +91,7 @@ export function openDashboard(): void {
         inWorkspace: Boolean(root && e.cwd && (e.cwd === root || e.cwd.startsWith(root + '/'))),
       }));
     const checkin = root ? readOrchestrators()[root] : undefined;
-    const cfg = vscode.workspace.getConfiguration('fableOrchestrator');
+    const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
     void panel.webview.postMessage({
       type: 'data',
       workspace: root ?? null,
@@ -124,11 +124,11 @@ export function openDashboard(): void {
         }
       } else if (msg.type === 'setSetting' && (SETTING_KEYS as readonly string[]).includes(msg.key ?? '')) {
         await vscode.workspace
-          .getConfiguration('fableOrchestrator')
+          .getConfiguration('claudeCodeOrchestrator')
           .update(msg.key!, msg.value, vscode.ConfigurationTarget.Global);
         send();
       } else if (msg.type === 'runCommand' && (COMMAND_IDS as readonly string[]).includes(msg.id ?? '')) {
-        await vscode.commands.executeCommand(`fableOrchestrator.${msg.id}`);
+        await vscode.commands.executeCommand(`claudeCodeOrchestrator.${msg.id}`);
         send();
       }
     },

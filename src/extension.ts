@@ -4,7 +4,7 @@ import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { WorkerManager } from './workerManager';
 import { TasksProvider, WorkersProvider } from './views';
-import { clearTaskLog, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
+import { clearTaskLog, LEGACY_ROOT_DIR, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
 
@@ -16,7 +16,7 @@ const LEGACY_MCP_SERVER_NAME = 'fable-dispatch';
  * Copy the bundled MCP server to a version-independent path. Installed
  * extensions live in a per-version directory, so registering the bundled path
  * in .mcp.json would break on every extension update; the stable copy under
- * ~/.fable-orchestrator survives updates and is refreshed on each activation.
+ * ~/.claude-code-orchestrator survives updates and is refreshed on each activation.
  */
 function ensureStableServerCopy(context: vscode.ExtensionContext): string {
   const bundled = context.asAbsolutePath(path.join('out', 'mcp', 'server.js'));
@@ -24,9 +24,25 @@ function ensureStableServerCopy(context: vscode.ExtensionContext): string {
   try {
     fs.mkdirSync(path.dirname(stable), { recursive: true });
     fs.copyFileSync(bundled, stable);
+    ensureLegacyServerShim(stable);
     return stable;
   } catch {
     return bundled;
+  }
+}
+
+/**
+ * Workspaces registered before the data-directory rename point their
+ * .mcp.json at the old stable path. Keep a one-line forwarding shim there so
+ * those registrations keep working without a re-register.
+ */
+function ensureLegacyServerShim(stable: string): void {
+  try {
+    const legacy = path.join(LEGACY_ROOT_DIR, 'mcp', 'server.js');
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.writeFileSync(legacy, `require(${JSON.stringify(stable)});\n`);
+  } catch {
+    // best-effort compatibility only
   }
 }
 
@@ -133,12 +149,12 @@ async function maybeOfferMcpRegistration(
   if (!folder || readRegistry().workers.length === 0 || mcpRegisteredIn(folder)) {
     return;
   }
-  const dismissKey = `fableOrchestrator.mcpOfferDismissed:${folder.uri.fsPath}`;
+  const dismissKey = `claudeCodeOrchestrator.mcpOfferDismissed:${folder.uri.fsPath}`;
   if (context.workspaceState.get<boolean>(dismissKey)) {
     return;
   }
   const choice = await vscode.window.showInformationMessage(
-    'Fable Orchestrator: worker accounts are configured, but the dispatch MCP server is not ' +
+    'Claude Code Orchestrator: worker accounts are configured, but the dispatch MCP server is not ' +
       'registered in this workspace. Register it so your Claude Code session can dispatch tasks?',
     'Register',
     'Not in this workspace',
@@ -154,8 +170,30 @@ async function maybeOfferMcpRegistration(
   }
 }
 
+/** One-time copy of user-set values from the pre-rename settings namespace. */
+async function migrateLegacySettings(): Promise<void> {
+  const KEYS = ['workerPermissionMode', 'claudePath', 'quotaCooldownMinutes', 'frontierWorkerDispatch'];
+  const legacy = vscode.workspace.getConfiguration('fableOrchestrator');
+  const current = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
+  for (const key of KEYS) {
+    const oldValue = legacy.inspect(key);
+    const newValue = current.inspect(key);
+    try {
+      if (oldValue?.globalValue !== undefined && newValue?.globalValue === undefined) {
+        await current.update(key, oldValue.globalValue, vscode.ConfigurationTarget.Global);
+      }
+      if (oldValue?.workspaceValue !== undefined && newValue?.workspaceValue === undefined) {
+        await current.update(key, oldValue.workspaceValue, vscode.ConfigurationTarget.Workspace);
+      }
+    } catch {
+      // settings migration is best-effort
+    }
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const workers = new WorkerManager();
+  void migrateLegacySettings().then(() => workers.syncSettings());
   workers.syncSettings();
   const serverPath = ensureStableServerCopy(context);
   void maybeOfferMcpRegistration(context, serverPath);
@@ -163,7 +201,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const workersProvider = new WorkersProvider(workers);
   const tasksProvider = new TasksProvider();
 
-  const tasksView = vscode.window.createTreeView('fableOrchestrator.tasks', {
+  const tasksView = vscode.window.createTreeView('claudeCodeOrchestrator.tasks', {
     treeDataProvider: tasksProvider,
   });
   tasksView.description = 'this workspace';
@@ -172,9 +210,9 @@ export function activate(context: vscode.ExtensionContext): void {
     tasksProvider,
     workersProvider,
     tasksView,
-    vscode.window.registerTreeDataProvider('fableOrchestrator.workers', workersProvider),
+    vscode.window.registerTreeDataProvider('claudeCodeOrchestrator.workers', workersProvider),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('fableOrchestrator')) {
+      if (e.affectsConfiguration('claudeCodeOrchestrator')) {
         workers.syncSettings();
       }
     }),
@@ -189,7 +227,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('fableOrchestrator.addWorker', async () => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.addWorker', async () => {
       const name = await vscode.window.showInputBox({
         prompt: 'Worker account name (e.g. "w1") — a config directory ~/.claude-<name> will be created',
         validateInput: (v) => (/^[\w-]+$/.test(v.trim()) ? undefined : 'Use letters, digits, - or _'),
@@ -218,7 +256,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.importWorkers', async () => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.importWorkers', async () => {
       const discovered = workers.discoverConfigDirs();
       if (discovered.length === 0) {
         vscode.window.showInformationMessage(
@@ -254,7 +292,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.removeWorker', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.removeWorker', async (item?: { id?: string }) => {
       let name = item?.id;
       if (!name) {
         const picked = await vscode.window.showQuickPick(
@@ -268,7 +306,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.togglePreferred', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.togglePreferred', async (item?: { id?: string }) => {
       const worker = await resolveWorker(workers, item);
       if (!worker) {
         return;
@@ -281,14 +319,14 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.loginWorker', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.loginWorker', async (item?: { id?: string }) => {
       const worker = await resolveWorker(workers, item);
       if (worker) {
         workers.openTerminal(worker);
       }
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.openWorkerSession', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.openWorkerSession', async (item?: { id?: string }) => {
       const worker = await resolveWorker(workers, item);
       if (!worker) {
         return;
@@ -300,7 +338,7 @@ export function activate(context: vscode.ExtensionContext): void {
       workers.openTerminal(worker, prompt?.trim() || undefined);
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.installMcp', async () => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.installMcp', async () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
         vscode.window.showErrorMessage('Open a workspace folder first.');
@@ -318,7 +356,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await offerDispatchPolicy(folder);
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.showTaskOutput', async (outputFile: string) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.showTaskOutput', async (outputFile: string) => {
       try {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(outputFile));
         await vscode.window.showTextDocument(doc, { preview: true });
@@ -327,20 +365,20 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.clearTasks', () => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.clearTasks', () => {
       clearTaskLog();
       tasksProvider.refresh();
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.toggleTaskScope', () => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.toggleTaskScope', () => {
       tasksProvider.scopeToWorkspace = !tasksProvider.scopeToWorkspace;
       tasksView.description = tasksProvider.scopeToWorkspace ? 'this workspace' : 'all workspaces';
       tasksProvider.refresh();
     }),
 
-    vscode.commands.registerCommand('fableOrchestrator.openDashboard', () => openDashboard()),
+    vscode.commands.registerCommand('claudeCodeOrchestrator.openDashboard', () => openDashboard()),
 
-    vscode.commands.registerCommand('fableOrchestrator.addDispatchPolicy', () => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.addDispatchPolicy', () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
         vscode.window.showErrorMessage('Open a workspace folder first.');
