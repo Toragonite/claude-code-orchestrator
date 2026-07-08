@@ -4,6 +4,41 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-07-08
+
+### Added
+- **Asset Manager panel and asset packs.** A dedicated panel
+  (**Claude Code Orchestrator: Open Asset Manager**) manages "asset packs" —
+  directories of Claude Code skills, agents, commands, output styles, and
+  hooks — installed per-workspace into `.claude/`. Add pack directories (e.g.
+  a private assets repo) alongside the bundled pack, toggle individual assets
+  on and off, see per-asset and per-file sync status (synced / update
+  available / customized / conflict / not installed), diff or reset any file
+  that's out of sync with the pack, and scaffold new assets with
+  **New asset…**. Sync never overwrites a file you've edited by hand.
+- **Five asset types**, including a new **hooks** type: a hook is a script,
+  not markdown, and is scaffolded as an executable shell skeleton whose
+  comments show how to wire it into `.claude/settings.json` — installing the
+  script does not register it on its own.
+- **Tri-lingual UI.** The extension's commands, settings, and webviews are now
+  available in English, Korean, and Simplified Chinese.
+- **Main-session check-in freshness.** The dashboard now shows how long ago
+  the current session briefed in and how long ago it was last active, so a
+  stale "not checked in yet" no longer lingers after switching accounts; a
+  "Reset session check-in" button clears it manually.
+
+### Changed
+- **Worker timeout is now configurable.** The wall-clock limit per dispatch
+  is controlled by the new `claudeCodeOrchestrator.workerTimeoutMinutes`
+  setting (1–480 minutes), with a default raised from a fixed 30 minutes to
+  45, and can be overridden per dispatch with a `timeout_minutes` argument.
+
+### Fixed
+- **Dispatches could hang forever** when a worker spawned subprocesses (as
+  the Claude Code CLI does for shell-tool calls) that outlived the worker
+  itself — the dispatch now always returns within seconds of its timeout
+  regardless of any lingering subprocess.
+
 ## [1.0.1] — 2026-07-08
 
 ### Changed

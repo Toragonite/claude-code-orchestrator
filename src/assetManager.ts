@@ -25,7 +25,7 @@ import { jsonForScript } from './webviewUtil';
  * Follows the dashboard's conventions: 2s data push, theme-var styling.
  */
 
-const ASSET_TYPES: AssetType[] = ['skill', 'agent', 'command', 'output-style'];
+const ASSET_TYPES: AssetType[] = ['skill', 'agent', 'command', 'output-style', 'hook'];
 
 let panel: vscode.WebviewPanel | undefined;
 let lastReport: string | null = null;

@@ -4,8 +4,8 @@ import * as path from 'path';
 
 /**
  * Asset-pack engine: deploys Claude Code assets (skills, agents, commands,
- * output styles) from asset packs into a workspace's `.claude/` directory.
- * Packs are plain directories mirroring the `.claude/` layout — the
+ * output styles, hook scripts) from asset packs into a workspace's `.claude/`
+ * directory. Packs are plain directories mirroring the `.claude/` layout — the
  * extension's bundled `assets/` directory plus any user-configured pack
  * directories (e.g. a private repo clone).
  *
@@ -19,7 +19,7 @@ import * as path from 'path';
  * This module must not import 'vscode' (kept UI-free like registry.ts).
  */
 
-export type AssetType = 'skill' | 'agent' | 'command' | 'output-style';
+export type AssetType = 'skill' | 'agent' | 'command' | 'output-style' | 'hook';
 
 /** Pack subdirectory per asset type — identical to the `.claude/` layout. */
 export const ASSET_TYPE_DIRS: Record<AssetType, string> = {
@@ -27,6 +27,7 @@ export const ASSET_TYPE_DIRS: Record<AssetType, string> = {
   agent: 'agents',
   command: 'commands',
   'output-style': 'output-styles',
+  hook: 'hooks',
 };
 
 export interface PackAsset {
@@ -131,6 +132,17 @@ function readDescription(file: string): string | undefined {
 }
 
 /**
+ * Id of a top-level hook script: the filename with a single trailing extension
+ * removed, so `block-rm.sh` installs as `hooks/block-rm.sh` but shows up as the
+ * asset `block-rm`. Hooks are scripts, not markdown, and the extension is an
+ * implementation detail of the script's language, not part of its identity.
+ */
+function hookScriptId(filename: string): string {
+  const dot = filename.lastIndexOf('.');
+  return dot > 0 ? filename.slice(0, dot) : filename;
+}
+
+/**
  * Load a pack directory. Pack name comes from an optional `pack.json`
  * ({"name": ...}), then the caller's fallback, then the directory basename.
  * Returns undefined when the directory doesn't exist.
@@ -149,22 +161,26 @@ export function loadPack(root: string, fallbackName?: string): AssetPack | undef
     // pack.json is optional
   }
   const assets: PackAsset[] = [];
+  const push = (type: AssetType, dir: string, id: string, files: Record<string, string>, description?: string) =>
+    assets.push({ key: `${name}:${dir}/${id}`, pack: name, type, id, description, files });
+
   for (const [type, dir] of Object.entries(ASSET_TYPE_DIRS) as [AssetType, string][]) {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(path.join(root, dir), { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) {
+    const typeRoot = path.join(root, dir);
+    if (type === 'skill') {
+      // One directory per skill, each carrying a SKILL.md plus any supporting
+      // files. Skill ids stay flat: the walk below only collects the skill's
+      // own files, it does not turn a subdirectory into a second skill.
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(typeRoot, { withFileTypes: true });
+      } catch {
         continue;
       }
-      if (type === 'skill') {
-        if (!entry.isDirectory()) {
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || !entry.isDirectory()) {
           continue;
         }
-        const skillRoot = path.join(root, dir, entry.name);
+        const skillRoot = path.join(typeRoot, entry.name);
         const files: Record<string, string> = {};
         for (const rel of walkFiles(skillRoot)) {
           files[`${dir}/${entry.name}/${rel}`] = path.join(skillRoot, ...rel.split('/'));
@@ -172,28 +188,65 @@ export function loadPack(root: string, fallbackName?: string): AssetPack | undef
         if (!files[`${dir}/${entry.name}/SKILL.md`]) {
           continue;
         }
-        assets.push({
-          key: `${name}:${dir}/${entry.name}`,
-          pack: name,
-          type,
-          id: entry.name,
-          description: readDescription(path.join(skillRoot, 'SKILL.md')),
-          files,
-        });
-      } else {
-        if (!entry.isFile() || !entry.name.endsWith('.md')) {
+        push(type, dir, entry.name, files, readDescription(path.join(skillRoot, 'SKILL.md')));
+      }
+    } else if (type === 'hook') {
+      // A hook is a script Claude Code executes (`.sh`, `.py`, no extension at
+      // all…), never markdown — so no frontmatter and no readDescription call.
+      // A top-level file is one hook; a top-level directory is one hook that
+      // bundles everything beneath it, exactly as a skill bundles its files.
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(typeRoot, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      const visible = entries.filter((entry) => !entry.name.startsWith('.'));
+      // Stripping the extension makes `fmt.sh` and `fmt.py` claim the same id.
+      // Count the candidate ids first; every entry in a colliding group keeps
+      // its full filename instead, which is unique within a directory.
+      const idCounts = new Map<string, number>();
+      for (const entry of visible) {
+        if (entry.isDirectory() || entry.isFile()) {
+          const candidate = entry.isDirectory() ? entry.name : hookScriptId(entry.name);
+          idCounts.set(candidate, (idCounts.get(candidate) ?? 0) + 1);
+        }
+      }
+      for (const entry of visible) {
+        if (entry.isDirectory()) {
+          const hookRoot = path.join(typeRoot, entry.name);
+          const files: Record<string, string> = {};
+          for (const rel of walkFiles(hookRoot)) {
+            files[`${dir}/${entry.name}/${rel}`] = path.join(hookRoot, ...rel.split('/'));
+          }
+          if (Object.keys(files).length === 0) {
+            continue; // an empty directory installs nothing
+          }
+          push(type, dir, entry.name, files);
+        } else if (entry.isFile()) {
+          const candidate = hookScriptId(entry.name);
+          const id = (idCounts.get(candidate) ?? 0) > 1 ? entry.name : candidate;
+          push(type, dir, id, { [`${dir}/${entry.name}`]: path.join(typeRoot, entry.name) });
+        }
+      }
+    } else {
+      // Commands, agents and output styles are single `.md` files, discovered
+      // recursively so a subdirectory namespaces the id:
+      // `commands/frontend/component.md` -> id `frontend/component`, invoked as
+      // `/frontend:component`. Only commands document namespacing today, but a
+      // recursive walk can only ever find more files, never fewer.
+      let rels: string[];
+      try {
+        rels = walkFiles(typeRoot);
+      } catch {
+        continue;
+      }
+      for (const rel of rels) {
+        if (!rel.endsWith('.md')) {
           continue;
         }
-        const id = entry.name.replace(/\.md$/, '');
-        const source = path.join(root, dir, entry.name);
-        assets.push({
-          key: `${name}:${dir}/${id}`,
-          pack: name,
-          type,
-          id,
-          description: readDescription(source),
-          files: { [`${dir}/${entry.name}`]: source },
-        });
+        const source = path.join(typeRoot, ...rel.split('/'));
+        push(type, dir, rel.replace(/\.md$/, ''), { [`${dir}/${rel}`]: source }, readDescription(source));
       }
     }
   }
@@ -255,11 +308,13 @@ export const ASSET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * Scaffolds are skeletons, not drafts: every slot is present but empty, and
  * the guidance lives in comments so nothing reads as authored content.
  * Inside the frontmatter fences only `#` comments are legal (an HTML comment
- * there is a YAML parse error); the body uses `<!-- -->`.
+ * there is a YAML parse error); the body uses `<!-- -->`. A hook is a script
+ * rather than markdown, so its template carries `#` comments and nothing else.
  *
- * `description:` must stay the LAST line of the frontmatter — readDescription's
- * `/^description:\s*(.+)$/m` lets `\s*` cross the newline, so any line after it
- * would be captured as the description.
+ * `description:` may now sit anywhere in the frontmatter: readDescription
+ * anchors on `/^description:[ \t]*(.+)$/m`, and `[ \t]*` cannot cross the
+ * newline that `\s*` used to, so an empty `description:` no longer swallows the
+ * frontmatter line that follows it.
  *
  * The id is single-quoted: ASSET_ID_PATTERN admits ids YAML would read as
  * numbers (`9`, `1.5`, `1_000`), and it forbids quotes, so this cannot escape.
@@ -270,11 +325,15 @@ name: '${id}'
 # description: one line, third person, stating WHEN Claude should use this skill.
 # Claude sees only name + description until the skill triggers, so this line is the trigger.
 description:
+# Optional keys, all omitted here — see the skills frontmatter reference:
+#   when_to_use: extra trigger context, weighed alongside description.
+#   allowed-tools: restrict this skill to a subset of tools.
+#   disable-model-invocation: true = user-invoked only, never auto-selected.
+#   context: extra files preloaded when the skill triggers.
 ---
 
-<!-- Instructions Claude follows once this skill triggers. -->
-<!-- Keep it procedural: numbered steps, hard constraints, a worked example. -->
-<!-- Delete these comments as you fill the body in. -->
+<!-- The procedural instructions Claude follows once this skill triggers — the body -->
+<!-- loads only then. Numbered steps, hard constraints, a worked example. -->
 `,
   agent: (id) => `---
 name: '${id}'
@@ -290,13 +349,17 @@ description:
 `,
   command: () => `---
 # A slash command takes no 'name:' key — the filename is the command name.
-# An optional 'argument-hint:' key documents the arguments shown in the command menu.
+# Custom commands are now merged into skills: commands/deploy.md and
+# skills/deploy/SKILL.md both create /deploy and work the same way. A skill also
+# supports a directory of supporting files and model-invocation control, so new
+# work generally belongs in skills/; existing commands/ files keep working.
+# An optional 'argument-hint:' key documents the arguments the command menu shows.
 # description: one line, third person, stating what this command does.
 description:
 ---
 
-<!-- The prompt sent to Claude when this command runs. -->
-<!-- $ARGUMENTS is replaced with whatever the user typed after the command name. -->
+<!-- The body is the prompt sent to Claude when this command runs. -->
+<!-- $ARGUMENTS interpolates whatever the user typed after the command name. -->
 <!-- Delete these comments as you fill the body in. -->
 `,
   'output-style': (id) => `---
@@ -309,11 +372,30 @@ description:
 <!-- Describe the tone, structure, and formatting Claude must use while it is active. -->
 <!-- Delete these comments as you fill the body in. -->
 `,
+  hook: (id) => `#!/usr/bin/env bash
+set -euo pipefail
+
+# Hooks are wired up in .claude/settings.json — dropping a script in .claude/hooks/
+# registers nothing on its own. Add an entry shaped like:
+#   "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "\${CLAUDE_PROJECT_DIR}/.claude/hooks/${id}.sh" } ] } ] }
+#
+# The hook receives the event payload as JSON on stdin. A non-zero exit blocks the
+# tool call; for PreToolUse, exit 2 is the block signal and stderr goes back to Claude.
+#
+# Uncomment to dump the payload while you work out what this hook should do:
+# cat
+`,
 };
 
 /**
  * Scaffold a new asset in a pack directory and return the absolute path of
  * its primary file. Throws when the id is invalid or the asset already exists.
+ *
+ * Scaffolding only ever writes into the top level of the type directory, so the
+ * id stays flat and ASSET_ID_PATTERN — which forbids `/` and is the traversal
+ * guard — stays exactly as strict as it is. Namespacing is a discovery-side
+ * feature: create the subdirectory by hand and loadPack picks the file up under
+ * a nested id, e.g. `commands/frontend/component.md` as `frontend/component`.
  */
 export function createAssetTemplate(packRoot: string, type: AssetType, id: string): string {
   if (!ASSET_ID_PATTERN.test(id)) {
@@ -321,12 +403,19 @@ export function createAssetTemplate(packRoot: string, type: AssetType, id: strin
   }
   const dir = ASSET_TYPE_DIRS[type];
   const file =
-    type === 'skill' ? path.join(packRoot, dir, id, 'SKILL.md') : path.join(packRoot, dir, `${id}.md`);
+    type === 'skill'
+      ? path.join(packRoot, dir, id, 'SKILL.md')
+      : path.join(packRoot, dir, type === 'hook' ? `${id}.sh` : `${id}.md`);
   if (fs.existsSync(type === 'skill' ? path.dirname(file) : file)) {
     throw new Error(`Asset "${id}" already exists in ${path.join(packRoot, dir)}.`);
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, ASSET_TEMPLATES[type](id));
+  if (type === 'hook') {
+    // Claude Code execs the script, so it has to be executable. chmod rather
+    // than writeFileSync's `mode` option, which the process umask filters.
+    fs.chmodSync(file, 0o755);
+  }
   return file;
 }
 
@@ -577,6 +666,9 @@ function syncAsset(
     }
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content);
+    if (asset.type === 'hook') {
+      applySourceMode(source, target);
+    }
     record.files[rel] = sourceHash;
     wrote = true;
   }
@@ -588,6 +680,26 @@ function syncAsset(
   }
   if (wrote) {
     (firstInstall ? report.installed : report.updated).push(asset.key);
+  }
+}
+
+/**
+ * Mirror the pack file's permission bits onto the installed copy. Hook assets
+ * only: a hook script that lands without `+x` never runs, and writeFileSync
+ * gives a freshly created file the default mode. Every other asset type is
+ * markdown that nothing execs.
+ *
+ * The ledger hashes content, never mode, so this is deliberately one-way: a
+ * chmod on the installed copy does not mark it customized, and a pack-side
+ * chmod alone does not schedule a rewrite. Modes are re-applied whenever the
+ * content changes.
+ */
+function applySourceMode(source: string, target: string): void {
+  try {
+    fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+  } catch {
+    // best effort — the content is already written, and chmod is a no-op on
+    // filesystems without POSIX permission bits
   }
 }
 

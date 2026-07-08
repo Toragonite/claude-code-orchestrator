@@ -3,7 +3,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
-import { readRegistry, writeRegistry, WorkerModel, WorkerProfile } from './registry';
+import {
+  clampTimeoutMinutes,
+  readRegistry,
+  TIMEOUT_MINUTES_DEFAULT,
+  writeRegistry,
+  WorkerModel,
+  WorkerProfile,
+} from './registry';
 
 /**
  * Resolve a bare command name to an absolute path via the user's login shell.
@@ -105,6 +112,9 @@ export class WorkerManager {
     registry.permissionMode = cfg.get<string>('workerPermissionMode', 'acceptEdits');
     registry.claudePath = resolveViaLoginShell(cfg.get<string>('claudePath', 'claude'));
     registry.cooldownMinutes = cfg.get<number>('quotaCooldownMinutes', 30);
+    registry.workerTimeoutMinutes = clampTimeoutMinutes(
+      cfg.get<number>('workerTimeoutMinutes', TIMEOUT_MINUTES_DEFAULT),
+    );
     registry.frontierWorkerDispatch =
       cfg.get<string>('frontierWorkerDispatch', 'block') === 'allow' ? 'allow' : 'block';
     writeRegistry(registry);

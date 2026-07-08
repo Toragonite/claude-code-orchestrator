@@ -210,6 +210,7 @@ const ASSET_TYPE_ICONS: Record<AssetType, string> = {
   agent: 'hubot',
   command: 'terminal',
   'output-style': 'paintcan',
+  hook: 'symbol-event',
 };
 
 /** One-time copy of user-set values from the pre-rename settings namespace. */
