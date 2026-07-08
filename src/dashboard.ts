@@ -9,6 +9,7 @@ import {
   windowUsage,
 } from './registry';
 import { isFrontierTier } from './prompts';
+import { jsonForScript } from './webviewUtil';
 
 const SETTING_KEYS = [
   'workerPermissionMode',
@@ -55,11 +56,11 @@ function dailyCounts(root: string | undefined, days: number) {
 export function openDashboard(): void {
   const panel = vscode.window.createWebviewPanel(
     'ccOrchestratorDashboard',
-    'Orchestrator Dashboard',
+    vscode.l10n.t('Orchestrator Dashboard'),
     vscode.ViewColumn.Active,
     { enableScripts: true, retainContextWhenHidden: true },
   );
-  panel.webview.html = dashboardHtml();
+  panel.webview.html = dashboardHtml(dashboardStrings());
 
   const send = () => {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -122,7 +123,7 @@ export function openDashboard(): void {
           const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.file));
           await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
         } catch {
-          void vscode.window.showWarningMessage(`Task output not found: ${msg.file}`);
+          void vscode.window.showWarningMessage(vscode.l10n.t('Task output not found: {0}', msg.file));
         }
       } else if (msg.type === 'setSetting' && (SETTING_KEYS as readonly string[]).includes(msg.key ?? '')) {
         await vscode.workspace
@@ -144,8 +145,157 @@ export function openDashboard(): void {
   send();
 }
 
-/** Exported for headless rendering tests. */
-export function dashboardHtml(): string {
+export interface DashboardStrings {
+  title: string;
+  chartTasksTitle: string;
+  legendDone: string;
+  legendError: string;
+  chartTokensTitle: string;
+  legendInput: string;
+  legendOutput: string;
+  workersTitle: string;
+  thAccount: string;
+  thModel: string;
+  thStatus: string;
+  thSession5h: string;
+  thWeekly7d: string;
+  thAllTime: string;
+  tasksTitle: string;
+  scopeLabel: string;
+  thTitle: string;
+  thWorker: string;
+  thTokens: string;
+  thWhen: string;
+  settingsTitle: string;
+  savedNote: string;
+  permLabel: string;
+  pathLabel: string;
+  coolLabel: string;
+  frontierLabel: string;
+  frontierBlock: string;
+  frontierAllow: string;
+  btnInstallMcp: string;
+  btnAddPolicy: string;
+  btnAddWorker: string;
+  btnManageAssets: string;
+  btnClearTasks: string;
+  btnResetCheckin: string;
+  resetCheckinTip: string;
+  footnote: string;
+  metaWorkspace: string;
+  metaNoWorkspace: string;
+  metaMainSession: string;
+  calibrationActive: string;
+  frontierTier: string;
+  briefedAgo: string;
+  activeAgo: string;
+  sessionPendingBrief: string;
+  notCheckedIn: string;
+  tileRunningNow: string;
+  tileRunningNowSub: string;
+  tileTasks7d: string;
+  tileTasksSub: string;
+  tileSuccess: string;
+  tileSuccessSub: string;
+  tileTokens: string;
+  tileTokensSub: string;
+  tileCost: string;
+  tileCostSub: string;
+  emptyDaily: string;
+  emptyWorkerUsage: string;
+  ariaTasksPerDay: string;
+  chartDayTip: string;
+  ariaTokensPerWorker: string;
+  chartWorkerTip: string;
+  statusCoolingUntil: string;
+  statusAvailable: string;
+  emptyWorkers: string;
+  badgeOtherWs: string;
+  emptyTasks: string;
+}
+
+/** Localized strings for the page. Must be called from the extension host. */
+export function dashboardStrings(): DashboardStrings {
+  return {
+    title: vscode.l10n.t('Orchestrator Dashboard'),
+    chartTasksTitle: vscode.l10n.t('Tasks · last 14 days (this workspace)'),
+    legendDone: vscode.l10n.t('done'),
+    legendError: vscode.l10n.t('error'),
+    chartTokensTitle: vscode.l10n.t('Tokens by worker · 7 days (all workspaces)'),
+    legendInput: vscode.l10n.t('input'),
+    legendOutput: vscode.l10n.t('output'),
+    workersTitle: vscode.l10n.t('Worker accounts'),
+    thAccount: vscode.l10n.t('account'),
+    thModel: vscode.l10n.t('model'),
+    thStatus: vscode.l10n.t('status'),
+    thSession5h: vscode.l10n.t('session 5h'),
+    thWeekly7d: vscode.l10n.t('weekly 7d'),
+    thAllTime: vscode.l10n.t('all time'),
+    tasksTitle: vscode.l10n.t('Dispatched tasks'),
+    scopeLabel: vscode.l10n.t('this workspace only'),
+    thTitle: vscode.l10n.t('title'),
+    thWorker: vscode.l10n.t('worker'),
+    thTokens: vscode.l10n.t('tokens'),
+    thWhen: vscode.l10n.t('when'),
+    settingsTitle: vscode.l10n.t('Settings'),
+    savedNote: vscode.l10n.t('saved ✓'),
+    permLabel: vscode.l10n.t('worker permission mode'),
+    pathLabel: vscode.l10n.t('claude CLI path'),
+    coolLabel: vscode.l10n.t('quota cooldown (minutes)'),
+    frontierLabel: vscode.l10n.t('frontier worker dispatch (claude-fable-5 — may bill per use)'),
+    frontierBlock: vscode.l10n.t('block (billing guard)'),
+    frontierAllow: vscode.l10n.t('allow'),
+    btnInstallMcp: vscode.l10n.t('Register MCP here'),
+    btnAddPolicy: vscode.l10n.t('Add policy to CLAUDE.md'),
+    btnAddWorker: vscode.l10n.t('Add worker'),
+    btnManageAssets: vscode.l10n.t('Manage assets'),
+    btnClearTasks: vscode.l10n.t('Clear task history'),
+    btnResetCheckin: vscode.l10n.t('Reset session check-in'),
+    resetCheckinTip: vscode.l10n.t(
+      'Clear the recorded main-session check-in for this workspace — use after switching the main account; the next orchestrator_briefing call re-registers it.',
+    ),
+    footnote: vscode.l10n.t(
+      "Charts count only dispatches made through this extension. For an account's real plan quota, open its worker terminal and run /usage.",
+    ),
+    metaWorkspace: vscode.l10n.t('workspace: {0}'),
+    metaNoWorkspace: vscode.l10n.t('no workspace open'),
+    metaMainSession: vscode.l10n.t('main session: {0}'),
+    calibrationActive: vscode.l10n.t('(calibration active)'),
+    frontierTier: vscode.l10n.t('(frontier tier)'),
+    briefedAgo: vscode.l10n.t('briefed {0} ago'),
+    activeAgo: vscode.l10n.t('active {0} ago'),
+    sessionPendingBrief: vscode.l10n.t('active {0} ago — briefing pending (model unknown)'),
+    notCheckedIn: vscode.l10n.t('not checked in yet'),
+    tileRunningNow: vscode.l10n.t('Running now'),
+    tileRunningNowSub: vscode.l10n.t('active dispatches'),
+    tileTasks7d: vscode.l10n.t('Tasks · 7d'),
+    tileTasksSub: vscode.l10n.t('{0} done · {1} error'),
+    tileSuccess: vscode.l10n.t('Success rate · 7d'),
+    tileSuccessSub: vscode.l10n.t('this workspace'),
+    tileTokens: vscode.l10n.t('Tokens · 7d'),
+    tileTokensSub: vscode.l10n.t('{0} in / {1} out'),
+    tileCost: vscode.l10n.t('Est. cost · 7d'),
+    tileCostSub: vscode.l10n.t('all workers'),
+    emptyDaily: vscode.l10n.t('no dispatches in the last 14 days'),
+    emptyWorkerUsage: vscode.l10n.t('no worker usage in the last 7 days'),
+    ariaTasksPerDay: vscode.l10n.t('tasks per day'),
+    chartDayTip: vscode.l10n.t('{0} — {1} done, {2} error'),
+    ariaTokensPerWorker: vscode.l10n.t('tokens per worker'),
+    chartWorkerTip: vscode.l10n.t('{0} — {1} in / {2} out'),
+    statusCoolingUntil: vscode.l10n.t('⏸ until {0}'),
+    statusAvailable: vscode.l10n.t('available'),
+    emptyWorkers: vscode.l10n.t('no workers registered'),
+    badgeOtherWs: vscode.l10n.t('other ws'),
+    emptyTasks: vscode.l10n.t('no dispatched tasks yet'),
+  };
+}
+
+/** HTML-escape for static-body interpolation (localized strings are untrusted). */
+const HTML_ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+const escHtml = (s: string): string => s.replace(/[&<>"]/g, (c) => HTML_ESC[c]);
+
+/** Pure: same strings in, same HTML out. Exported for headless rendering tests. */
+export function dashboardHtml(s: DashboardStrings): string {
   return /* html */ `<!DOCTYPE html>
 <html>
 <head>
@@ -198,26 +348,26 @@ export function dashboardHtml(): string {
 </style>
 </head>
 <body>
-  <h1>Orchestrator Dashboard</h1>
+  <h1>${escHtml(s.title)}</h1>
   <p id="meta"></p>
 
   <div class="grid tiles" id="tiles"></div>
 
   <div class="grid charts">
     <div class="card">
-      <h2>Tasks · last 14 days (this workspace)</h2>
+      <h2>${escHtml(s.chartTasksTitle)}</h2>
       <div id="dailyChart"></div>
       <div class="legend">
-        <span><span class="swatch" style="background:var(--c-done)"></span>done</span>
-        <span><span class="swatch" style="background:var(--c-error)"></span>error</span>
+        <span><span class="swatch" style="background:var(--c-done)"></span>${escHtml(s.legendDone)}</span>
+        <span><span class="swatch" style="background:var(--c-error)"></span>${escHtml(s.legendError)}</span>
       </div>
     </div>
     <div class="card">
-      <h2>Tokens by worker · 7 days (all workspaces)</h2>
+      <h2>${escHtml(s.chartTokensTitle)}</h2>
       <div id="workerChart"></div>
       <div class="legend">
-        <span><span class="swatch" style="background:var(--c-in)"></span>input</span>
-        <span><span class="swatch" style="background:var(--c-out)"></span>output</span>
+        <span><span class="swatch" style="background:var(--c-in)"></span>${escHtml(s.legendInput)}</span>
+        <span><span class="swatch" style="background:var(--c-out)"></span>${escHtml(s.legendOutput)}</span>
       </div>
     </div>
   </div>
@@ -225,49 +375,50 @@ export function dashboardHtml(): string {
   <div class="grid bottom">
     <div>
       <div class="card" style="margin-bottom:12px">
-        <h2>Worker accounts</h2>
+        <h2>${escHtml(s.workersTitle)}</h2>
         <table id="workers"><thead><tr>
-          <th>account</th><th>model</th><th>status</th><th>session 5h</th><th>weekly 7d</th><th>all time</th>
+          <th>${escHtml(s.thAccount)}</th><th>${escHtml(s.thModel)}</th><th>${escHtml(s.thStatus)}</th><th>${escHtml(s.thSession5h)}</th><th>${escHtml(s.thWeekly7d)}</th><th>${escHtml(s.thAllTime)}</th>
         </tr></thead><tbody></tbody></table>
       </div>
       <div class="card">
-        <h2>Dispatched tasks <label style="display:inline;font-size:1em;margin-left:8px"><input type="checkbox" id="scope" checked style="width:auto"> this workspace only</label></h2>
+        <h2>${escHtml(s.tasksTitle)} <label style="display:inline;font-size:1em;margin-left:8px"><input type="checkbox" id="scope" checked style="width:auto"> ${escHtml(s.scopeLabel)}</label></h2>
         <table id="tasks"><thead><tr>
-          <th></th><th>title</th><th>worker</th><th>model</th><th>tokens</th><th>when</th>
+          <th></th><th>${escHtml(s.thTitle)}</th><th>${escHtml(s.thWorker)}</th><th>${escHtml(s.thModel)}</th><th>${escHtml(s.thTokens)}</th><th>${escHtml(s.thWhen)}</th>
         </tr></thead><tbody></tbody></table>
       </div>
     </div>
     <div class="card">
-      <h2>Settings<span id="saved">saved ✓</span></h2>
-      <label for="s-perm">worker permission mode</label>
+      <h2>${escHtml(s.settingsTitle)}<span id="saved">${escHtml(s.savedNote)}</span></h2>
+      <label for="s-perm">${escHtml(s.permLabel)}</label>
       <select id="s-perm">
         <option>default</option><option>acceptEdits</option><option>plan</option><option>bypassPermissions</option>
       </select>
-      <label for="s-path">claude CLI path</label>
+      <label for="s-path">${escHtml(s.pathLabel)}</label>
       <input id="s-path" type="text" spellcheck="false">
-      <label for="s-cool">quota cooldown (minutes)</label>
+      <label for="s-cool">${escHtml(s.coolLabel)}</label>
       <input id="s-cool" type="number" min="1">
-      <label for="s-frontier">frontier worker dispatch (claude-fable-5 — may bill per use)</label>
+      <label for="s-frontier">${escHtml(s.frontierLabel)}</label>
       <select id="s-frontier">
-        <option value="block">block (billing guard)</option><option value="allow">allow</option>
+        <option value="block">${escHtml(s.frontierBlock)}</option><option value="allow">${escHtml(s.frontierAllow)}</option>
       </select>
       <div class="actions">
-        <button data-cmd="installMcp">Register MCP here</button>
-        <button data-cmd="addDispatchPolicy">Add policy to CLAUDE.md</button>
-        <button data-cmd="addWorker">Add worker</button>
-        <button data-cmd="openAssetManager">Manage assets</button>
-        <button data-cmd="clearTasks">Clear task history</button>
-        <button id="reset-checkin" title="Clear the recorded main-session check-in for this workspace — use after switching the main account; the next orchestrator_briefing call re-registers it.">Reset session check-in</button>
+        <button data-cmd="installMcp">${escHtml(s.btnInstallMcp)}</button>
+        <button data-cmd="addDispatchPolicy">${escHtml(s.btnAddPolicy)}</button>
+        <button data-cmd="addWorker">${escHtml(s.btnAddWorker)}</button>
+        <button data-cmd="openAssetManager">${escHtml(s.btnManageAssets)}</button>
+        <button data-cmd="clearTasks">${escHtml(s.btnClearTasks)}</button>
+        <button id="reset-checkin" title="${escHtml(s.resetCheckinTip)}">${escHtml(s.btnResetCheckin)}</button>
       </div>
       <p class="muted" style="font-size:0.8em;margin-top:12px">
-        Charts count only dispatches made through this extension. For an account's real plan quota,
-        open its worker terminal and run /usage.
+        ${escHtml(s.footnote)}
       </p>
     </div>
   </div>
 
 <script>
   const vscode = acquireVsCodeApi();
+  const S = ${jsonForScript(s)};
+  const fmt = (s, ...a) => String(s).replace(/\\{(\\d+)\\}/g, (_, i) => a[i]);
   let data = null;
   let editing = null; // input id being edited — don't clobber while typing
 
@@ -310,7 +461,7 @@ export function dashboardHtml(): string {
     const plotW = W - padL - 6, plotH = H - padB - padT;
     const max = Math.max(1, ...daily.map((d) => d.done + d.error));
     const step = plotW / daily.length, barW = Math.max(6, step * 0.62);
-    let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="tasks per day">';
+    let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="' + esc(S.ariaTasksPerDay) + '">';
     // 3 recessive gridlines + y labels
     for (let i = 0; i <= 2; i++) {
       const v = Math.ceil(max * i / 2), y = padT + plotH - (plotH * i / 2);
@@ -321,7 +472,7 @@ export function dashboardHtml(): string {
       const x = padL + i * step + (step - barW) / 2;
       const hDone = plotH * d.done / max, hErr = plotH * d.error / max;
       const yDone = padT + plotH - hDone;
-      const tip = '<title>' + esc(d.label) + ' — ' + d.done + ' done, ' + d.error + ' error</title>';
+      const tip = '<title>' + esc(fmt(S.chartDayTip, d.label, d.done, d.error)) + '</title>';
       if (d.done > 0) s += '<rect x="' + x + '" y="' + yDone + '" width="' + barW + '" height="' + hDone + '" rx="2" fill="var(--c-done)">' + tip + '</rect>';
       if (d.error > 0) s += '<rect x="' + x + '" y="' + (yDone - hErr - 2) + '" width="' + barW + '" height="' + hErr + '" rx="2" fill="var(--c-error)">' + tip + '</rect>';
       if (i % 2 === 0) s += '<text x="' + (x + barW / 2) + '" y="' + (H - 3) + '" text-anchor="middle">' + esc(d.label) + '</text>';
@@ -334,11 +485,11 @@ export function dashboardHtml(): string {
     const max = Math.max(1, ...rows.map((r) => r.inT + r.outT));
     const W = 460, rowH = 26, padL = 92, padR = 56;
     const H = rows.length * rowH + 6;
-    let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="tokens per worker">';
+    let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="' + esc(S.ariaTokensPerWorker) + '">';
     rows.forEach((r, i) => {
       const y = i * rowH + 6, h = 12;
       const wIn = (W - padL - padR) * r.inT / max, wOut = (W - padL - padR) * r.outT / max;
-      const tip = '<title>' + esc(r.name) + ' — ' + tok(r.inT) + ' in / ' + tok(r.outT) + ' out</title>';
+      const tip = '<title>' + esc(fmt(S.chartWorkerTip, r.name, tok(r.inT), tok(r.outT))) + '</title>';
       s += '<text x="' + (padL - 6) + '" y="' + (y + h - 2) + '" text-anchor="end">' + esc(r.name) + '</text>';
       if (r.inT > 0) s += '<rect x="' + padL + '" y="' + y + '" width="' + Math.max(2, wIn) + '" height="' + h + '" rx="2" fill="var(--c-in)">' + tip + '</rect>';
       if (r.outT > 0) s += '<rect x="' + (padL + Math.max(2, wIn) + 2) + '" y="' + y + '" width="' + Math.max(2, wOut) + '" height="' + h + '" rx="2" fill="var(--c-out)">' + tip + '</rect>';
@@ -357,16 +508,16 @@ export function dashboardHtml(): string {
     const o = data.orchestrator;
     let session;
     if (o) {
-      session = o.model + (o.calibrated ? ' (calibration active)' : ' (frontier tier)') +
-        ' · briefed ' + ago(o.ts) + ' ago' +
-        (data.sessionLastSeen && data.sessionLastSeen > o.ts ? ' · active ' + ago(data.sessionLastSeen) + ' ago' : '');
+      session = o.model + ' ' + (o.calibrated ? S.calibrationActive : S.frontierTier) +
+        ' · ' + fmt(S.briefedAgo, ago(o.ts)) +
+        (data.sessionLastSeen && data.sessionLastSeen > o.ts ? ' · ' + fmt(S.activeAgo, ago(data.sessionLastSeen)) : '');
     } else if (data.sessionLastSeen) {
-      session = 'active ' + ago(data.sessionLastSeen) + ' ago — briefing pending (model unknown)';
+      session = fmt(S.sessionPendingBrief, ago(data.sessionLastSeen));
     } else {
-      session = 'not checked in yet';
+      session = S.notCheckedIn;
     }
     document.getElementById('meta').textContent =
-      (data.workspace ? 'workspace: ' + data.workspace : 'no workspace open') + '   |   main session: ' + session;
+      (data.workspace ? fmt(S.metaWorkspace, data.workspace) : S.metaNoWorkspace) + '   |   ' + fmt(S.metaMainSession, session);
 
     // tiles
     const d7 = data.daily.slice(-7);
@@ -376,32 +527,32 @@ export function dashboardHtml(): string {
     const cost = data.workers.reduce((a, w) => a + w.week.costUsd, 0);
     const rate = done7 + err7 > 0 ? Math.round(done7 / (done7 + err7) * 100) + '%' : '–';
     document.getElementById('tiles').innerHTML = [
-      ['Running now', data.running, 'active dispatches'],
-      ['Tasks · 7d', done7 + err7, done7 + ' done · ' + err7 + ' error'],
-      ['Success rate · 7d', rate, 'this workspace'],
-      ['Tokens · 7d', tok(inW + outW), tok(inW) + ' in / ' + tok(outW) + ' out'],
-      ['Est. cost · 7d', cost > 0 ? '$' + cost.toFixed(2) : '–', 'all workers'],
-    ].map(([t, n, sub]) => '<div class="card tile"><h2>' + t + '</h2><div class="num">' + n + '</div><div class="sub">' + sub + '</div></div>').join('');
+      [S.tileRunningNow, data.running, S.tileRunningNowSub],
+      [S.tileTasks7d, done7 + err7, fmt(S.tileTasksSub, done7, err7)],
+      [S.tileSuccess, rate, S.tileSuccessSub],
+      [S.tileTokens, tok(inW + outW), fmt(S.tileTokensSub, tok(inW), tok(outW))],
+      [S.tileCost, cost > 0 ? '$' + cost.toFixed(2) : '–', S.tileCostSub],
+    ].map(([t, n, sub]) => '<div class="card tile"><h2>' + esc(t) + '</h2><div class="num">' + esc(n) + '</div><div class="sub">' + esc(sub) + '</div></div>').join('');
 
     // charts
     document.getElementById('dailyChart').innerHTML =
-      data.daily.some((d) => d.done + d.error > 0) ? dailyChart(data.daily) : '<div class="empty">no dispatches in the last 14 days</div>';
+      data.daily.some((d) => d.done + d.error > 0) ? dailyChart(data.daily) : '<div class="empty">' + esc(S.emptyDaily) + '</div>';
     document.getElementById('workerChart').innerHTML =
       data.workers.length && data.workers.some((w) => w.week.inputTokens + w.week.outputTokens > 0)
-        ? workerChart(data.workers) : '<div class="empty">no worker usage in the last 7 days</div>';
+        ? workerChart(data.workers) : '<div class="empty">' + esc(S.emptyWorkerUsage) + '</div>';
 
     // workers table
     const usage = (u) => u.tasks === 0 ? '<span class="muted">–</span>' : u.tasks + ' · ' + tok(u.inputTokens) + '/' + tok(u.outputTokens);
     document.querySelector('#workers tbody').innerHTML = data.workers.map((w) => {
       const status = w.coolingDown
-        ? '<span class="warn">⏸ until ' + new Date(w.cooldownUntil).toLocaleTimeString() + '</span>'
-        : '<span class="ok">available</span>';
+        ? '<span class="warn">' + esc(fmt(S.statusCoolingUntil, new Date(w.cooldownUntil).toLocaleTimeString())) + '</span>'
+        : '<span class="ok">' + esc(S.statusAvailable) + '</span>';
       const total = w.totals
         ? w.totals.tasks + ' · ' + tok(w.totals.inputTokens) + '/' + tok(w.totals.outputTokens) + (w.totals.costUsd ? ' · $' + w.totals.costUsd.toFixed(2) : '')
         : '<span class="muted">–</span>';
       return '<tr><td><b>' + (w.preferred ? '★ ' : '') + esc(w.name) + '</b></td><td>' + esc(w.model) + '</td><td>' + status +
         '</td><td>' + usage(w.session) + '</td><td>' + usage(w.week) + '</td><td>' + total + '</td></tr>';
-    }).join('') || '<tr><td colspan="6" class="muted">no workers registered</td></tr>';
+    }).join('') || '<tr><td colspan="6" class="muted">' + esc(S.emptyWorkers) + '</td></tr>';
 
     // tasks table
     const scoped = document.getElementById('scope').checked;
@@ -409,11 +560,11 @@ export function dashboardHtml(): string {
     document.querySelector('#tasks tbody').innerHTML = tasks.map((t) => {
       const icon = t.status === 'running' ? '⟳' : t.status === 'done' ? '<span class="ok">✓</span>' : '<span class="err">✗</span>';
       const tokens = t.inputTokens != null ? tok(t.inputTokens) + '/' + tok(t.outputTokens) : '<span class="muted">–</span>';
-      const ws = t.inWorkspace ? '' : ' <span class="badge muted">other ws</span>';
+      const ws = t.inWorkspace ? '' : ' <span class="badge muted">' + esc(S.badgeOtherWs) + '</span>';
       return '<tr><td>' + icon + '</td><td class="title"><span class="task-link" data-file="' + esc(t.outputFile) + '">' +
         esc(t.title) + '</span>' + ws + '</td><td>' + esc(t.worker) + '</td><td>' + esc(t.model) +
         '</td><td>' + tokens + '</td><td class="muted">' + new Date(t.ts).toLocaleTimeString() + '</td></tr>';
-    }).join('') || '<tr><td colspan="6" class="muted">no dispatched tasks yet</td></tr>';
+    }).join('') || '<tr><td colspan="6" class="muted">' + esc(S.emptyTasks) + '</td></tr>';
     for (const el of document.querySelectorAll('.task-link')) {
       el.onclick = () => vscode.postMessage({ type: 'openTask', file: el.dataset.file });
     }

@@ -80,30 +80,6 @@ export function sha256(content: Buffer | string): string {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
-/** One-line human summary of a sync run. */
-export function describeSyncReport(report: SyncReport): string {
-  const parts: string[] = [];
-  if (report.installed.length) {
-    parts.push(`${report.installed.length} installed`);
-  }
-  if (report.updated.length) {
-    parts.push(`${report.updated.length} updated`);
-  }
-  if (report.removed.length) {
-    parts.push(`${report.removed.length} file(s) removed`);
-  }
-  if (report.customized.length) {
-    parts.push(`${report.customized.length} customized file(s) left untouched`);
-  }
-  if (report.orphaned.length) {
-    parts.push(`${report.orphaned.length} asset(s) missing their pack`);
-  }
-  if (report.conflicts.length) {
-    parts.push(`${report.conflicts.length} install-path conflict(s)`);
-  }
-  return parts.length ? parts.join(', ') : 'everything up to date';
-}
-
 /**
  * A rel path must resolve inside `.claude/`. Pack scanning can only produce
  * safe components, but rels are also read back from the on-disk ledger, which
@@ -145,7 +121,9 @@ function readDescription(file: string): string | undefined {
   try {
     const text = fs.readFileSync(file, 'utf8');
     const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-    const match = frontmatter && /^description:\s*(.+)$/m.exec(frontmatter[1]);
+    // [ \t]* not \s* — \s crosses newlines, so an empty `description:` would
+    // capture whatever the next frontmatter line happens to be.
+    const match = frontmatter && /^description:[ \t]*(.+)$/m.exec(frontmatter[1]);
     return match ? match[1].trim().replace(/^['"]|['"]$/g, '') : undefined;
   } catch {
     return undefined;
@@ -273,14 +251,64 @@ function targetPath(workspaceRoot: string, rel: string): string {
 
 export const ASSET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * Scaffolds are skeletons, not drafts: every slot is present but empty, and
+ * the guidance lives in comments so nothing reads as authored content.
+ * Inside the frontmatter fences only `#` comments are legal (an HTML comment
+ * there is a YAML parse error); the body uses `<!-- -->`.
+ *
+ * `description:` must stay the LAST line of the frontmatter — readDescription's
+ * `/^description:\s*(.+)$/m` lets `\s*` cross the newline, so any line after it
+ * would be captured as the description.
+ *
+ * The id is single-quoted: ASSET_ID_PATTERN admits ids YAML would read as
+ * numbers (`9`, `1.5`, `1_000`), and it forbids quotes, so this cannot escape.
+ */
 const ASSET_TEMPLATES: Record<AssetType, (id: string) => string> = {
-  skill: (id) =>
-    `---\nname: ${id}\ndescription: TODO — one line stating when to use this skill.\n---\n\n# ${id}\n\nTODO: instructions.\n`,
-  agent: (id) =>
-    `---\nname: ${id}\ndescription: TODO — when this agent should be used.\n---\n\nTODO: system prompt for the ${id} agent.\n`,
-  command: () => `---\ndescription: TODO — what this command does.\n---\n\nTODO: prompt. Use $ARGUMENTS for user input.\n`,
-  'output-style': (id) =>
-    `---\nname: ${id}\ndescription: TODO — what this output style changes.\n---\n\nTODO: style instructions.\n`,
+  skill: (id) => `---
+name: '${id}'
+# description: one line, third person, stating WHEN Claude should use this skill.
+# Claude sees only name + description until the skill triggers, so this line is the trigger.
+description:
+---
+
+<!-- Instructions Claude follows once this skill triggers. -->
+<!-- Keep it procedural: numbered steps, hard constraints, a worked example. -->
+<!-- Delete these comments as you fill the body in. -->
+`,
+  agent: (id) => `---
+name: '${id}'
+# An optional 'tools:' key restricts this agent to a subset of tools; omit it to inherit all tools.
+# description: one line, third person, stating WHEN this agent should be invoked.
+# Claude matches on it to auto-invoke the agent — concrete example invocations help.
+description:
+---
+
+<!-- The agent's system prompt: the role it takes on, the method it must follow, -->
+<!-- and the exact output format it must return. -->
+<!-- Delete these comments as you fill the body in. -->
+`,
+  command: () => `---
+# A slash command takes no 'name:' key — the filename is the command name.
+# An optional 'argument-hint:' key documents the arguments shown in the command menu.
+# description: one line, third person, stating what this command does.
+description:
+---
+
+<!-- The prompt sent to Claude when this command runs. -->
+<!-- $ARGUMENTS is replaced with whatever the user typed after the command name. -->
+<!-- Delete these comments as you fill the body in. -->
+`,
+  'output-style': (id) => `---
+name: '${id}'
+# description: one line, third person, stating what this output style changes.
+description:
+---
+
+<!-- These instructions replace Claude Code's default output-style instructions. -->
+<!-- Describe the tone, structure, and formatting Claude must use while it is active. -->
+<!-- Delete these comments as you fill the body in. -->
+`,
 };
 
 /**

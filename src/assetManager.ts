@@ -6,7 +6,6 @@ import {
   assetFiles,
   assetStatus,
   createAssetTemplate,
-  describeSyncReport,
   orphanedAssets,
   PackAsset,
   readAssetState,
@@ -15,6 +14,8 @@ import {
   syncWorkspace,
 } from './assets';
 import { PackSource, resolvePackSources } from './packSources';
+import { describeSyncReport } from './syncReport';
+import { jsonForScript } from './webviewUtil';
 
 /**
  * Asset Manager — a dedicated webview panel for managing which Claude assets
@@ -62,11 +63,11 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
     panel.reveal();
     return;
   }
-  panel = vscode.window.createWebviewPanel('ccoAssetManager', 'Claude Assets', vscode.ViewColumn.Active, {
+  panel = vscode.window.createWebviewPanel('ccoAssetManager', vscode.l10n.t('Claude Assets'), vscode.ViewColumn.Active, {
     enableScripts: true,
     retainContextWhenHidden: true,
   });
-  panel.webview.html = assetManagerHtml();
+  panel.webview.html = assetManagerHtml(assetManagerStrings());
 
   const cfg = () => vscode.workspace.getConfiguration('claudeCodeOrchestrator');
 
@@ -149,14 +150,17 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
             break;
           }
           setAssetEnabled(ws, key, msg.enabled === true);
-          noteReport(msg.enabled === true ? 'enabled' : 'disabled', describeSyncReport(syncWorkspace(packs(), ws)));
+          noteReport(
+            msg.enabled === true ? vscode.l10n.t('enabled') : vscode.l10n.t('disabled'),
+            describeSyncReport(syncWorkspace(packs(), ws)),
+          );
           break;
         }
         case 'syncNow': {
           if (!ws) {
             break;
           }
-          noteReport('sync', describeSyncReport(syncWorkspace(packs(), ws)));
+          noteReport(vscode.l10n.t('sync'), describeSyncReport(syncWorkspace(packs(), ws)));
           break;
         }
         case 'reset': {
@@ -169,16 +173,19 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
                 .filter((f) => f.state === 'customized')
                 .map((f) => f.rel)
             : [];
+          const overwriteLabel = vscode.l10n.t('Overwrite');
           const choice = await vscode.window.showWarningMessage(
-            `Overwrite your local edits of "${key}" with the pack version? This cannot be undone.`,
+            vscode.l10n.t('Overwrite your local edits of "{0}" with the pack version? This cannot be undone.', key),
             {
               modal: true,
-              detail: customized.length ? `Files to overwrite:\n${customized.join('\n')}` : undefined,
+              detail: customized.length
+                ? vscode.l10n.t('Files to overwrite:\n{0}', customized.join('\n'))
+                : undefined,
             },
-            'Overwrite',
+            overwriteLabel,
           );
-          if (choice === 'Overwrite') {
-            noteReport('reset', describeSyncReport(syncWorkspace(packs(), ws, new Set([key]))));
+          if (choice === overwriteLabel) {
+            noteReport(vscode.l10n.t('reset'), describeSyncReport(syncWorkspace(packs(), ws, new Set([key]))));
           }
           break;
         }
@@ -186,14 +193,15 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
           if (!ws || !key || !rel) {
             break;
           }
+          const overwriteLabel = vscode.l10n.t('Overwrite');
           const choice = await vscode.window.showWarningMessage(
-            `Overwrite your local edits of "${rel}" with the pack version? This cannot be undone.`,
+            vscode.l10n.t('Overwrite your local edits of "{0}" with the pack version? This cannot be undone.', rel),
             { modal: true },
-            'Overwrite',
+            overwriteLabel,
           );
-          if (choice === 'Overwrite') {
+          if (choice === overwriteLabel) {
             noteReport(
-              'reset file',
+              vscode.l10n.t('reset file'),
               describeSyncReport(syncWorkspace(packs(), ws, new Set(), new Set([`${key}\0${rel}`]))),
             );
           }
@@ -205,17 +213,21 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
           }
           const record = readAssetState(ws).assets[key];
           const count = record ? Object.keys(record.files).length : 0;
+          const disableCleanLabel = vscode.l10n.t('Disable & clean');
           const choice = await vscode.window.showWarningMessage(
-            `Disable "${key}" and delete its ${count} unmodified installed file(s)? Files you edited are kept. ` +
-              'If the pack is only missing on this machine, re-add its directory instead — nothing is lost by waiting.',
+            vscode.l10n.t(
+              'Disable "{0}" and delete its {1} unmodified installed file(s)? Files you edited are kept. If the pack is only missing on this machine, re-add its directory instead — nothing is lost by waiting.',
+              key,
+              count,
+            ),
             { modal: true },
-            'Disable & clean',
+            disableCleanLabel,
           );
-          if (choice !== 'Disable & clean') {
+          if (choice !== disableCleanLabel) {
             break;
           }
           setAssetEnabled(ws, key, false);
-          noteReport('cleaned orphan', describeSyncReport(syncWorkspace(packs(), ws)));
+          noteReport(vscode.l10n.t('cleaned orphan'), describeSyncReport(syncWorkspace(packs(), ws)));
           break;
         }
         case 'openInstalled': {
@@ -246,7 +258,7 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
               'vscode.diff',
               vscode.Uri.file(source),
               vscode.Uri.file(target),
-              `${rel} — pack ↔ installed`,
+              vscode.l10n.t('{0} — pack ↔ installed', rel),
             );
           }
           break;
@@ -256,8 +268,8 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
             canSelectFiles: false,
             canSelectFolders: true,
             canSelectMany: false,
-            openLabel: 'Use as asset pack',
-            title: 'Select an asset-pack directory (mirrors .claude/ layout)',
+            openLabel: vscode.l10n.t('Use as asset pack'),
+            title: vscode.l10n.t('Select an asset-pack directory (mirrors .claude/ layout)'),
           });
           const dir = picked?.[0]?.fsPath;
           if (dir) {
@@ -314,8 +326,9 @@ async function createNewAsset(sources: PackSource[]): Promise<void> {
   const writable = sources.filter((s) => s.kind === 'setting' && s.pack);
   if (writable.length === 0) {
     void vscode.window.showInformationMessage(
-      'No writable asset pack configured. Add a pack directory first (e.g. your private claude-assets clone) — ' +
-        'the bundled pack cannot be edited because it is replaced on every extension update.',
+      vscode.l10n.t(
+        'No writable asset pack configured. Add a pack directory first (e.g. your private claude-assets clone) — the bundled pack cannot be edited because it is replaced on every extension update.',
+      ),
     );
     return;
   }
@@ -324,21 +337,22 @@ async function createNewAsset(sources: PackSource[]): Promise<void> {
       ? { source: writable[0] }
       : await vscode.window.showQuickPick(
           writable.map((source) => ({ label: source.pack!.name, description: source.root, source })),
-          { placeHolder: 'Pack to create the asset in' },
+          { placeHolder: vscode.l10n.t('Pack to create the asset in') },
         );
   if (!packPick) {
     return;
   }
   const typePick = await vscode.window.showQuickPick(
     ASSET_TYPES.map((t) => ({ label: t })),
-    { placeHolder: 'Asset type' },
+    { placeHolder: vscode.l10n.t('Asset type') },
   );
   if (!typePick) {
     return;
   }
   const id = await vscode.window.showInputBox({
-    prompt: `Name for the new ${typePick.label} (letters, digits, ".", "-", "_")`,
-    validateInput: (v) => (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v.trim()) ? undefined : 'Invalid name'),
+    prompt: vscode.l10n.t('Name for the new {0} (letters, digits, ".", "-", "_")', typePick.label),
+    validateInput: (v) =>
+      /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v.trim()) ? undefined : vscode.l10n.t('Invalid name'),
   });
   if (!id) {
     return;
@@ -347,8 +361,121 @@ async function createNewAsset(sources: PackSource[]): Promise<void> {
   await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(file));
 }
 
-/** Exported for headless rendering tests. */
-export function assetManagerHtml(): string {
+export interface AssetManagerStrings {
+  title: string;
+  btnSyncNow: string;
+  btnNewAsset: string;
+  btnAddPack: string;
+  autoSyncLabel: string;
+  filterPlaceholder: string;
+  sourcesTitle: string;
+  assetsTitle: string;
+  thOnTip: string;
+  thOn: string;
+  thAsset: string;
+  thPack: string;
+  thType: string;
+  thStatus: string;
+  thActions: string;
+  orphansTitle: string;
+  orphansHelp: string;
+  metaWorkspace: string;
+  metaNoWorkspace: string;
+  statusSynced: string;
+  statusUpdateAvailable: string;
+  statusCustomized: string;
+  statusNotInstalled: string;
+  statusConflict: string;
+  fileUpdatePending: string;
+  fileCustomized: string;
+  fileSourceUnreadable: string;
+  sourceAssetCount: string;
+  dirMissing: string;
+  actionRemove: string;
+  actionReveal: string;
+  bundledLabel: string;
+  orphanFilesKept: string;
+  actionDisableClean: string;
+  summaryEnabled: string;
+  summaryUpdate: string;
+  summaryCustomized: string;
+  summaryConflict: string;
+  actionOpen: string;
+  actionPackVersion: string;
+  actionDiff: string;
+  actionResetFile: string;
+  detailsFiles: string;
+  actionResetToPack: string;
+  conflictNote: string;
+  toggleTip: string;
+  emptyFilter: string;
+  emptyNoAssets: string;
+  emptyNoWorkspace: string;
+}
+
+/** Localized strings for the page. Must be called from the extension host. */
+export function assetManagerStrings(): AssetManagerStrings {
+  return {
+    title: vscode.l10n.t('Claude Assets'),
+    btnSyncNow: vscode.l10n.t('Sync now'),
+    btnNewAsset: vscode.l10n.t('New asset…'),
+    btnAddPack: vscode.l10n.t('Add pack directory…'),
+    autoSyncLabel: vscode.l10n.t('auto-sync on startup'),
+    filterPlaceholder: vscode.l10n.t('filter assets…'),
+    sourcesTitle: vscode.l10n.t('Pack sources'),
+    assetsTitle: vscode.l10n.t('Assets in this workspace'),
+    thOnTip: vscode.l10n.t("checked = installed into this workspace's .claude/"),
+    thOn: vscode.l10n.t('on'),
+    thAsset: vscode.l10n.t('asset'),
+    thPack: vscode.l10n.t('pack'),
+    thType: vscode.l10n.t('type'),
+    thStatus: vscode.l10n.t('status'),
+    thActions: vscode.l10n.t('actions'),
+    orphansTitle: vscode.l10n.t('Orphaned assets (enabled here, but their pack is unavailable)'),
+    orphansHelp: vscode.l10n.t(
+      'Most often the pack just isn\'t on this machine yet (e.g. a private asset repo that isn\'t cloned here). Re-adding its directory restores these rows — installed files stay untouched meanwhile. "Disable & clean" removes the unmodified installed files after a confirmation.',
+    ),
+    metaWorkspace: vscode.l10n.t('workspace: {0}'),
+    metaNoWorkspace: vscode.l10n.t('no workspace open — open a folder to manage its assets'),
+    statusSynced: vscode.l10n.t('synced'),
+    statusUpdateAvailable: vscode.l10n.t('update available'),
+    statusCustomized: vscode.l10n.t('customized'),
+    statusNotInstalled: vscode.l10n.t('not installed'),
+    statusConflict: vscode.l10n.t('conflict'),
+    fileUpdatePending: vscode.l10n.t('update pending'),
+    fileCustomized: vscode.l10n.t('customized'),
+    fileSourceUnreadable: vscode.l10n.t('source unreadable'),
+    sourceAssetCount: vscode.l10n.t('{0} asset(s)'),
+    dirMissing: vscode.l10n.t('directory missing'),
+    actionRemove: vscode.l10n.t('remove'),
+    actionReveal: vscode.l10n.t('reveal'),
+    bundledLabel: vscode.l10n.t('bundled with the extension'),
+    orphanFilesKept: vscode.l10n.t('{0} installed file(s) kept'),
+    actionDisableClean: vscode.l10n.t('disable & clean'),
+    summaryEnabled: vscode.l10n.t('{0} enabled of {1}'),
+    summaryUpdate: vscode.l10n.t('{0} update available'),
+    summaryCustomized: vscode.l10n.t('{0} customized'),
+    summaryConflict: vscode.l10n.t('{0} conflict'),
+    actionOpen: vscode.l10n.t('open'),
+    actionPackVersion: vscode.l10n.t('pack version'),
+    actionDiff: vscode.l10n.t('diff'),
+    actionResetFile: vscode.l10n.t('reset'),
+    detailsFiles: vscode.l10n.t('{0} file(s)'),
+    actionResetToPack: vscode.l10n.t('reset to pack'),
+    conflictNote: vscode.l10n.t('same install path as {0} — disable one of the two'),
+    toggleTip: vscode.l10n.t('install into this workspace'),
+    emptyFilter: vscode.l10n.t('no assets match the filter'),
+    emptyNoAssets: vscode.l10n.t('no assets found — add a pack directory or create one with “New asset…”'),
+    emptyNoWorkspace: vscode.l10n.t('open a workspace folder first'),
+  };
+}
+
+/** HTML-escape for static-body interpolation (localized strings are untrusted). */
+const HTML_ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const escHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => HTML_ESC[c]);
+
+/** Pure: same strings in, same HTML out. Exported for headless rendering tests. */
+export function assetManagerHtml(s: AssetManagerStrings): string {
   return /* html */ `<!DOCTYPE html>
 <html>
 <head>
@@ -404,42 +531,42 @@ export function assetManagerHtml(): string {
 </style>
 </head>
 <body>
-  <h1>Claude Assets</h1>
+  <h1>${escHtml(s.title)}</h1>
   <p id="meta"></p>
 
   <div class="toolbar">
-    <button class="primary" data-act="syncNow">Sync now</button>
-    <button data-act="newAsset">New asset…</button>
-    <button data-act="addPack">Add pack directory…</button>
-    <label class="inline"><input type="checkbox" id="autosync"> auto-sync on startup</label>
+    <button class="primary" data-act="syncNow">${escHtml(s.btnSyncNow)}</button>
+    <button data-act="newAsset">${escHtml(s.btnNewAsset)}</button>
+    <button data-act="addPack">${escHtml(s.btnAddPack)}</button>
+    <label class="inline"><input type="checkbox" id="autosync"> ${escHtml(s.autoSyncLabel)}</label>
     <span class="spacer"></span>
-    <input type="text" id="filter" placeholder="filter assets…" spellcheck="false">
+    <input type="text" id="filter" placeholder="${escHtml(s.filterPlaceholder)}" spellcheck="false">
   </div>
 
   <div class="card">
-    <h2>Pack sources</h2>
+    <h2>${escHtml(s.sourcesTitle)}</h2>
     <div id="sources"></div>
   </div>
 
   <div class="card">
-    <h2>Assets in this workspace<span id="summary" style="font-weight:400;text-transform:none;letter-spacing:0"></span></h2>
+    <h2>${escHtml(s.assetsTitle)}<span id="summary" style="font-weight:400;text-transform:none;letter-spacing:0"></span></h2>
     <table id="assets"><thead><tr>
-      <th title="checked = installed into this workspace's .claude/">on</th><th>asset</th><th>pack</th><th>type</th><th>status</th><th>actions</th>
+      <th title="${escHtml(s.thOnTip)}">${escHtml(s.thOn)}</th><th>${escHtml(s.thAsset)}</th><th>${escHtml(s.thPack)}</th><th>${escHtml(s.thType)}</th><th>${escHtml(s.thStatus)}</th><th>${escHtml(s.thActions)}</th>
     </tr></thead><tbody></tbody></table>
   </div>
 
   <div class="card" id="orphans-card" style="display:none">
-    <h2>Orphaned assets (enabled here, but their pack is unavailable)</h2>
+    <h2>${escHtml(s.orphansTitle)}</h2>
     <p class="muted" style="font-size:0.85em;margin:0 0 6px">
-      Most often the pack just isn't on this machine yet (e.g. a private asset repo that isn't cloned here).
-      Re-adding its directory restores these rows — installed files stay untouched meanwhile.
-      "Disable &amp; clean" removes the unmodified installed files after a confirmation.
+      ${escHtml(s.orphansHelp)}
     </p>
     <div id="orphans"></div>
   </div>
 
 <script>
   const vscode = acquireVsCodeApi();
+  const S = ${jsonForScript(s)};
+  const fmt = (s, ...a) => String(s).replace(/\\{(\\d+)\\}/g, (_, i) => a[i]);
   let data = null;
   let lastSig = '';
 
@@ -462,31 +589,31 @@ export function assetManagerHtml(): string {
   document.getElementById('filter').addEventListener('input', renderAssets);
 
   const STATUS_BADGE = {
-    'synced': ['synced', 'synced'],
-    'update-available': ['update', 'update available'],
-    'customized': ['customized', 'customized'],
-    'not-installed': ['off', 'not installed'],
-    'conflict': ['orphan', 'conflict'],
+    'synced': ['synced', S.statusSynced],
+    'update-available': ['update', S.statusUpdateAvailable],
+    'customized': ['customized', S.statusCustomized],
+    'not-installed': ['off', S.statusNotInstalled],
+    'conflict': ['orphan', S.statusConflict],
   };
-  const FILE_STATE_LABEL = { 'in-sync': '', 'writable': 'update pending', 'customized': 'customized', 'missing-source': 'source unreadable' };
+  const FILE_STATE_LABEL = { 'in-sync': '', 'writable': S.fileUpdatePending, 'customized': S.fileCustomized, 'missing-source': S.fileSourceUnreadable };
 
   function render() {
     if (!data) return;
     document.getElementById('meta').textContent =
-      (data.workspace ? 'workspace: ' + data.workspace : 'no workspace open — open a folder to manage its assets') +
+      (data.workspace ? fmt(S.metaWorkspace, data.workspace) : S.metaNoWorkspace) +
       (data.lastReport ? '   |   ' + data.lastReport : '');
     document.getElementById('autosync').checked = data.autoSync;
 
     document.getElementById('sources').innerHTML = data.sources.map((s) => {
       const status = s.ok
-        ? '<span class="badge synced">' + s.assetCount + ' asset' + (s.assetCount === 1 ? '' : 's') + '</span>'
-        : '<span class="badge orphan">directory missing</span>';
+        ? '<span class="badge synced">' + esc(fmt(S.sourceAssetCount, s.assetCount)) + '</span>'
+        : '<span class="badge orphan">' + esc(S.dirMissing) + '</span>';
       const remove = s.kind === 'setting'
-        ? '<a class="action" data-remove="' + esc(s.entry) + '">remove</a>' : '';
-      const reveal = s.ok ? '<a class="action" data-reveal="' + esc(s.root) + '">reveal</a>' : '';
+        ? '<a class="action" data-remove="' + esc(s.entry) + '">' + esc(S.actionRemove) + '</a>' : '';
+      const reveal = s.ok ? '<a class="action" data-reveal="' + esc(s.root) + '">' + esc(S.actionReveal) + '</a>' : '';
       return '<div class="file-row" style="margin-left:0">' +
         '<b>' + esc(s.name ?? s.entry) + '</b>' +
-        '<span class="src-path muted">' + esc(s.kind === 'bundled' ? 'bundled with the extension' : s.root) + '</span>' +
+        '<span class="src-path muted">' + esc(s.kind === 'bundled' ? S.bundledLabel : s.root) + '</span>' +
         status + reveal + remove + '</div>';
     }).join('');
     for (const a of document.querySelectorAll('[data-remove]')) a.onclick = () => post({ type: 'removePack', entry: a.dataset.remove });
@@ -499,8 +626,8 @@ export function assetManagerHtml(): string {
       orphansCard.style.display = '';
       document.getElementById('orphans').innerHTML = data.orphans.map((o) =>
         '<div class="file-row" style="margin-left:0"><b>' + esc(o.key) + '</b>' +
-        '<span class="muted">' + o.files.length + ' installed file(s) kept</span>' +
-        '<a class="action" data-orphan="' + esc(o.key) + '">disable &amp; clean</a></div>'
+        '<span class="muted">' + esc(fmt(S.orphanFilesKept, o.files.length)) + '</span>' +
+        '<a class="action" data-orphan="' + esc(o.key) + '">' + esc(S.actionDisableClean) + '</a></div>'
       ).join('');
       for (const a of document.querySelectorAll('[data-orphan]')) a.onclick = () => post({ type: 'disableOrphan', key: a.dataset.orphan });
     } else {
@@ -518,10 +645,10 @@ export function assetManagerHtml(): string {
       if (a.status === 'conflict') counts.conflict++;
     }
     document.getElementById('summary').textContent = counts.enabled || data.assets.length
-      ? ' — ' + counts.enabled + ' enabled of ' + data.assets.length +
-        (counts.update ? ' · ' + counts.update + ' update available' : '') +
-        (counts.customized ? ' · ' + counts.customized + ' customized' : '') +
-        (counts.conflict ? ' · ' + counts.conflict + ' conflict' : '')
+      ? ' — ' + fmt(S.summaryEnabled, counts.enabled, data.assets.length) +
+        (counts.update ? ' · ' + fmt(S.summaryUpdate, counts.update) : '') +
+        (counts.customized ? ' · ' + fmt(S.summaryCustomized, counts.customized) : '') +
+        (counts.conflict ? ' · ' + fmt(S.summaryConflict, counts.conflict) : '')
       : '';
 
     const openKeys = new Set([...document.querySelectorAll('#assets details[open]')].map((d) => d.dataset.key));
@@ -530,35 +657,35 @@ export function assetManagerHtml(): string {
       !q || (a.id + ' ' + a.pack + ' ' + a.type + ' ' + (a.description || '') + ' ' + a.status + ' ' +
         (STATUS_BADGE[a.status] || ['', ''])[1] + (a.enabled ? ' enabled installed' : ' disabled')).toLowerCase().includes(q));
     document.querySelector('#assets tbody').innerHTML = rows.map((a) => {
-      const [cls, label] = STATUS_BADGE[a.status] || ['off', esc(a.status)];
+      const [cls, label] = STATUS_BADGE[a.status] || ['off', a.status];
       const files = a.files.map((f) => {
         const state = FILE_STATE_LABEL[f.state] || '';
         const links =
-          (f.installed ? '<a class="action" data-open="' + esc(f.rel) + '">open</a>' : '') +
-          '<a class="action" data-src="' + esc(a.key) + '|' + esc(f.rel) + '">pack version</a>' +
-          (f.installed && f.state !== 'in-sync' ? '<a class="action" data-diff="' + esc(a.key) + '|' + esc(f.rel) + '">diff</a>' : '') +
-          (f.installed && f.state === 'customized' ? '<a class="action" data-resetfile="' + esc(a.key) + '|' + esc(f.rel) + '">reset</a>' : '');
+          (f.installed ? '<a class="action" data-open="' + esc(f.rel) + '">' + esc(S.actionOpen) + '</a>' : '') +
+          '<a class="action" data-src="' + esc(a.key) + '|' + esc(f.rel) + '">' + esc(S.actionPackVersion) + '</a>' +
+          (f.installed && f.state !== 'in-sync' ? '<a class="action" data-diff="' + esc(a.key) + '|' + esc(f.rel) + '">' + esc(S.actionDiff) + '</a>' : '') +
+          (f.installed && f.state === 'customized' ? '<a class="action" data-resetfile="' + esc(a.key) + '|' + esc(f.rel) + '">' + esc(S.actionResetFile) + '</a>' : '');
         return '<div class="file-row"><span class="src-path">' + esc(f.rel) + '</span>' +
-          (state ? '<span class="file-state ' + esc(f.state) + '">' + state + '</span>' : '') + links + '</div>';
+          (state ? '<span class="file-state ' + esc(f.state) + '">' + esc(state) + '</span>' : '') + links + '</div>';
       }).join('');
       const details = '<details data-key="' + esc(a.key) + '"' + (openKeys.has(a.key) ? ' open' : '') + '><summary>' +
-        a.files.length + ' file' + (a.files.length === 1 ? '' : 's') + '</summary>' + files + '</details>';
+        esc(fmt(S.detailsFiles, a.files.length)) + '</summary>' + files + '</details>';
       const reset = a.status === 'customized'
-        ? '<a class="action" data-reset="' + esc(a.key) + '">reset to pack</a>' : '';
+        ? '<a class="action" data-reset="' + esc(a.key) + '">' + esc(S.actionResetToPack) + '</a>' : '';
       const conflictNote = a.status === 'conflict' && a.conflictWith
-        ? '<div class="desc" style="color:var(--err)">same install path as ' + esc(a.conflictWith) + ' — disable one of the two</div>'
+        ? '<div class="desc" style="color:var(--err)">' + esc(fmt(S.conflictNote, a.conflictWith)) + '</div>'
         : '';
       return '<tr>' +
-        '<td><input type="checkbox" title="install into this workspace" data-toggle="' + esc(a.key) + '"' + (a.enabled ? ' checked' : '') + '></td>' +
+        '<td><input type="checkbox" title="' + esc(S.toggleTip) + '" data-toggle="' + esc(a.key) + '"' + (a.enabled ? ' checked' : '') + '></td>' +
         '<td><span class="asset-name">' + esc(a.id) + '</span>' +
           (a.description ? '<div class="desc">' + esc(a.description) + '</div>' : '') + conflictNote + details + '</td>' +
         '<td class="muted">' + esc(a.pack) + '</td>' +
         '<td><span class="type">' + esc(a.type) + '</span></td>' +
-        '<td><span class="badge ' + cls + '">' + label + '</span></td>' +
+        '<td><span class="badge ' + cls + '">' + esc(label) + '</span></td>' +
         '<td>' + reset + '</td></tr>';
     }).join('') || '<tr><td colspan="6" class="empty">' +
-      (data.assets.length ? 'no assets match the filter' :
-        (data.workspace ? 'no assets found — add a pack directory or create one with “New asset…”' : 'open a workspace folder first')) +
+      esc(data.assets.length ? S.emptyFilter :
+        (data.workspace ? S.emptyNoAssets : S.emptyNoWorkspace)) +
       '</td></tr>';
 
     for (const el of document.querySelectorAll('[data-toggle]'))

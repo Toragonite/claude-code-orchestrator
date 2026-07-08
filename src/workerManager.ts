@@ -53,7 +53,7 @@ export class WorkerManager {
   add(name: string, model: WorkerModel, configDir?: string): WorkerProfile {
     const registry = readRegistry();
     if (registry.workers.some((w) => w.name === name)) {
-      throw new Error(`A worker named "${name}" already exists.`);
+      throw new Error(vscode.l10n.t('A worker named "{0}" already exists.', name));
     }
     const dir = configDir ?? path.join(os.homedir(), `.claude-${name}`);
     fs.mkdirSync(dir, { recursive: true });

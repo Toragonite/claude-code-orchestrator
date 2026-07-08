@@ -9,11 +9,11 @@ import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
 import { openAssetManager } from './assetManager';
 import { resolvePackSources } from './packSources';
+import { describeSyncReport } from './syncReport';
 import {
   AssetPack,
   AssetType,
   assetStatus,
-  describeSyncReport,
   readAssetState,
   relOwners,
   setAssetEnabled,
@@ -140,14 +140,16 @@ async function offerDispatchPolicy(folder: vscode.WorkspaceFolder): Promise<void
   if (hasPolicy(existing)) {
     return;
   }
+  const addLabel = vscode.l10n.t('Add to CLAUDE.md');
+  const skipLabel = vscode.l10n.t('Skip');
   const choice = await vscode.window.showInformationMessage(
-    'Add the dispatch policy to this workspace\'s CLAUDE.md? It tells the main session to delegate ' +
-      'all implementation to workers (it only designs, integrates, and verifies), batch subtasks in ' +
-      'parallel, and write per-task system prompts.',
-    'Add to CLAUDE.md',
-    'Skip',
+    vscode.l10n.t(
+      'Add the dispatch policy to this workspace\'s CLAUDE.md? It tells the main session to delegate all implementation to workers (it only designs, integrates, and verifies), batch subtasks in parallel, and write per-task system prompts.',
+    ),
+    addLabel,
+    skipLabel,
   );
-  if (choice === 'Add to CLAUDE.md') {
+  if (choice === addLabel) {
     writeDispatchPolicy(folder);
   }
 }
@@ -165,19 +167,22 @@ async function maybeOfferMcpRegistration(
   if (context.workspaceState.get<boolean>(dismissKey)) {
     return;
   }
+  const registerLabel = vscode.l10n.t('Register');
+  const dismissLabel = vscode.l10n.t('Not in this workspace');
   const choice = await vscode.window.showInformationMessage(
-    'Claude Code Orchestrator: worker accounts are configured, but the dispatch MCP server is not ' +
-      'registered in this workspace. Register it so your Claude Code session can dispatch tasks?',
-    'Register',
-    'Not in this workspace',
+    vscode.l10n.t(
+      'Claude Code Orchestrator: worker accounts are configured, but the dispatch MCP server is not registered in this workspace. Register it so your Claude Code session can dispatch tasks?',
+    ),
+    registerLabel,
+    dismissLabel,
   );
-  if (choice === 'Register') {
+  if (choice === registerLabel) {
     registerMcp(folder, serverPath);
     vscode.window.showInformationMessage(
-      'Registered. Restart the Claude Code session here and approve the project MCP server.',
+      vscode.l10n.t('Registered. Restart the Claude Code session here and approve the project MCP server.'),
     );
     await offerDispatchPolicy(folder);
-  } else if (choice === 'Not in this workspace') {
+  } else if (choice === dismissLabel) {
     await context.workspaceState.update(dismissKey, true);
   }
 }
@@ -191,7 +196,9 @@ function loadAssetPacks(context: vscode.ExtensionContext, interactive: boolean):
   if (interactive) {
     for (const source of sources) {
       if (source.kind === 'setting' && !source.pack) {
-        void vscode.window.showWarningMessage(`Asset pack directory not found: ${source.entry}`);
+        void vscode.window.showWarningMessage(
+          vscode.l10n.t('Asset pack directory not found: {0}', source.entry),
+        );
       }
     }
   }
@@ -239,7 +246,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const tasksView = vscode.window.createTreeView('claudeCodeOrchestrator.tasks', {
     treeDataProvider: tasksProvider,
   });
-  tasksView.description = 'this workspace';
+  tasksView.description = vscode.l10n.t('this workspace');
 
   context.subscriptions.push(
     tasksProvider,
@@ -256,7 +263,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const pickModel = async (): Promise<WorkerModel | undefined> => {
     const picked = await vscode.window.showQuickPick(
       WORKER_MODELS.map((m) => ({ label: m })),
-      { placeHolder: 'Default model for this worker' },
+      { placeHolder: vscode.l10n.t('Default model for this worker') },
     );
     return picked?.label as WorkerModel | undefined;
   };
@@ -264,8 +271,11 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeCodeOrchestrator.addWorker', async () => {
       const name = await vscode.window.showInputBox({
-        prompt: 'Worker account name (e.g. "w1") — a config directory ~/.claude-<name> will be created',
-        validateInput: (v) => (/^[\w-]+$/.test(v.trim()) ? undefined : 'Use letters, digits, - or _'),
+        prompt: vscode.l10n.t(
+          'Worker account name (e.g. "w1") — a config directory ~/.claude-<name> will be created',
+        ),
+        validateInput: (v) =>
+          /^[\w-]+$/.test(v.trim()) ? undefined : vscode.l10n.t('Use letters, digits, - or _'),
       });
       if (!name) {
         return;
@@ -276,13 +286,17 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       try {
         const worker = workers.add(name.trim(), model);
+        const loginLabel = vscode.l10n.t('Open Login Terminal');
+        const laterLabel = vscode.l10n.t('Later');
         const login = await vscode.window.showInformationMessage(
-          `Worker "${worker.name}" added. Sign in once with the Claude account for this slot — ` +
-            'a terminal will open running Claude Code under this worker\'s config directory.',
-          'Open Login Terminal',
-          'Later',
+          vscode.l10n.t(
+            'Worker "{0}" added. Sign in once with the Claude account for this slot — a terminal will open running Claude Code under this worker\'s config directory.',
+            worker.name,
+          ),
+          loginLabel,
+          laterLabel,
         );
-        if (login === 'Open Login Terminal') {
+        if (login === loginLabel) {
           workers.openTerminal(worker);
         }
         void maybeOfferMcpRegistration(context, serverPath);
@@ -295,7 +309,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const discovered = workers.discoverConfigDirs();
       if (discovered.length === 0) {
         vscode.window.showInformationMessage(
-          'No unregistered Claude Code config directories (~/.claude*) found.',
+          vscode.l10n.t('No unregistered Claude Code config directories (~/.claude*) found.'),
         );
         return;
       }
@@ -303,10 +317,15 @@ export function activate(context: vscode.ExtensionContext): void {
         discovered.map((d) => ({
           label: d.suggestedName,
           description: d.dir,
-          detail: d.loggedIn ? 'login found' : 'no login yet — sign in on first use',
+          detail: d.loggedIn
+            ? vscode.l10n.t('login found')
+            : vscode.l10n.t('no login yet — sign in on first use'),
           entry: d,
         })),
-        { placeHolder: 'Config directories to register as workers', canPickMany: true },
+        {
+          placeHolder: vscode.l10n.t('Config directories to register as workers'),
+          canPickMany: true,
+        },
       );
       if (!picked || picked.length === 0) {
         return;
@@ -314,7 +333,14 @@ export function activate(context: vscode.ExtensionContext): void {
       for (const { entry } of picked) {
         const model = await vscode.window.showQuickPick(
           WORKER_MODELS.map((m) => ({ label: m })),
-          { placeHolder: `Default model for "${entry.suggestedName}" (${entry.dir})`, ignoreFocusOut: true },
+          {
+            placeHolder: vscode.l10n.t(
+              'Default model for "{0}" ({1})',
+              entry.suggestedName,
+              entry.dir,
+            ),
+            ignoreFocusOut: true,
+          },
         );
         if (!model) {
           continue;
@@ -332,7 +358,11 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!name) {
         const picked = await vscode.window.showQuickPick(
           workers.list().map((w) => ({ label: w.name, description: w.configDir })),
-          { placeHolder: 'Worker to remove (its config directory and login stay on disk)' },
+          {
+            placeHolder: vscode.l10n.t(
+              'Worker to remove (its config directory and login stay on disk)',
+            ),
+          },
         );
         name = picked?.label;
       }
@@ -349,8 +379,11 @@ export function activate(context: vscode.ExtensionContext): void {
       const enabled = workers.togglePreferred(worker.name);
       vscode.window.showInformationMessage(
         enabled
-          ? `"${worker.name}" is now the preferred worker — automatic assignment favors it unless it's busier than the alternatives.`
-          : `"${worker.name}" is no longer preferred.`,
+          ? vscode.l10n.t(
+              '"{0}" is now the preferred worker — automatic assignment favors it unless it\'s busier than the alternatives.',
+              worker.name,
+            )
+          : vscode.l10n.t('"{0}" is no longer preferred.', worker.name),
       );
     }),
 
@@ -367,7 +400,10 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       const prompt = await vscode.window.showInputBox({
-        prompt: `Initial task for the interactive session on "${worker.name}" (leave empty to just open Claude Code)`,
+        prompt: vscode.l10n.t(
+          'Initial task for the interactive session on "{0}" (leave empty to just open Claude Code)',
+          worker.name,
+        ),
         ignoreFocusOut: true,
       });
       workers.openTerminal(worker, prompt?.trim() || undefined);
@@ -376,17 +412,24 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeCodeOrchestrator.installMcp', async () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
-        vscode.window.showErrorMessage('Open a workspace folder first.');
+        vscode.window.showErrorMessage(vscode.l10n.t('Open a workspace folder first.'));
         return;
       }
       if (!fs.existsSync(serverPath)) {
-        vscode.window.showErrorMessage(`MCP server missing (${serverPath}). Reinstall the extension or run "npm run compile".`);
+        vscode.window.showErrorMessage(
+          vscode.l10n.t(
+            'MCP server missing ({0}). Reinstall the extension or run "npm run compile".',
+            serverPath,
+          ),
+        );
         return;
       }
       registerMcp(folder, serverPath);
       vscode.window.showInformationMessage(
-        `Registered "${MCP_SERVER_NAME}" in .mcp.json. Restart the Claude Code session in this workspace ` +
-          'and approve the project MCP server — dispatch_tasks / dispatch_task / list_workers will then be available.',
+        vscode.l10n.t(
+          'Registered "{0}" in .mcp.json. Restart the Claude Code session in this workspace and approve the project MCP server — dispatch_tasks / dispatch_task / list_workers will then be available.',
+          MCP_SERVER_NAME,
+        ),
       );
       await offerDispatchPolicy(folder);
     }),
@@ -396,7 +439,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(outputFile));
         await vscode.window.showTextDocument(doc, { preview: true });
       } catch {
-        vscode.window.showWarningMessage(`Task output not found: ${outputFile}`);
+        vscode.window.showWarningMessage(vscode.l10n.t('Task output not found: {0}', outputFile));
       }
     }),
 
@@ -407,7 +450,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('claudeCodeOrchestrator.toggleTaskScope', () => {
       tasksProvider.scopeToWorkspace = !tasksProvider.scopeToWorkspace;
-      tasksView.description = tasksProvider.scopeToWorkspace ? 'this workspace' : 'all workspaces';
+      tasksView.description = tasksProvider.scopeToWorkspace
+        ? vscode.l10n.t('this workspace')
+        : vscode.l10n.t('all workspaces');
       tasksProvider.refresh();
     }),
 
@@ -416,12 +461,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeCodeOrchestrator.addDispatchPolicy', () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
-        vscode.window.showErrorMessage('Open a workspace folder first.');
+        vscode.window.showErrorMessage(vscode.l10n.t('Open a workspace folder first.'));
         return;
       }
       writeDispatchPolicy(folder);
       vscode.window.showInformationMessage(
-        'Dispatch policy written to CLAUDE.md (existing policy block updated in place).',
+        vscode.l10n.t('Dispatch policy written to CLAUDE.md (existing policy block updated in place).'),
       );
     }),
 
@@ -432,15 +477,16 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeCodeOrchestrator.manageAssets', async () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
-        vscode.window.showErrorMessage('Open a workspace folder first.');
+        vscode.window.showErrorMessage(vscode.l10n.t('Open a workspace folder first.'));
         return;
       }
       const packs = loadAssetPacks(context, true);
       const assets = packs.flatMap((p) => p.assets);
       if (assets.length === 0) {
         vscode.window.showInformationMessage(
-          'No assets found. Add skills/agents/commands to the bundled pack or point ' +
-            '"claudeCodeOrchestrator.assetPacks" at an asset directory (e.g. a private repo clone).',
+          vscode.l10n.t(
+            'No assets found. Add skills/agents/commands to the bundled pack or point "claudeCodeOrchestrator.assetPacks" at an asset directory (e.g. a private repo clone).',
+          ),
         );
         return;
       }
@@ -449,17 +495,21 @@ export function activate(context: vscode.ExtensionContext): void {
       const owners = relOwners(assets, state);
       const items = assets.map((asset) => {
         const status = assetStatus(asset, state, ws, owners);
-        const statusNote =
+        const description =
           status === 'customized'
-            ? ' · customized (sync paused)'
+            ? vscode.l10n.t('{0} · {1} · customized (sync paused)', asset.pack, asset.type)
             : status === 'update-available'
-              ? ' · update available'
+              ? vscode.l10n.t('{0} · {1} · update available', asset.pack, asset.type)
               : status === 'conflict'
-                ? ' · conflict (same install path as another enabled asset)'
-                : '';
+                ? vscode.l10n.t(
+                    '{0} · {1} · conflict (same install path as another enabled asset)',
+                    asset.pack,
+                    asset.type,
+                  )
+                : `${asset.pack} · ${asset.type}`;
         return {
           label: `$(${ASSET_TYPE_ICONS[asset.type]}) ${asset.id}`,
-          description: `${asset.pack} · ${asset.type}${statusNote}`,
+          description,
           detail: asset.description,
           picked: state.assets[asset.key]?.enabled === true,
           asset,
@@ -467,8 +517,9 @@ export function activate(context: vscode.ExtensionContext): void {
       });
       const picked = await vscode.window.showQuickPick(items, {
         canPickMany: true,
-        placeHolder:
+        placeHolder: vscode.l10n.t(
           "Assets to install into this workspace's .claude/ — unchecking removes files you haven't modified",
+        ),
       });
       if (!picked) {
         return;
@@ -478,23 +529,27 @@ export function activate(context: vscode.ExtensionContext): void {
         setAssetEnabled(ws, asset.key, chosen.has(asset.key));
       }
       const report = syncWorkspace(packs, ws);
-      vscode.window.showInformationMessage(`Workspace assets synced: ${describeSyncReport(report)}.`);
+      vscode.window.showInformationMessage(
+        vscode.l10n.t('Workspace assets synced: {0}.', describeSyncReport(report)),
+      );
     }),
 
     vscode.commands.registerCommand('claudeCodeOrchestrator.syncAssets', () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
-        vscode.window.showErrorMessage('Open a workspace folder first.');
+        vscode.window.showErrorMessage(vscode.l10n.t('Open a workspace folder first.'));
         return;
       }
       const report = syncWorkspace(loadAssetPacks(context, true), folder.uri.fsPath);
-      vscode.window.showInformationMessage(`Workspace assets synced: ${describeSyncReport(report)}.`);
+      vscode.window.showInformationMessage(
+        vscode.l10n.t('Workspace assets synced: {0}.', describeSyncReport(report)),
+      );
     }),
 
     vscode.commands.registerCommand('claudeCodeOrchestrator.resetAsset', async () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
-        vscode.window.showErrorMessage('Open a workspace folder first.');
+        vscode.window.showErrorMessage(vscode.l10n.t('Open a workspace folder first.'));
         return;
       }
       const ws = folder.uri.fsPath;
@@ -506,23 +561,31 @@ export function activate(context: vscode.ExtensionContext): void {
         (asset) => assetStatus(asset, state, ws, owners) === 'customized',
       );
       if (customized.length === 0) {
-        vscode.window.showInformationMessage('No customized assets in this workspace — nothing to reset.');
+        vscode.window.showInformationMessage(
+          vscode.l10n.t('No customized assets in this workspace — nothing to reset.'),
+        );
         return;
       }
       const picked = await vscode.window.showQuickPick(
         customized.map((asset) => ({
           label: asset.id,
           description: `${asset.pack} · ${asset.type}`,
-          detail: 'Overwrites your local edits with the pack version.',
+          detail: vscode.l10n.t('Overwrites your local edits with the pack version.'),
           asset,
         })),
-        { placeHolder: 'Customized asset to reset to its pack version (local edits are lost)' },
+        {
+          placeHolder: vscode.l10n.t(
+            'Customized asset to reset to its pack version (local edits are lost)',
+          ),
+        },
       );
       if (!picked) {
         return;
       }
       const report = syncWorkspace(packs, ws, new Set([picked.asset.key]));
-      vscode.window.showInformationMessage(`"${picked.asset.id}" reset: ${describeSyncReport(report)}.`);
+      vscode.window.showInformationMessage(
+        vscode.l10n.t('"{0}" reset: {1}.', picked.asset.id, describeSyncReport(report)),
+      );
     }),
   );
 
@@ -534,7 +597,9 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         const report = syncWorkspace(loadAssetPacks(context, false), folder.uri.fsPath);
         if (report.installed.length || report.updated.length || report.removed.length) {
-          vscode.window.showInformationMessage(`Claude assets synced: ${describeSyncReport(report)}.`);
+          vscode.window.showInformationMessage(
+            vscode.l10n.t('Claude assets synced: {0}.', describeSyncReport(report)),
+          );
         }
       } catch {
         // asset sync must never block activation
@@ -549,7 +614,7 @@ async function resolveWorker(workers: WorkerManager, item?: { id?: string }) {
   }
   const picked = await vscode.window.showQuickPick(
     workers.list().map((w) => ({ label: w.name, description: w.model })),
-    { placeHolder: 'Worker account' },
+    { placeHolder: vscode.l10n.t('Worker account') },
   );
   return picked ? workers.get(picked.label) : undefined;
 }

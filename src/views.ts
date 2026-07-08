@@ -73,11 +73,17 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       (node.preferred ? '★ ' : '') + node.name,
       vscode.TreeItemCollapsibleState.Collapsed,
     );
-    item.description =
-      node.model + (node.preferred ? ' · preferred' : '') + (coolingDown ? ' · ⏸ cooldown' : '');
-    item.tooltip =
-      `CLAUDE_CONFIG_DIR=${node.configDir}\n` +
-      'Expand for per-account usage · terminal button opens a live session · right-click for re-login / remove';
+    item.description = node.preferred
+      ? coolingDown
+        ? vscode.l10n.t('{0} · preferred · ⏸ cooldown', node.model)
+        : vscode.l10n.t('{0} · preferred', node.model)
+      : coolingDown
+        ? vscode.l10n.t('{0} · ⏸ cooldown', node.model)
+        : node.model;
+    item.tooltip = vscode.l10n.t(
+      'CLAUDE_CONFIG_DIR={0}\nExpand for per-account usage · terminal button opens a live session · right-click for re-login / remove',
+      node.configDir,
+    );
     item.iconPath = new vscode.ThemeIcon(coolingDown ? 'debug-pause' : 'server-process');
     item.contextValue = 'worker';
     item.id = node.name;
@@ -105,53 +111,86 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'Status',
+      label: vscode.l10n.t('Status'),
       description: coolingDown
-        ? `cooling down until ${new Date(stats!.cooldownUntil!).toLocaleTimeString()} (quota error)`
-        : 'available',
+        ? vscode.l10n.t(
+            'cooling down until {0} (quota error)',
+            new Date(stats!.cooldownUntil!).toLocaleTimeString(),
+          )
+        : vscode.l10n.t('available'),
       icon: coolingDown ? 'debug-pause' : 'check',
       tooltip: coolingDown
-        ? 'Skipped by automatic assignment until the cooldown ends. Dispatches naming this worker explicitly still run.'
-        : 'Eligible for automatic assignment.',
+        ? vscode.l10n.t(
+            'Skipped by automatic assignment until the cooldown ends. Dispatches naming this worker explicitly still run.',
+          )
+        : vscode.l10n.t('Eligible for automatic assignment.'),
     });
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'Session (5h)',
+      label: vscode.l10n.t('Session (5h)'),
       description:
         session.tasks === 0
-          ? 'no dispatches'
-          : `${session.tasks} tasks · ${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out`,
+          ? vscode.l10n.t('no dispatches')
+          : vscode.l10n.t(
+              '{0} tasks · {1} in / {2} out',
+              session.tasks,
+              fmtTokens(session.inputTokens),
+              fmtTokens(session.outputTokens),
+            ),
       icon: 'history',
-      tooltip: 'Dispatch usage in the last 5 hours — the window of Claude plans\' session limit.',
+      tooltip: vscode.l10n.t(
+        'Dispatch usage in the last 5 hours — the window of Claude plans\' session limit.',
+      ),
     });
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'Weekly (7d)',
+      label: vscode.l10n.t('Weekly (7d)'),
       description:
         week.tasks === 0
-          ? 'no dispatches'
-          : `${week.tasks} tasks · ${fmtTokens(week.inputTokens)} in / ${fmtTokens(week.outputTokens)} out`,
+          ? vscode.l10n.t('no dispatches')
+          : vscode.l10n.t(
+              '{0} tasks · {1} in / {2} out',
+              week.tasks,
+              fmtTokens(week.inputTokens),
+              fmtTokens(week.outputTokens),
+            ),
       icon: 'calendar',
-      tooltip: 'Dispatch usage in the last 7 days — the window of Claude plans\' weekly limit.',
+      tooltip: vscode.l10n.t(
+        'Dispatch usage in the last 7 days — the window of Claude plans\' weekly limit.',
+      ),
     });
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'All time',
-      description: stats
-        ? `${stats.tasks} tasks · ${fmtTokens(stats.inputTokens)} in / ${fmtTokens(stats.outputTokens)} out` +
-          (stats.costUsd ? ` · ~$${stats.costUsd.toFixed(2)}` : '')
-        : 'no dispatches yet',
+      label: vscode.l10n.t('All time'),
+      description: !stats
+        ? vscode.l10n.t('no dispatches yet')
+        : stats.costUsd
+          ? vscode.l10n.t(
+              '{0} tasks · {1} in / {2} out · ~${3}',
+              stats.tasks,
+              fmtTokens(stats.inputTokens),
+              fmtTokens(stats.outputTokens),
+              stats.costUsd.toFixed(2),
+            )
+          : vscode.l10n.t(
+              '{0} tasks · {1} in / {2} out',
+              stats.tasks,
+              fmtTokens(stats.inputTokens),
+              fmtTokens(stats.outputTokens),
+            ),
       icon: 'graph',
     });
     if (stats && stats.errors > 0) {
       rows.push({
         kind: 'stat',
         worker: worker.name,
-        label: 'Errors',
-        description: `${stats.errors}${stats.lastError ? ` · last: ${stats.lastError.slice(0, 60)}` : ''}`,
+        label: vscode.l10n.t('Errors'),
+        description: stats.lastError
+          ? vscode.l10n.t('{0} · last: {1}', stats.errors, stats.lastError.slice(0, 60))
+          : String(stats.errors),
         icon: 'warning',
         tooltip: stats.lastError,
       });
@@ -159,16 +198,15 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'Plan quota',
-      description: 'open terminal → type /usage',
+      label: vscode.l10n.t('Plan quota'),
+      description: vscode.l10n.t('open terminal → type /usage'),
       icon: 'link-external',
-      tooltip:
-        "The numbers above only count this extension's dispatches. The account's real plan quota " +
-        '(session %, weekly %) is only visible inside Claude Code — this opens a terminal on this ' +
-        'account; type /usage there.',
+      tooltip: vscode.l10n.t(
+        "The numbers above only count this extension's dispatches. The account's real plan quota (session %, weekly %) is only visible inside Claude Code — this opens a terminal on this account; type /usage there.",
+      ),
       command: {
         command: 'claudeCodeOrchestrator.loginWorker',
-        title: 'Check plan quota',
+        title: vscode.l10n.t('Check plan quota'),
         arguments: [{ id: worker.name }],
       },
     });
@@ -209,7 +247,7 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
     );
     item.command = {
       command: 'claudeCodeOrchestrator.showTaskOutput',
-      title: 'Show Task Output',
+      title: vscode.l10n.t('Show Task Output'),
       arguments: [event.outputFile],
     };
     return item;
