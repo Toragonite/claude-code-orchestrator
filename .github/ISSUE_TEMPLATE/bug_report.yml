@@ -1,0 +1,62 @@
+name: Bug Report
+description: Report a problem with Claude Code Orchestrator
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill out the sections below.
+
+        ⚠️ **Do not paste account tokens, credentials, or personal data.** For security vulnerabilities, do not open a public issue — see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I'm running the latest version of the extension.
+          required: true
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: This is not a security vulnerability (those go through private reporting).
+          required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I dispatch a task to worker w2, ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce it?
+      placeholder: |
+        1. Add a worker account "..."
+        2. Dispatch "..."
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: Relevant output from the Output panel, dashboard, or dev tools. Redact any credentials.
+      render: shell
+  - type: input
+    id: ext-version
+    attributes:
+      label: Extension version
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: VS Code version, OS, and Claude Code CLI version.
+      placeholder: VS Code 1.95, macOS 15, Claude Code 2.x
+    validations:
+      required: true
