@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
-import { readRegistry, writeRegistry, WorkerModel, WorkerProfile } from './registry';
+import { readRegistry, renameWorker, writeRegistry, WorkerModel, WorkerProfile } from './registry';
 
 /**
  * Resolve a bare command name to an absolute path via the user's login shell.
@@ -68,6 +68,12 @@ export class WorkerManager {
     const registry = readRegistry();
     registry.workers = registry.workers.filter((w) => w.name !== name);
     writeRegistry(registry);
+    this._onDidChange.fire();
+  }
+
+  /** Relabel a worker; its config directory and login are untouched. */
+  rename(oldName: string, newName: string): void {
+    renameWorker(oldName, newName);
     this._onDidChange.fire();
   }
 

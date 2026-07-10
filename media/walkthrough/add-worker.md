@@ -10,3 +10,7 @@ A worker account is just a separate Claude Code config directory
 
 Already have `~/.claude-*` directories from other tools? Use
 **Import Existing Claude Config Directories** instead — no re-login needed.
+
+Named it something you'd rather change later? Workers can be renamed via
+**Rename Worker Account** — label only; the config directory and login stay
+put.

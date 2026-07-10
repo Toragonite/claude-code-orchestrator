@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "Run Claude Code across multiple accounts in parallel. Your main session designs and verifies while worker accounts (Opus/Sonnet) implement via MCP dispatch tools — with quota-aware failover and per-account usage tracking. Unofficial.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -97,6 +97,12 @@
         "icon": "$(trash)"
       },
       {
+        "command": "claudeCodeOrchestrator.renameWorker",
+        "title": "Rename Worker Account",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(edit)"
+      },
+      {
         "command": "claudeCodeOrchestrator.loginWorker",
         "title": "Re-login Worker Account (opens terminal to sign in)",
         "category": "Claude Code Orchestrator",
@@ -126,6 +132,18 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "claudeCodeOrchestrator.cancelTask",
+        "title": "Cancel Dispatched Task",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.cancelAllTasks",
+        "title": "Cancel All Running Dispatches",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(stop)"
+      },
+      {
         "command": "claudeCodeOrchestrator.togglePreferred",
         "title": "Toggle Preferred Worker (same account as main — favored when idle)",
         "category": "Claude Code Orchestrator",
@@ -148,6 +166,12 @@
         "title": "Add Dispatch Policy to CLAUDE.md",
         "category": "Claude Code Orchestrator",
         "icon": "$(book)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.refreshUsage",
+        "title": "Refresh Account Usage",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(sync)"
       }
     ],
     "menus": {
@@ -168,6 +192,16 @@
           "group": "navigation@3"
         },
         {
+          "command": "claudeCodeOrchestrator.refreshUsage",
+          "when": "view == claudeCodeOrchestrator.workers",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claudeCodeOrchestrator.cancelAllTasks",
+          "when": "view == claudeCodeOrchestrator.tasks",
+          "group": "navigation@0"
+        },
+        {
           "command": "claudeCodeOrchestrator.toggleTaskScope",
           "when": "view == claudeCodeOrchestrator.tasks",
           "group": "navigation@1"
@@ -185,6 +219,11 @@
       ],
       "view/item/context": [
         {
+          "command": "claudeCodeOrchestrator.cancelTask",
+          "when": "view == claudeCodeOrchestrator.tasks && viewItem == runningTask",
+          "group": "inline"
+        },
+        {
           "command": "claudeCodeOrchestrator.openWorkerSession",
           "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "inline"
@@ -195,14 +234,19 @@
           "group": "1_manage@0"
         },
         {
-          "command": "claudeCodeOrchestrator.loginWorker",
+          "command": "claudeCodeOrchestrator.renameWorker",
           "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "1_manage@1"
         },
         {
-          "command": "claudeCodeOrchestrator.removeWorker",
+          "command": "claudeCodeOrchestrator.loginWorker",
           "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "1_manage@2"
+        },
+        {
+          "command": "claudeCodeOrchestrator.removeWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
+          "group": "1_manage@3"
         }
       ]
     },

@@ -13,5 +13,8 @@ Tips:
 
 - Add dispatch policy to your `CLAUDE.md` (when to dispatch, which model for
   what) so the main session behaves consistently.
-- Use **Open Interactive Worker Session** to run a worker visibly in a
+- Use **Open Worker Session in Terminal** to run a worker visibly in a
   terminal when you want to watch and steer it.
+- Run **Refresh Account Usage** to re-fetch each account's live plan quota
+  shown in the Worker Accounts view (it also auto-refreshes on activation and
+  every 5 minutes).

@@ -6,7 +6,7 @@
 
 > 非官方扩展 — 与 Anthropic 无关，也未获其认可。曾用名：*Fable Orchestrator*。
 
-把你现有的 **Claude Code** 面板变成多账号编排器。像平常一样与主会话对话；它负责设计与验证，并通过 MCP 调度工具把实现工作**并行**分发给工作账号（Opus / Sonnet — 以及计费防护之后的 Fable）。内置按账号的用量统计、配额感知的自动故障转移，以及实时仪表盘。
+把你现有的 **Claude Code** 面板变成多账号编排器。像平常一样与主会话对话；它负责设计与验证，并通过 MCP 调度工具把实现工作**并行**分发给工作账号（Opus / Sonnet — 以及计费防护之后的 Fable）。内置按账号的用量统计（含每个账号实时的真实计划用量与重置时间）、配额感知的自动故障转移，以及实时仪表盘。
 
 ```
 Claude Code 面板（主账号 — 编排器）                ← 照常使用
@@ -24,15 +24,19 @@ worker w1       worker w2      worker w3
 
 ## 截图
 
-*编排器会话制定计划、通过 `orchestrator_briefing` 报到，并把实现工作分发给各 worker：*
+*会话启动：编排器通过 `orchestrator_briefing` 报到，随后从 `list_workers` 读取每个账号的实时计划用量，避开接近额度上限的账号：*
 
-![在 Claude Code 面板中调度的编排器会话](media/screenshots/panel.png)
+![编排器会话：briefing 与来自 list_workers 的实时计划用量](media/screenshots/panel-1.png)
 
-*带分窗口用量的 worker 账号，以及实时任务流：*
+*并行扇出：编排器先冻结接口约定，再将各个独立子任务一次性批量分发给状态健康的 worker 账号：*
+
+![通过 dispatch_tasks 向 worker 账号并行扇出](media/screenshots/panel-2.png)
+
+*worker 账号显示每个账号的实时计划配额（Session 5 小时 / Weekly 7 天 / Weekly Fable，各带重置时间），与本扩展自身的调度计数分开呈现，以及实时任务流：*
 
 ![Worker Accounts 与 Dispatched Tasks 视图](media/screenshots/sidebar.png)
 
-*仪表盘：统计卡片、活动图表、各 worker 用量，以及包含 frontier 计费防护的设置面板：*
+*仪表盘：统计卡片、活动图表、实时用量面板（按账号显示进度条与重置倒计时）、各 worker 用量，以及包含 frontier 计费防护的设置面板：*
 
 ![编排器仪表盘](media/screenshots/dashboard.png)
 
@@ -62,7 +66,7 @@ worker w1       worker w2      worker w3
 | `dispatch_tasks` | **批量调度（推荐）。** 一次调用交付 N 个独立任务；服务器在各 worker 账号间真正并行执行，并汇总返回结果。 |
 | `dispatch_task` | 把一个自包含任务派给一个 worker（在同一工作区运行的无头 Claude Code 会话，具备文件与 shell 访问能力）。 |
 | `orchestrator_briefing` | 按 CLAUDE.md 策略，主模型每会话调用一次并传入自己的模型 ID。按工作区记录编排器模型，并返回与其层级匹配的运行简报 — 见下文*模型校准*。 |
-| `list_workers` | 各 worker 的默认模型、累计用量（任务、token、费用）、可用性/冷却状态，以及 frontier 调度防护的状态。 |
+| `list_workers` | 各 worker 的默认模型、累计用量（任务、token、费用）、实时计划用量（Session/Weekly/Weekly Fable %，含重置时间）、各账号的超额计费（overage billing）状态（关闭，或开启并显示相对月度上限的当前花费）、可用性/冷却状态，以及 frontier 调度防护的状态。 |
 
 值得了解的调度参数：
 
@@ -88,6 +92,12 @@ worker w1       worker w2      worker w3
 - **★ 首选 worker** — 把与主会话同账号的 worker 标记为首选（右键 → *Toggle Preferred*）。只要它不比最空闲的替代者更忙，就在自动分配中胜出：受偏好，但不会被淹没。
 - 后台 worker 无法回答权限询问，因此默认以 `--permission-mode acceptEdits` 运行（可配置；需要执行 shell 命令的任务要用 `bypassPermissions` — 请先理解其安全影响）。
 
+## 超额计费（overage billing）可见性
+
+Anthropic 的限流窗口（Session 5 小时、Weekly 7 天、Weekly Fable）在触达上限后如何表现，取决于该账号是否开启了**超额计费（overage billing）**。**关闭**时，触达窗口上限只会阻塞后续工作，直到该窗口重置——上文的冷却与自动故障转移会照常处理，且不会产生超出订阅计划本身的费用。**开启**时，超出窗口上限的工作会转为按该账号的月度上限计费，也就是说超出窗口的调度会开始产生实际花费。
+
+扩展现在会读取并按账号展示这一状态：`list_workers` 会在每个账号的用量行末尾追加 `overage: off` 或 `overage: ON ⚠ ($0.00 / $50.00)`（只要有账号开启了超额计费，还会追加一行提示）；Worker Accounts 树会新增一行 `Plan · Extra usage`（`off · plan limits block instead of billing`，或带警告图标的 `ON · $0.00 / $50.00`），并在折叠的 worker 行上标注 `⚠overage`；仪表盘的 Live plan usage 卡片会新增一行 `Extra usage: off`，或警告色的 `⚠ Extra usage: ON — $0.00 / $50.00`。这仅是信息展示——即便超额计费已开启，本功能也不会限制或阻止调度，是否调度仍由你自行判断。（下文针对 `claude-fable-5` 的 frontier 计费防护是另一套机制，未受影响。）
+
 ## Frontier 计费防护
 
 取决于订阅计划，`claude-fable-5` 可能**按用量计费**而不是消耗订阅配额。由于调度是自主发生的（策略规定的设计咨询可能在你不注意时发出），防护**在调度服务器强制执行，而非仅靠提示词**：
@@ -98,10 +108,12 @@ worker w1       worker w2      worker w3
 
 ## 视图与仪表盘
 
-- **Worker Accounts** — 展开一个 worker 可见状态（可用/冷却中）、会话（5h）与每周（7d）的调度用量、历史累计和错误数。点击 *Plan quota* 行会打开该账号的终端，用 `/usage` 查看订阅计划的真实配额。树中的数字只反映本扩展发出的调度，并非该账号的全部消耗。
-- **Dispatched Tasks** — 实时任务流，默认只显示当前工作区（可切换为全部工作区）。点击任务可打开其提示词/结果的 markdown。
-- **编排器仪表盘**（编辑器标签页）— 统计卡片（运行中、7 天任务、成功率、token、费用）、14 天任务图表、各 worker 的 token 分布、worker/任务表格，以及带快捷操作的设置面板。每 2 秒自动刷新，自动适配主题。
+- **Worker Accounts** — 展开一个 worker 可见状态（可用/冷却中）、实时计划用量（Session 5h、Weekly 7d 与 Weekly Fable 使用率，各带重置时间，通过 Claude Code 的 `get_usage` 获取）、本扩展自身的会话（5h）与每周（7d）调度用量、历史累计和错误数。计划用量不仅覆盖各 worker，也覆盖主账号，并在激活时与每 5 分钟自动刷新一次（也可通过 **Refresh Account Usage** 立即刷新）。调度用量数字是单独的一项，只反映本扩展发出的任务，并非该账号的全部消耗。通过 `claude setup-token` 等非订阅凭证登录的账号没有关联的计划，会显示 “no plan limits”。**Rename Worker Account**（上下文菜单）只修改 worker 的标签 —— 配置目录与登录状态不受影响 —— 且在任何调度运行期间会被拒绝。如果上游用量数据源短暂返回空值，扩展会保留上一次的有效读数并标记为 stale（过期，附带经过的时长），最长保留 30 分钟，而不是直接消失。
+- **Dispatched Tasks** — 实时任务流，默认只显示当前工作区（可切换为全部工作区）。点击任务可打开其提示词/结果的 markdown。运行中的行带有内联的 **Cancel Dispatched Task** 按钮；视图标题栏上的 **Cancel All Running Dispatches** 按钮会先询问确认。
+- **编排器仪表盘**（编辑器标签页）— 统计卡片（运行中、7 天任务、成功率、token、费用）、实时用量面板（每个计划窗口一条进度条，含百分比、严重程度颜色、重置倒计时，以及”N 分钟前更新”的新鲜度提示）、14 天任务图表、各 worker 的 token 分布、worker/任务表格，以及带快捷操作的设置面板。每 2 秒自动刷新，自动适配主题。运行中的行带有 Cancel 按钮，取消所有运行中的调度也作为一项快捷操作提供。
 - **Open Interactive Worker Session** — 在集成终端中以可见方式运行 worker（可注入初始任务），适合需要盯着并随时介入的工作。
+
+停止调度确实会真正停止：在运行中的工具调用上按下 Stop，会取消对应的 MCP 请求并终止其 worker 进程（通过 `dispatch_tasks` 发出的批量调度运行在同一个请求之下，因此取消该请求会取消批次中的所有任务）。结束编排器会话 — 关闭面板、重新加载窗口、退出 VS Code，或强制结束进程 — 现在会终止它启动的所有 worker，而不再是任其挂起直到 30 分钟的配额冷却超时才结束，之前那种孤儿进程会持续消耗账号的计划配额。扩展激活时，会把仍标记为运行中、但其 worker 进程已经消失的任务回收为孤儿任务，并报告数量。在终止任何进程之前，扩展会先核实记录的进程 ID 是否仍然属于自己的某个 worker，因此不会误杀一个被操作系统回收并复用给无关程序的进程 ID。取消操作不计入 worker 错误，也不会触发配额冷却。取消调度和结束会话都会终止 worker 的整个进程树，而不仅仅是 worker 进程本身，因此 worker 自己启动的东西——如果它进一步委派任务，甚至包括它自己的调度服务器——也会一并清理。
 
 ## 命令
 
@@ -114,8 +126,12 @@ worker w1       worker w2      worker w3
 | Open Worker Session in Terminal | 交互式 worker 会话（条目上的内联按钮） |
 | Re-login Worker Account | 重新登录 worker（上下文菜单） |
 | Toggle Preferred Worker | 自动分配时偏好此 worker（上下文菜单） |
+| Rename Worker Account | 在注册表、用量统计与任务日志中重命名 worker；配置目录与登录状态不受影响（上下文菜单） |
+| Refresh Account Usage | 重新获取所有账号的实时计划用量（Worker Accounts 视图的工具栏按钮） |
 | Open Orchestrator Dashboard | 编辑器标签页仪表盘 |
 | Toggle Task Scope | 任务视图：当前工作区 ↔ 全部 |
+| Cancel Dispatched Task | 终止某个运行中调度的 worker 进程（Dispatched Tasks 视图与仪表盘中行上的内联按钮） |
+| Cancel All Running Dispatches | 确认后终止所有运行中的调度（Dispatched Tasks 视图标题栏按钮；仪表盘中的快捷操作） |
 | Remove Worker Account / Clear Task History | 清理 |
 
 ## 设置

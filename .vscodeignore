@@ -10,3 +10,8 @@ tsconfig.json
 .gitignore
 *.vsix
 package-lock.json
+.orchestrator/**
+.claude/**
+.github/**
+CLAUDE.md
+.mcp.json

@@ -6,7 +6,7 @@
 
 > Unofficial extension — not affiliated with or endorsed by Anthropic. Formerly named *Fable Orchestrator*.
 
-Turn your existing **Claude Code** panel into a multi-account orchestrator. You chat with your main session as usual; it designs and verifies, and fans implementation work out **in parallel** to worker Claude accounts (Opus / Sonnet — or Fable, behind a billing guard) through MCP dispatch tools. Per-account usage tracking, quota-aware failover, and a live dashboard included.
+Turn your existing **Claude Code** panel into a multi-account orchestrator. You chat with your main session as usual; it designs and verifies, and fans implementation work out **in parallel** to worker Claude accounts (Opus / Sonnet — or Fable, behind a billing guard) through MCP dispatch tools. Per-account usage tracking (including each account's real, live plan usage and resets), quota-aware failover, and a live dashboard included.
 
 ```
 Claude Code panel (main account — the orchestrator)     ← use it as usual
@@ -24,15 +24,19 @@ The core idea: **an account is just a Claude Code config directory.** Each worke
 
 ## Screenshots
 
-*The orchestrator session plans, checks in via `orchestrator_briefing`, and fans implementation out to workers:*
+*Session start: the orchestrator checks in via `orchestrator_briefing`, then reads each account's live plan usage from `list_workers` and routes around accounts near a limit:*
 
-![Orchestrator session dispatching from the Claude Code panel](media/screenshots/panel.png)
+![Orchestrator session: briefing and live plan usage from list_workers](media/screenshots/panel-1.png)
 
-*Worker accounts with per-window usage, and the live task feed:*
+*The parallel fan-out: the orchestrator freezes the interface contract, then dispatches the independent subtasks in one batch across the healthy worker accounts:*
+
+![Parallel fan-out to worker accounts via dispatch_tasks](media/screenshots/panel-2.png)
+
+*Worker accounts showing each account's live plan quota (Session 5hr / Weekly 7 day / Weekly Fable, each with a reset time) separated from this extension's own dispatch counters, plus the live task feed:*
 
 ![Worker Accounts and Dispatched Tasks views](media/screenshots/sidebar.png)
 
-*The dashboard: stat tiles, activity charts, per-worker usage, and settings — including the frontier billing guard:*
+*The dashboard: stat tiles, activity charts, the live plan usage panel (per-account bars with reset countdowns), per-worker usage, and settings — including the frontier billing guard:*
 
 ![Orchestrator Dashboard](media/screenshots/dashboard.png)
 
@@ -62,7 +66,7 @@ The core idea: **an account is just a Claude Code config directory.** Each worke
 | `dispatch_tasks` | **Batch dispatch (preferred).** Hand over N independent tasks in one call; the server runs them truly in parallel across worker accounts and returns collected results. |
 | `dispatch_task` | Dispatch a single self-contained task to one worker (a full headless Claude Code session in the same workspace, with file and shell access). |
 | `orchestrator_briefing` | Called once per session by the main model (per the CLAUDE.md policy) with its own model ID. Records the orchestrator model per workspace and returns a tier-appropriate operating brief — see *Model calibration* below. |
-| `list_workers` | Per-worker default model, cumulative usage (tasks, tokens, cost), availability/cooldowns, and the frontier-dispatch guard state. |
+| `list_workers` | Per-worker default model, cumulative usage (tasks, tokens, cost), live plan usage (Session/Weekly/Weekly Fable %, with resets), each account's overage-billing state (off, or on with current spend against its monthly cap), availability/cooldowns, and the frontier-dispatch guard state. |
 
 Dispatch parameters worth knowing:
 
@@ -88,6 +92,12 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 - **★ Preferred worker** — mark the worker that shares your main account (right-click → *Toggle Preferred*). It wins automatic assignment whenever it isn't busier than the least-busy alternative: favored, never flooded.
 - Background workers can't answer permission prompts, so they run with `--permission-mode acceptEdits` by default (configurable; tasks that must run shell commands need `bypassPermissions` — understand the security implications before enabling it).
 
+## Overage billing visibility
+
+Anthropic's rate-limit windows (5-hour session, 7-day weekly, weekly Fable) behave differently once you hit them depending on whether **overage billing** is enabled on that account. With it **off**, hitting a window simply blocks further work until it resets — the cooldown-and-failover above handles it, and nothing is billed beyond the plan. With it **on**, work past a window's limit is instead billed against that account's monthly cap, so a dispatch that overruns a window starts spending real money.
+
+The extension now reads and surfaces this state per account: `list_workers` appends `overage: off` or `overage: ON ⚠ ($0.00 / $50.00)` to each account's usage line (with a footer when any account has it enabled), the Worker Accounts tree gets a `Plan · Extra usage` row (`off · plan limits block instead of billing`, or a warning-icon `ON · $0.00 / $50.00`) plus a `⚠overage` marker on the collapsed worker row, and the dashboard's Live plan usage cards gain an `Extra usage: off` line or a warning-colored `⚠ Extra usage: ON — $0.00 / $50.00`. This is informational only — it does not throttle or block dispatches when overage is enabled; that judgement remains yours. (The separate frontier billing guard for `claude-fable-5` dispatches, below, is unchanged.)
+
 ## Frontier billing guard
 
 `claude-fable-5` may bill **per use** instead of drawing from a subscription quota, depending on the plan. Because dispatches are autonomous (a policy-driven design consult can fire while you're not watching), the guard is enforced **in the dispatch server, not just in prompts**:
@@ -98,10 +108,12 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 
 ## Views and dashboard
 
-- **Worker Accounts** — expand a worker for status (available/cooling down), session (5h) and weekly (7d) dispatch usage, all-time totals, and errors. The *Plan quota* row opens that account's terminal where `/usage` shows the plan's real quota. Numbers in the tree reflect dispatches sent by this extension; they are not the account's total consumption.
-- **Dispatched Tasks** — live task feed, scoped to the current workspace by default (toggleable to all workspaces). Click a task to open its prompt/result markdown.
-- **Orchestrator Dashboard** (editor tab) — stat tiles (running, 7-day tasks, success rate, tokens, cost), a 14-day task chart, per-worker token distribution, workers/tasks tables, and a settings panel with quick actions. Auto-refreshes every 2 s, theme-aware.
+- **Worker Accounts** — expand a worker for status (available/cooling down), live plan usage (Session 5h, Weekly 7d, and Weekly Fable utilization, each with a reset time, fetched via Claude Code's `get_usage`), this extension's own session (5h) and weekly (7d) dispatch usage, all-time totals, and errors. Plan usage covers the main account too, not just workers, and auto-refreshes on activation and every 5 minutes (or on demand via **Refresh Account Usage**). The dispatch-usage numbers are separate and only reflect tasks sent by this extension, not the account's overall consumption. Accounts logged in via `claude setup-token` or another non-subscription credential have no plan attached and show "no plan limits". **Rename Worker Account** (context menu) relabels the worker only — the config directory and login are untouched — and is refused while any dispatch is running. If the upstream usage source briefly returns nothing, the last reading is kept and marked stale (with its age) for up to 30 minutes rather than disappearing.
+- **Dispatched Tasks** — live task feed, scoped to the current workspace by default (toggleable to all workspaces). Click a task to open its prompt/result markdown. A running row gets an inline **Cancel Dispatched Task** button; **Cancel All Running Dispatches** is a view-title button that asks for confirmation first.
+- **Orchestrator Dashboard** (editor tab) — stat tiles (running, 7-day tasks, success rate, tokens, cost), a live usage panel (a bar per plan window with %, severity color, reset countdown, and "updated N min ago" freshness), a 14-day task chart, per-worker token distribution, workers/tasks tables, and a settings panel with quick actions. Auto-refreshes every 2 s, theme-aware. Running rows get a Cancel button, and canceling all running dispatches is available as a quick action.
 - **Open Interactive Worker Session** — run a worker visibly in an integrated terminal (optionally with an initial task) when you want to watch and steer.
+
+Stopping a dispatch actually stops it: pressing Stop on a running tool call cancels that MCP request and terminates its worker processes (a batch dispatched via `dispatch_tasks` runs as one request, so cancelling it cancels every task in the batch). Ending the orchestrator session — closing the panel, reloading the window, quitting VS Code, or killing the process — now terminates every worker it spawned instead of leaving them running until the 30-minute quota-cooldown timeout. On activation, any task still marked running whose worker process is gone is reclaimed as orphaned and the count is reported. Before terminating anything, the extension confirms the recorded process ID still belongs to one of its own workers, so a process ID recycled by the OS is never signalled; a cancellation is never counted as a worker error and never triggers a quota cooldown. Both cancellation and session-end terminate the worker's entire process tree, not just the worker process itself, so anything the worker spawned on its own — including its own dispatch server, if it delegated further — is cleaned up too.
 
 ## Commands
 
@@ -114,8 +126,12 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 | Open Worker Session in Terminal | Interactive worker session (inline button on the item) |
 | Re-login Worker Account | Re-authenticate a worker (context menu) |
 | Toggle Preferred Worker | Favor this worker in automatic assignment (context menu) |
+| Rename Worker Account | Relabel a worker across the registry, usage stats, and task log; config directory and login untouched (context menu) |
+| Refresh Account Usage | Re-fetch live plan usage for all accounts (toolbar button, Worker Accounts view) |
 | Open Orchestrator Dashboard | Editor-tab dashboard |
 | Toggle Task Scope | Tasks view: current workspace ↔ all |
+| Cancel Dispatched Task | Terminate a running dispatch's worker processes (inline button on the row, Dispatched Tasks view and dashboard) |
+| Cancel All Running Dispatches | Terminate every running dispatch, after confirmation (view-title button, Dispatched Tasks view; quick action in dashboard) |
 | Remove Worker Account / Clear Task History | Cleanup |
 
 ## Settings

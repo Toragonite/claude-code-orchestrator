@@ -7,8 +7,11 @@ After registering:
 
 1. Restart the Claude Code session in this workspace.
 2. Approve the project MCP server when Claude Code asks.
-3. Your main session now has three tools: `dispatch_tasks` (parallel batch),
-   `dispatch_task`, and `list_workers`.
+3. Your main session now has four tools: `dispatch_tasks` (parallel batch),
+   `dispatch_task`, `orchestrator_briefing`, and `list_workers`.
+   `orchestrator_briefing` is called once per session, before the first
+   dispatch; `list_workers` reports each account's live plan usage so the
+   session can pick healthy accounts.
 
 You'll also be offered a dispatch policy for `CLAUDE.md` — it tells the main
 session to delegate all implementation to workers and only design, integrate,

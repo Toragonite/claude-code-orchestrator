@@ -4,9 +4,20 @@ import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { WorkerManager } from './workerManager';
 import { TasksProvider, WorkersProvider } from './views';
-import { clearTaskLog, LEGACY_ROOT_DIR, readRegistry, ROOT_DIR, WORKER_MODELS, WorkerModel } from './registry';
+import {
+  cancelRunningTask,
+  clearTaskLog,
+  LEGACY_ROOT_DIR,
+  reapDeadTasks,
+  readRegistry,
+  ROOT_DIR,
+  runningTasks,
+  WORKER_MODELS,
+  WorkerModel,
+} from './registry';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
+import { refreshAllUsage } from './usage';
 
 const MCP_SERVER_NAME = 'cco-dispatch';
 /** Pre-rename server key — removed from .mcp.json when re-registering. */
@@ -198,8 +209,31 @@ export function activate(context: vscode.ExtensionContext): void {
   const serverPath = ensureStableServerCopy(context);
   void maybeOfferMcpRegistration(context, serverPath);
 
+  // Live-usage cache: never block activation on a probe. Fire an initial
+  // refresh, keep the cache warm on a timer, and let users refresh on demand.
+  // The tree/dashboard/MCP surfaces watch the cache file this writes.
+  void refreshAllUsage().catch(() => {});
+  const usageTimer = setInterval(() => {
+    void refreshAllUsage().catch(() => {});
+  }, 5 * 60 * 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(usageTimer) });
+
   const workersProvider = new WorkersProvider(workers);
   const tasksProvider = new TasksProvider();
+
+  // A crashed or killed orchestrator session leaves its dispatches stuck at
+  // 'running'. Reclaim them on startup — best-effort, never blocks activation.
+  try {
+    const reaped = reapDeadTasks();
+    if (reaped > 0) {
+      tasksProvider.refresh();
+      vscode.window.showInformationMessage(
+        `Reclaimed ${reaped} dispatched task(s) left running by a previous session.`,
+      );
+    }
+  } catch {
+    // stale task rows are cosmetic; activation must still succeed
+  }
 
   const tasksView = vscode.window.createTreeView('claudeCodeOrchestrator.tasks', {
     treeDataProvider: tasksProvider,
@@ -319,6 +353,38 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
 
+    vscode.commands.registerCommand('claudeCodeOrchestrator.renameWorker', async (item?: { id?: string }) => {
+      const worker = await resolveWorker(workers, item);
+      if (!worker) {
+        return;
+      }
+      const taken = new Set(
+        workers.list().map((w) => w.name).filter((n) => n !== worker.name),
+      );
+      const newName = await vscode.window.showInputBox({
+        value: worker.name,
+        prompt: 'New name for this worker — the config directory and login are unchanged',
+        validateInput: (v) => {
+          const trimmed = v.trim();
+          if (!/^[\w-]+$/.test(trimmed)) {
+            return 'Use letters, digits, - or _';
+          }
+          return taken.has(trimmed) ? `A worker named "${trimmed}" already exists.` : undefined;
+        },
+      });
+      if (!newName || newName.trim() === worker.name) {
+        return;
+      }
+      try {
+        workers.rename(worker.name, newName.trim());
+        vscode.window.showInformationMessage(
+          `Worker "${worker.name}" renamed to "${newName.trim()}". Its config directory and login are unchanged.`,
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      }
+    }),
+
     vscode.commands.registerCommand('claudeCodeOrchestrator.loginWorker', async (item?: { id?: string }) => {
       const worker = await resolveWorker(workers, item);
       if (worker) {
@@ -370,6 +436,68 @@ export function activate(context: vscode.ExtensionContext): void {
       tasksProvider.refresh();
     }),
 
+    // Invoked with a TaskEvent from the tree context menu, { id } from the
+    // dashboard webview, or no argument at all from the command palette.
+    vscode.commands.registerCommand('claudeCodeOrchestrator.cancelTask', async (arg?: { id?: string }) => {
+      let id = arg?.id;
+      if (!id) {
+        const running = runningTasks();
+        if (running.length === 0) {
+          vscode.window.showInformationMessage('No running dispatches.');
+          return;
+        }
+        const picked = await vscode.window.showQuickPick(
+          running.map((t) => ({ label: t.title, description: t.worker, id: t.id })),
+          { placeHolder: 'Running dispatch to cancel — its worker will be terminated' },
+        );
+        id = picked?.id;
+      }
+      if (!id) {
+        return;
+      }
+      try {
+        const cancelled = await cancelRunningTask(id, 'cancelled by user');
+        tasksProvider.refresh();
+        vscode.window.showInformationMessage(
+          cancelled
+            ? 'Dispatched task cancelled.'
+            : 'That dispatch was no longer running — its row has been cleared.',
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Failed to cancel dispatch: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }),
+
+    vscode.commands.registerCommand('claudeCodeOrchestrator.cancelAllTasks', async () => {
+      const running = runningTasks();
+      if (running.length === 0) {
+        vscode.window.showInformationMessage('No running dispatches.');
+        return;
+      }
+      const confirm = await vscode.window.showWarningMessage(
+        `Cancel ${running.length} running dispatch(es)? Their workers will be terminated.`,
+        { modal: true },
+        'Cancel Dispatches',
+      );
+      if (confirm !== 'Cancel Dispatches') {
+        return;
+      }
+      // allSettled: one worker refusing to die must not strand the others.
+      const results = await Promise.allSettled(
+        running.map((t) => cancelRunningTask(t.id, 'cancelled by user')),
+      );
+      tasksProvider.refresh();
+      const cancelled = results.filter((r) => r.status === 'fulfilled' && r.value).length;
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      vscode.window.showInformationMessage(
+        failed > 0
+          ? `Cancelled ${cancelled} of ${running.length} dispatch(es); ${failed} failed.`
+          : `Cancelled ${cancelled} of ${running.length} dispatch(es).`,
+      );
+    }),
+
     vscode.commands.registerCommand('claudeCodeOrchestrator.toggleTaskScope', () => {
       tasksProvider.scopeToWorkspace = !tasksProvider.scopeToWorkspace;
       tasksView.description = tasksProvider.scopeToWorkspace ? 'this workspace' : 'all workspaces';
@@ -377,6 +505,17 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('claudeCodeOrchestrator.openDashboard', () => openDashboard()),
+
+    vscode.commands.registerCommand('claudeCodeOrchestrator.refreshUsage', async () => {
+      try {
+        await refreshAllUsage();
+        vscode.window.showInformationMessage('Account usage refreshed.');
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Failed to refresh account usage: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }),
 
     vscode.commands.registerCommand('claudeCodeOrchestrator.addDispatchPolicy', () => {
       const folder = vscode.workspace.workspaceFolders?.[0];

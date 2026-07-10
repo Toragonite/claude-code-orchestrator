@@ -10,6 +10,14 @@ import {
   windowUsage,
   WorkerProfile,
 } from './registry';
+import {
+  AccountUsage,
+  formatAge,
+  formatRelativeReset,
+  getCachedUsage,
+  isElevated,
+  USAGE_CACHE_FILE,
+} from './usage';
 
 interface WorkerStatRow {
   kind: 'stat';
@@ -31,6 +39,149 @@ function fmtTokens(n: number): string {
   return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
 }
 
+/** Compact per-window labels for the collapsed row's inline usage summary. */
+const USAGE_SHORT_LABEL: Record<string, string> = {
+  session: '5h',
+  weekly_all: '7d',
+  weekly_scoped: 'Fable',
+};
+
+function pct(n: number): string {
+  return `${Math.round(n)}%`;
+}
+
+const NO_LIMITS_MESSAGE = 'no plan limits (token/non-subscription login)';
+const NO_WINDOWS_MESSAGE = 'no rate-limit windows reported';
+
+/** A window normalized from the cache file — every field guaranteed present and well-typed. */
+interface SafeWindow {
+  kind: string;
+  label: string;
+  percent: number;
+  severity: string;
+  resetsAt: string | null;
+}
+
+function str(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+/**
+ * The usage cache is external input: a truncated or hand-edited entry may omit
+ * `windows` entirely, or hold nulls / non-objects in it. Render paths must never
+ * throw — the tree item would fail to render. Mirrors src/mcp/server.ts.
+ */
+function safeWindows(usage: AccountUsage): SafeWindow[] {
+  const raw: unknown = usage.windows;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const windows: SafeWindow[] = [];
+  for (const entry of raw as unknown[]) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const w = entry as Record<string, unknown>;
+    const percent = w.percent;
+    windows.push({
+      kind: str(w.kind, ''),
+      label: str(w.label, ''),
+      percent: typeof percent === 'number' && Number.isFinite(percent) ? percent : 0,
+      severity: str(w.severity, 'normal'),
+      resetsAt: typeof w.resetsAt === 'string' ? w.resetsAt : null,
+    });
+  }
+  return windows;
+}
+
+/** A normalized overage-billing reading, every field guaranteed well-typed. */
+interface SafeExtra {
+  enabled: boolean;
+  percent: number | null;
+  spendLabel: string | null;
+}
+
+/**
+ * Like `safeWindows`: `extraUsage` is external input. Returns null when the
+ * account reports no overage state OR the cached entry is malformed (a non-object
+ * `extraUsage`) — callers push no overage row in that case. Nulls in individual
+ * fields render as "not reported", never throw.
+ */
+function safeExtraUsage(usage: AccountUsage): SafeExtra | null {
+  const raw: unknown = usage.extraUsage;
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const e = raw as Record<string, unknown>;
+  const percent = e.percent;
+  return {
+    enabled: e.enabled === true,
+    percent: typeof percent === 'number' && Number.isFinite(percent) ? percent : null,
+    spendLabel: typeof e.spendLabel === 'string' ? e.spendLabel : null,
+  };
+}
+
+/**
+ * One-line live-usage tail for a worker's collapsed `description`, e.g.
+ * `· 5h 12% · 7d 72% · ⚠Fable 100%`. Handles all five render states.
+ */
+function usageSummary(usage: AccountUsage | undefined): string {
+  if (!usage) {
+    return 'usage: — (refreshing)';
+  }
+  if (usage.error !== undefined) {
+    return 'usage unavailable';
+  }
+  if (usage.available !== true) {
+    return NO_LIMITS_MESSAGE;
+  }
+  const windows = safeWindows(usage);
+  if (windows.length === 0) {
+    return NO_WINDOWS_MESSAGE;
+  }
+  return windows
+    .map((w) => {
+      const short = USAGE_SHORT_LABEL[w.kind] ?? w.label;
+      return `${isElevated(w.severity) ? '⚠' : ''}${short} ${pct(w.percent)}`;
+    })
+    .join(' · ');
+}
+
+/**
+ * Append a rich live-usage block to a worker's Markdown tooltip. Handles all five
+ * render states. Account-derived strings go through `appendText`, which escapes
+ * markdown metacharacters — a crafted plan name or stderr must not break formatting.
+ */
+function appendUsageTooltip(md: vscode.MarkdownString, usage: AccountUsage | undefined): void {
+  md.appendMarkdown('\n\n');
+  if (!usage) {
+    md.appendMarkdown('Plan quota — usage: — (refreshing)');
+    return;
+  }
+  if (usage.error !== undefined) {
+    md.appendMarkdown('Plan quota — usage unavailable\n\n');
+    md.appendText(str(usage.error, ''));
+    return;
+  }
+  if (usage.available !== true) {
+    md.appendMarkdown(`Plan quota — ${NO_LIMITS_MESSAGE}`);
+    return;
+  }
+  const windows = safeWindows(usage);
+  if (windows.length === 0) {
+    md.appendMarkdown(`Plan quota — ${NO_WINDOWS_MESSAGE}`);
+    return;
+  }
+  md.appendMarkdown('**Plan quota — ');
+  md.appendText(str(usage.subscriptionType, 'subscription'));
+  md.appendMarkdown('**');
+  for (const w of windows) {
+    const elevated = isElevated(w.severity) ? ` ⚠${w.severity}` : '';
+    md.appendMarkdown('\n\n');
+    md.appendText(`${w.label}: ${pct(w.percent)}${elevated} — resets ${formatRelativeReset(w.resetsAt)}`);
+  }
+}
+
 /**
  * Two-level tree: worker accounts expand into per-account usage rows —
  * availability, dispatch usage in Claude's quota windows (5h session / 7d),
@@ -40,16 +191,26 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
+  // `fs.unwatchFile(file)` without a listener removes *every* listener on that path,
+  // including other providers' (TasksProvider watches TASKS_LOG_FILE, the dashboard
+  // watches USAGE_CACHE_FILE). Keep each listener so dispose() can remove only ours.
+  private readonly onStatsChange = (): void => this._onDidChangeTreeData.fire();
+  private readonly onTasksChange = (): void => this._onDidChangeTreeData.fire();
+  private readonly onUsageChange = (): void => this._onDidChangeTreeData.fire();
+
   constructor(private readonly workers: WorkerManager) {
     workers.onDidChange(() => this._onDidChangeTreeData.fire());
     // Usage/cooldown is written by the MCP server process — watch for changes.
-    fs.watchFile(STATS_FILE, { interval: 2000 }, () => this._onDidChangeTreeData.fire());
-    fs.watchFile(TASKS_LOG_FILE, { interval: 2000 }, () => this._onDidChangeTreeData.fire());
+    fs.watchFile(STATS_FILE, { interval: 2000 }, this.onStatsChange);
+    fs.watchFile(TASKS_LOG_FILE, { interval: 2000 }, this.onTasksChange);
+    // Live plan usage is written by a background refresher — watch its cache too.
+    fs.watchFile(USAGE_CACHE_FILE, { interval: 2000 }, this.onUsageChange);
   }
 
   dispose(): void {
-    fs.unwatchFile(STATS_FILE);
-    fs.unwatchFile(TASKS_LOG_FILE);
+    fs.unwatchFile(STATS_FILE, this.onStatsChange);
+    fs.unwatchFile(TASKS_LOG_FILE, this.onTasksChange);
+    fs.unwatchFile(USAGE_CACHE_FILE, this.onUsageChange);
   }
 
   refresh(): void {
@@ -73,11 +234,20 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       (node.preferred ? '★ ' : '') + node.name,
       vscode.TreeItemCollapsibleState.Collapsed,
     );
+    const usage = getCachedUsage(node.configDir);
     item.description =
-      node.model + (node.preferred ? ' · preferred' : '') + (coolingDown ? ' · ⏸ cooldown' : '');
-    item.tooltip =
-      `CLAUDE_CONFIG_DIR=${node.configDir}\n` +
-      'Expand for per-account usage · terminal button opens a live session · right-click for re-login / remove';
+      node.model +
+      (node.preferred ? ' · preferred' : '') +
+      (coolingDown ? ' · ⏸ cooldown' : '') +
+      ` · ${usageSummary(usage)}` +
+      (usage?.extraUsage?.enabled === true ? ' · ⚠overage' : '') +
+      (usage?.windowsStale === true ? ` · ⏱ plan usage ${formatAge(usage.windowsFetchedAt)}` : '');
+    const tooltip = new vscode.MarkdownString(
+      `CLAUDE_CONFIG_DIR=${node.configDir}\n\n` +
+        'Expand for per-account usage · terminal button opens a live session · right-click for re-login / remove',
+    );
+    appendUsageTooltip(tooltip, usage);
+    item.tooltip = tooltip;
     item.iconPath = new vscode.ThemeIcon(coolingDown ? 'debug-pause' : 'server-process');
     item.contextValue = 'worker';
     item.id = node.name;
@@ -114,37 +284,45 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
         ? 'Skipped by automatic assignment until the cooldown ends. Dispatches naming this worker explicitly still run.'
         : 'Eligible for automatic assignment.',
     });
+    this.pushPlanQuotaRows(rows, worker);
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'Session (5h)',
+      label: 'Dispatch · Session (5h)',
       description:
         session.tasks === 0
           ? 'no dispatches'
           : `${session.tasks} tasks · ${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out`,
       icon: 'history',
-      tooltip: 'Dispatch usage in the last 5 hours — the window of Claude plans\' session limit.',
+      tooltip:
+        'Dispatches sent by this extension in the last 5 hours. Counts only this extension\'s ' +
+        'traffic, not the account\'s overall consumption.',
     });
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'Weekly (7d)',
+      label: 'Dispatch · Weekly (7d)',
       description:
         week.tasks === 0
           ? 'no dispatches'
           : `${week.tasks} tasks · ${fmtTokens(week.inputTokens)} in / ${fmtTokens(week.outputTokens)} out`,
       icon: 'calendar',
-      tooltip: 'Dispatch usage in the last 7 days — the window of Claude plans\' weekly limit.',
+      tooltip:
+        'Dispatches sent by this extension in the last 7 days. Counts only this extension\'s ' +
+        'traffic, not the account\'s overall consumption.',
     });
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'All time',
+      label: 'Dispatch · All time',
       description: stats
         ? `${stats.tasks} tasks · ${fmtTokens(stats.inputTokens)} in / ${fmtTokens(stats.outputTokens)} out` +
           (stats.costUsd ? ` · ~$${stats.costUsd.toFixed(2)}` : '')
         : 'no dispatches yet',
       icon: 'graph',
+      tooltip:
+        'Every dispatch this extension has ever sent to this worker. Counts only this ' +
+        'extension\'s traffic, not the account\'s overall consumption.',
     });
     if (stats && stats.errors > 0) {
       rows.push({
@@ -156,23 +334,111 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
         tooltip: stats.lastError,
       });
     }
-    rows.push({
-      kind: 'stat',
-      worker: worker.name,
-      label: 'Plan quota',
-      description: 'open terminal → type /usage',
-      icon: 'link-external',
-      tooltip:
-        "The numbers above only count this extension's dispatches. The account's real plan quota " +
-        '(session %, weekly %) is only visible inside Claude Code — this opens a terminal on this ' +
-        'account; type /usage there.',
-      command: {
-        command: 'claudeCodeOrchestrator.loginWorker',
-        title: 'Check plan quota',
-        arguments: [{ id: worker.name }],
-      },
-    });
     return rows;
+  }
+
+  /**
+   * Live plan-quota rows from the cached `get_usage` reading (never spawns).
+   * Renders one row per rate-limit window when available, or a single row for
+   * the refreshing / unavailable / no-limits / no-windows states.
+   */
+  private pushPlanQuotaRows(rows: WorkerStatRow[], worker: WorkerProfile): void {
+    const usage = getCachedUsage(worker.configDir);
+
+    if (!usage) {
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: 'Plan quota',
+        description: 'usage: — (refreshing)',
+        icon: 'sync',
+        tooltip: 'No cached reading yet — the background refresher will populate this shortly.',
+      });
+      return;
+    }
+    if (usage.error !== undefined) {
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: 'Plan quota',
+        description: 'usage unavailable',
+        icon: 'warning',
+        tooltip: usage.error,
+      });
+      return;
+    }
+    if (usage.available !== true) {
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: 'Plan quota',
+        description: NO_LIMITS_MESSAGE,
+        icon: 'circle-slash',
+        tooltip:
+          'This account exposes no claude.ai plan rate limits — typically a setup-token or ' +
+          'non-subscription login. This is a valid state, not an error.',
+      });
+      return;
+    }
+    const windows = safeWindows(usage);
+    if (windows.length === 0) {
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: 'Plan quota',
+        description: NO_WINDOWS_MESSAGE,
+        icon: 'info',
+        tooltip:
+          'The account has a subscription but reported no rate-limit windows in the last ' +
+          'reading. This is a valid state, not an error.',
+      });
+      return;
+    }
+    if (usage.windowsStale === true) {
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: 'Plan · (stale)',
+        description: `showing last reading from ${formatAge(usage.windowsFetchedAt)} — upstream returned no data`,
+        icon: 'clock',
+        tooltip:
+          'The numbers below are the last good reading, not current. They are kept for up to 30 ' +
+          'minutes while get_usage returns no rate-limit data, then cleared.',
+      });
+    }
+    for (const w of windows) {
+      const elevated = isElevated(w.severity);
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: `Plan · ${w.label}`,
+        description: `${pct(w.percent)} · resets ${formatRelativeReset(w.resetsAt)}`,
+        icon: elevated ? 'warning' : 'pulse',
+        tooltip:
+          `Real plan usage${usage.subscriptionType ? ` (${usage.subscriptionType})` : ''} — ` +
+          `${w.label}: ${pct(w.percent)}${elevated ? ` ⚠${w.severity}` : ''} — ` +
+          `resets ${formatRelativeReset(w.resetsAt)}`,
+      });
+    }
+    const extra = safeExtraUsage(usage);
+    if (extra !== null) {
+      rows.push({
+        kind: 'stat',
+        worker: worker.name,
+        label: 'Plan · Extra usage',
+        description: extra.enabled
+          ? 'ON' +
+            (extra.spendLabel !== null ? ` · ${extra.spendLabel}` : '') +
+            (extra.percent !== null ? ` · ${extra.percent}% of cap` : '')
+          : 'off · plan limits block instead of billing',
+        icon: extra.enabled ? 'warning' : 'shield',
+        tooltip: extra.enabled
+          ? 'Overage billing is ON: dispatching past a plan window bills money against this ' +
+            "account's monthly cap instead of being blocked."
+          : 'Overage billing is off: exhausting a plan window blocks work until it resets — ' +
+            'no money is spent. Turn it on to bill past the limit against a monthly cap.',
+      });
+    }
   }
 }
 
@@ -187,12 +453,15 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
   /** true → only tasks dispatched from the current workspace. */
   scopeToWorkspace = true;
 
+  /** Kept so dispose() removes only this listener — WorkersProvider watches this path too. */
+  private readonly onTasksChange = (): void => this._onDidChangeTreeData.fire();
+
   constructor() {
-    fs.watchFile(TASKS_LOG_FILE, { interval: 1500 }, () => this._onDidChangeTreeData.fire());
+    fs.watchFile(TASKS_LOG_FILE, { interval: 1500 }, this.onTasksChange);
   }
 
   dispose(): void {
-    fs.unwatchFile(TASKS_LOG_FILE);
+    fs.unwatchFile(TASKS_LOG_FILE, this.onTasksChange);
   }
 
   refresh(): void {
@@ -202,10 +471,34 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
   getTreeItem(event: TaskEvent): vscode.TreeItem {
     const item = new vscode.TreeItem(event.title);
     item.id = `${event.id}-${event.ts}`;
-    item.description = `${event.worker} · ${event.model} · ${event.status}`;
+    // package.json shows the inline Cancel button only on `runningTask`.
+    item.contextValue = event.status === 'running' ? 'runningTask' : 'task';
+
+    // Cancelled and orphaned tasks are recorded as `error`, distinguished from a
+    // genuine failure by the leading word of the (trimmed, case-insensitive) error
+    // text. A missing/blank error is a plain error, never cancelled.
+    const errText = (event.error ?? '').trim().toLowerCase();
+    const errKind =
+      event.status !== 'error'
+        ? undefined
+        : errText.startsWith('cancelled')
+        ? 'cancelled'
+        : errText.startsWith('orphaned')
+        ? 'orphaned'
+        : 'error';
+
+    item.description = `${event.worker} · ${event.model} · ${errKind ?? event.status}`;
     item.tooltip = event.error ?? undefined;
     item.iconPath = new vscode.ThemeIcon(
-      event.status === 'running' ? 'sync~spin' : event.status === 'done' ? 'check' : 'error',
+      event.status === 'running'
+        ? 'sync~spin'
+        : event.status === 'done'
+        ? 'check'
+        : errKind === 'cancelled'
+        ? 'circle-slash'
+        : errKind === 'orphaned'
+        ? 'debug-disconnect'
+        : 'error',
     );
     item.command = {
       command: 'claudeCodeOrchestrator.showTaskOutput',
