@@ -4,6 +4,21 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-07-13
+
+### Fixed
+- The frontier billing-guard setting (`claudeCodeOrchestrator.frontierWorkerDispatch`)
+  is stored in one shared file that every editor with the extension writes
+  to. An editor where the setting was left unset used to overwrite another
+  editor's explicit `allow` back to the default `block`, so frontier dispatch
+  stayed blocked even though the setting showed `allow`. Now an editor only
+  changes the guard when its setting is explicitly set; an unset editor no
+  longer clobbers another editor's choice, and the guard reverts to the safe
+  `block` default only when the editor that enabled it clears the setting.
+- The Orchestrator Dashboard now shows the guard value actually in effect and
+  which editor set it, so a mismatch between what one editor shows and what
+  the dispatch server enforces is visible.
+
 ## [1.1.0] — 2026-07-09
 
 ### Added

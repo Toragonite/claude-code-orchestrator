@@ -204,6 +204,15 @@ export function openDashboard(): void {
       }));
     const checkin = root ? readOrchestrators()[root] : undefined;
     const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
+    // The dispatch server enforces the SHARED registry's guard, which a different
+    // editor may have set — read it so the UI can flag a mismatch. A read failure
+    // degrades to no note (effective mirrors this editor), never a crash.
+    let reg;
+    try {
+      reg = readRegistry();
+    } catch {
+      reg = undefined;
+    }
     void panel.webview.postMessage({
       type: 'data',
       workspace: root ?? null,
@@ -220,6 +229,8 @@ export function openDashboard(): void {
         claudePath: cfg.get('claudePath', 'claude'),
         quotaCooldownMinutes: cfg.get('quotaCooldownMinutes', 30),
         frontierWorkerDispatch: cfg.get('frontierWorkerDispatch', 'block'),
+        frontierEffective: reg ? reg.frontierWorkerDispatch : cfg.get('frontierWorkerDispatch', 'block'),
+        frontierSetBy: reg ? (reg.frontierGuardSetBy ?? null) : null,
       },
     });
   };
@@ -394,6 +405,7 @@ export function dashboardHtml(): string {
       <select id="s-frontier">
         <option value="block">block (billing guard)</option><option value="allow">allow</option>
       </select>
+      <div id="s-frontier-note" style="font-size:0.8em;margin-top:4px"></div>
       <div class="actions">
         <button data-cmd="installMcp">Register MCP here</button>
         <button data-cmd="addDispatchPolicy">Add policy to CLAUDE.md</button>
@@ -617,6 +629,16 @@ export function dashboardHtml(): string {
     if (editing !== 's-path') document.getElementById('s-path').value = data.settings.claudePath;
     if (editing !== 's-cool') document.getElementById('s-cool').value = data.settings.quotaCooldownMinutes;
     if (editing !== 's-frontier') document.getElementById('s-frontier').value = data.settings.frontierWorkerDispatch;
+    const fEff = data.settings.frontierEffective;
+    const fSetBy = data.settings.frontierSetBy;
+    const fNote = document.getElementById('s-frontier-note');
+    if (fEff !== data.settings.frontierWorkerDispatch) {
+      let msg = '⚠ In effect: ' + esc(fEff);
+      if (fSetBy != null) msg += ' — set in ' + esc(fSetBy) + '. Change this dropdown to take over.';
+      fNote.innerHTML = '<span class="warn">' + msg + '</span>';
+    } else {
+      fNote.innerHTML = '<span class="muted">In effect: ' + esc(fEff) + '</span>';
+    }
   }
 </script>
 </body>

@@ -45,6 +45,13 @@ export interface Registry {
    * the subscription quota.
    */
   frontierWorkerDispatch: 'allow' | 'block';
+  /**
+   * appName (vscode.env.appName) of the editor whose EXPLICIT setting produced
+   * the current `frontierWorkerDispatch` value. Undefined when no editor has
+   * explicitly opted in. Used to reconcile the billing guard across editors that
+   * share this one registry file — see applyFrontierGuard.
+   */
+  frontierGuardSetBy?: string;
 }
 
 /** Cumulative per-worker usage, tracked from CLI JSON results. */
@@ -158,6 +165,38 @@ function atomicWrite(file: string, data: string): void {
 export function writeRegistry(registry: Registry): void {
   ensureDirs();
   atomicWrite(REGISTRY_FILE, JSON.stringify(registry, null, 2));
+}
+
+/**
+ * Reconcile the frontier billing guard across editors that share this one
+ * registry file. Every editor with the extension writes its settings here, so a
+ * blind overwrite let an editor where the guard is UNSET clobber another editor's
+ * explicit `allow` back to the default `block` (and vice versa). This function is
+ * called on each sync with THIS editor's own explicit setting:
+ *
+ *  - `explicit` set (any editor)  -> take it, and record that editor as the owner.
+ *  - `explicit` unset, owner is a DIFFERENT editor -> leave the value alone (an
+ *    editor that never opted in must not override the one that did — the bug).
+ *  - `explicit` unset, owner is THIS editor -> the opt-in was revoked; revert to
+ *    the safe default `block` and clear the owner.
+ *
+ * Fail-safe: the default and any non-'allow' explicit value resolve to `block`,
+ * so frontier billing is only ever enabled by an editor that explicitly asks for it.
+ * Pure and side-effect-free apart from mutating the passed registry; unit-tested.
+ */
+export function applyFrontierGuard(
+  registry: Registry,
+  editor: string,
+  explicit: string | undefined,
+): Registry {
+  if (explicit !== undefined) {
+    registry.frontierWorkerDispatch = explicit === 'allow' ? 'allow' : 'block';
+    registry.frontierGuardSetBy = editor;
+  } else if (registry.frontierGuardSetBy === editor) {
+    registry.frontierWorkerDispatch = 'block';
+    registry.frontierGuardSetBy = undefined;
+  }
+  return registry;
 }
 
 export function appendTaskEvent(event: TaskEvent): void {

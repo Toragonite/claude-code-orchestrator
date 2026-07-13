@@ -3,7 +3,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
-import { readRegistry, renameWorker, writeRegistry, WorkerModel, WorkerProfile } from './registry';
+import {
+  applyFrontierGuard,
+  readRegistry,
+  renameWorker,
+  writeRegistry,
+  WorkerModel,
+  WorkerProfile,
+} from './registry';
 
 /**
  * Resolve a bare command name to an absolute path via the user's login shell.
@@ -111,8 +118,13 @@ export class WorkerManager {
     registry.permissionMode = cfg.get<string>('workerPermissionMode', 'acceptEdits');
     registry.claudePath = resolveViaLoginShell(cfg.get<string>('claudePath', 'claude'));
     registry.cooldownMinutes = cfg.get<number>('quotaCooldownMinutes', 30);
-    registry.frontierWorkerDispatch =
-      cfg.get<string>('frontierWorkerDispatch', 'block') === 'allow' ? 'allow' : 'block';
+    // Billing guard: reconcile across editors that share this registry. Use
+    // inspect() (not get()) so an editor where the setting is UNSET is
+    // distinguished from one that explicitly chose the default — an unset editor
+    // must not clobber another editor's explicit `allow` back to `block`.
+    const fg = cfg.inspect<string>('frontierWorkerDispatch');
+    const explicit = fg?.workspaceFolderValue ?? fg?.workspaceValue ?? fg?.globalValue;
+    applyFrontierGuard(registry, vscode.env.appName, explicit);
     writeRegistry(registry);
   }
 
