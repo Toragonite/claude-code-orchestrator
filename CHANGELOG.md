@@ -4,6 +4,50 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-07-15
+
+### Added
+- **Distinct "temporarily unavailable" plan-usage state.** When an account's
+  live plan usage briefly comes back empty even though it has reported rate-limit
+  windows before, the Worker Accounts tree and the Orchestrator Dashboard now say
+  "temporarily unavailable" (with the age of the last good reading) instead of
+  the "no rate-limit windows reported" message. This state is a known, transient
+  upstream `get_usage` hiccup — the numbers return on their own — and is now
+  clearly separated from an account that has no plan at all ("no plan limits")
+  and from one that genuinely reports no windows.
+- **Quota-aware dispatch.** A worker whose plan window is exhausted is now
+  skipped by automatic assignment and refused at the dispatch MCP server, so
+  work is not sent to an account that cannot run it. The one exception is an
+  account with overage billing enabled: exhausting its window bills money
+  against the monthly cap instead of blocking, so such a worker stays
+  dispatchable — automatic assignment falls back to it only when no
+  non-exhausted worker is available, and every overage dispatch carries an
+  explicit ⚠ warning (in the returned result and the task output file) that it
+  is spending real money.
+- **Guard against reusing another worker's login.** Adding a worker whose config
+  directory (`~/.claude-<name>`) already belongs to a registered worker is now
+  refused, and if that directory exists with a leftover login from a
+  since-renamed worker (a worker keeps its original directory when renamed), a
+  confirmation dialog warns before the existing login is reused.
+- **Prompt visible on running tasks.** Dispatched tasks now show what they are
+  running — a prompt preview in the Dispatched Tasks tooltip, the dashboard
+  task-row hover, and the task output file — without opening the output.
+- **Dashboard button on the Worker Accounts view.** The Orchestrator Dashboard
+  can now be opened from the Worker Accounts view title, not only the Dispatched
+  Tasks view.
+
+### Changed
+- **Cross-editor shared refresh throttle.** Automatic account-usage refreshes
+  (on activation and on the 5-minute timer) now skip probing when another editor
+  window sharing the same usage cache refreshed recently, avoiding redundant
+  `get_usage` probes. The explicit Refresh Account Usage command still forces a
+  live probe.
+
+### Fixed
+- Worker Accounts context-menu commands (rename, re-login, remove, toggle
+  preferred, open session) now act on the account you clicked instead of
+  re-prompting a picker to choose one.
+
 ## [1.1.1] — 2026-07-13
 
 ### Fixed

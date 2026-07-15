@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "Run Claude Code across multiple accounts in parallel. Your main session designs and verifies while worker accounts (Opus/Sonnet) implement via MCP dispatch tools — with quota-aware failover and per-account usage tracking. Unofficial.",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -176,6 +176,11 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "claudeCodeOrchestrator.openDashboard",
+          "when": "view == claudeCodeOrchestrator.workers",
+          "group": "navigation@0"
+        },
         {
           "command": "claudeCodeOrchestrator.addWorker",
           "when": "view == claudeCodeOrchestrator.workers",

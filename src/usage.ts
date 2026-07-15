@@ -91,6 +91,14 @@ export interface AccountUsage {
    */
   windowsStale?: boolean;
   /**
+   * Epoch ms of the most recent reading that actually CONTAINED windows. Unlike
+   * `windowsFetchedAt` (which is cleared once the 30-min stale carry expires and
+   * the windows go empty), this survives indefinitely across empty readings, so a
+   * UI can say "temporarily unavailable (last good reading X ago)" instead of a
+   * generic empty state. Absent only when no windows have ever been observed.
+   */
+  lastGoodWindowsAt?: number;
+  /**
    * Set ONLY when the probe itself failed (timeout, spawn error, non-success
    * control_response, unparseable output). Distinct from available:false, which
    * is a valid state meaning "this account has no plan rate limits" (e.g. a
@@ -393,14 +401,79 @@ export function getCachedUsage(configDir: string): AccountUsage | undefined {
   return readUsageCache()[configDir];
 }
 
+/**
+ * Merge two cache snapshots by configDir key. Pure (exported for tests). For a
+ * key in both, the entry with the newest `fetchedAt` wins (a non-finite
+ * fetchedAt is treated as 0, i.e. always losable). Keys present ONLY in `disk`
+ * are KEPT: another process may legitimately track accounts this run does not
+ * (e.g. a different main config dir), and dropping them would lose live readings.
+ * On a fetchedAt tie, `fresh` wins.
+ */
+export function mergeUsageCaches(disk: UsageCache, fresh: UsageCache): UsageCache {
+  const at = (u: AccountUsage | undefined): number => {
+    const v = u?.fetchedAt;
+    return typeof v === 'number' && isFinite(v) ? v : 0;
+  };
+  const out: UsageCache = { ...disk };
+  for (const key of Object.keys(fresh)) {
+    const f = fresh[key];
+    const d = out[key];
+    if (d === undefined || at(f) >= at(d)) {
+      out[key] = f;
+    }
+  }
+  return out;
+}
+
 function writeUsageCache(cache: UsageCache): void {
   ensureDirs();
+  // Re-read the on-disk cache immediately before writing and merge this run's
+  // results into it. Two processes refreshing concurrently must not clobber each
+  // other: mergeUsageCaches keeps the newest per-account reading and preserves
+  // accounts only the other process tracks.
+  let disk: UsageCache;
+  try {
+    disk = readUsageCache();
+  } catch {
+    disk = {};
+  }
+  const merged = mergeUsageCaches(disk, cache);
   // Atomic write: the extension host and the MCP server both refresh the same
   // file. tmp+rename prevents a concurrent reader from seeing a torn/truncated
   // file and prevents two writers from interleaving. Per-pid tmp avoids collision.
   const tmp = `${USAGE_CACHE_FILE}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(cache, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(merged, null, 2));
   fs.renameSync(tmp, USAGE_CACHE_FILE);
+}
+
+/**
+ * Delete cache entries for the given config dirs. Called when a worker is removed
+ * so a lingering reading (possibly showing an exhausted window) cannot produce a
+ * false quota verdict if the same name/directory is re-registered later. Re-reads,
+ * deletes the given keys if present, and writes atomically via the same tmp+rename
+ * pattern as writeUsageCache. Best-effort: a read or write failure is swallowed —
+ * a stale entry is a nuisance, not fatal. Never throws.
+ */
+export function deleteUsageEntries(configDirs: string[]): void {
+  try {
+    const cache = readUsageCache();
+    let changed = false;
+    for (const dir of configDirs) {
+      if (dir in cache) {
+        delete cache[dir];
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return;
+    }
+    ensureDirs();
+    const tmp = `${USAGE_CACHE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache, null, 2));
+    fs.renameSync(tmp, USAGE_CACHE_FILE);
+  } catch {
+    // best-effort — never throw to the caller
+  }
 }
 
 /** How long a good windows reading is carried forward once upstream stops returning windows. */
@@ -414,12 +487,40 @@ const STALE_WINDOW_MAX_MS = 30 * 60 * 1000;
  * honest "no windows" state rather than present very old numbers as if current.
  */
 export function mergeStaleWindows(fresh: AccountUsage, prev: AccountUsage | undefined): AccountUsage {
-  if (fresh.windows.length > 0) {
-    return { ...fresh, windowsFetchedAt: fresh.fetchedAt, windowsStale: false };
+  // Derive the last-good timestamp to carry forward. Prefer prev's own
+  // lastGoodWindowsAt; otherwise migrate a pre-field cache entry by inferring it
+  // from prev's windows timestamp when prev actually had windows. This ensures
+  // old caches written before this field existed still light up the "last good
+  // reading X ago" affordance on their first empty reading after upgrade.
+  let prevLastGood: number | undefined;
+  if (prev === undefined) {
+    prevLastGood = undefined;
+  } else if (typeof prev.lastGoodWindowsAt === 'number' && isFinite(prev.lastGoodWindowsAt)) {
+    prevLastGood = prev.lastGoodWindowsAt;
+  } else if (Array.isArray(prev.windows) && prev.windows.length > 0) {
+    const at = prev.windowsFetchedAt ?? prev.fetchedAt;
+    prevLastGood = typeof at === 'number' && isFinite(at) ? at : undefined;
+  } else {
+    prevLastGood = undefined;
   }
+
+  if (fresh.windows.length > 0) {
+    return {
+      ...fresh,
+      windowsFetchedAt: fresh.fetchedAt,
+      windowsStale: false,
+      lastGoodWindowsAt: fresh.fetchedAt,
+    };
+  }
+
+  // No fresh windows. Whatever we return preserves lastGoodWindowsAt so the UI can
+  // distinguish "temporarily unavailable" from "never observed", even once the
+  // 30-min carry below expires and the windows themselves are gone.
+  const base: AccountUsage = { ...fresh, lastGoodWindowsAt: prevLastGood };
+
   // Only paper over the specific "available but no windows, no probe error" gap.
   if (!fresh.available || fresh.error !== undefined) {
-    return fresh;
+    return base;
   }
   const prevWindows = prev && Array.isArray(prev.windows) ? prev.windows : [];
   const prevAt = prev ? (prev.windowsFetchedAt ?? prev.fetchedAt) : undefined;
@@ -430,7 +531,7 @@ export function mergeStaleWindows(fresh: AccountUsage, prev: AccountUsage | unde
     fresh.fetchedAt - prevAt <= STALE_WINDOW_MAX_MS;
   if (prevWindows.length > 0 && withinWindow) {
     return {
-      ...fresh,
+      ...base,
       windows: prevWindows,
       // extraUsage / subscriptionType disappear together with rate_limits — keep the last known.
       extraUsage: fresh.extraUsage ?? prev!.extraUsage,
@@ -439,7 +540,62 @@ export function mergeStaleWindows(fresh: AccountUsage, prev: AccountUsage | unde
       windowsStale: true,
     };
   }
-  return { ...fresh, windowsStale: false };
+  // Carry expired (or no prior windows): honest empty state — but lastGoodWindowsAt SURVIVES.
+  return { ...base, windowsStale: false };
+}
+
+/** A plan window at/above this utilization is treated as exhausted (quota blocked). */
+export const EXHAUSTED_PERCENT = 99;
+
+/**
+ * Return the windows that represent live, still-in-effect quota exhaustion.
+ *
+ * A window counts only when BOTH hold: (a) `percent` is a finite number
+ * >= EXHAUSTED_PERCENT, and (b) its reset has NOT already passed. Rationale for
+ * (b): a window whose `resetsAt` is in the past has already rolled over — the
+ * cached reading is simply old — so it must NOT be reported as exhausted. We do
+ * NOT need a separate staleness/age check: mergeStaleWindows clears windows once
+ * they exceed the 30-min carry, so anything still present here is recent enough.
+ *
+ * A FALSE "exhausted" verdict is the harmful failure mode (it would wrongly block
+ * dispatches), so every input is validated defensively: malformed entries
+ * (non-objects, string/NaN percents) never yield exhausted. For resetsAt we bias
+ * the OTHER way — null/absent/invalid-ISO counts as "not yet reset" (conservative:
+ * we cannot prove it has rolled over), so a genuinely exhausted window with a
+ * missing reset is still surfaced.
+ */
+export function exhaustedWindows(usage: AccountUsage | undefined, nowMs: number): UsageWindow[] {
+  if (
+    usage === undefined ||
+    usage.error !== undefined ||
+    usage.available !== true ||
+    !Array.isArray(usage.windows)
+  ) {
+    return [];
+  }
+  const out: UsageWindow[] = [];
+  for (const entry of usage.windows) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    const w = entry as UsageWindow;
+    if (typeof w.percent !== 'number' || !isFinite(w.percent) || w.percent < EXHAUSTED_PERCENT) {
+      continue;
+    }
+    // Reset in the past => already rolled over => not exhausted. Missing/invalid
+    // ISO cannot be proven past, so it conservatively counts as still exhausted.
+    let stillInEffect: boolean;
+    if (typeof w.resetsAt !== 'string' || !w.resetsAt) {
+      stillInEffect = true;
+    } else {
+      const t = Date.parse(w.resetsAt);
+      stillInEffect = isNaN(t) ? true : t > nowMs;
+    }
+    if (stillInEffect) {
+      out.push(w);
+    }
+  }
+  return out;
 }
 
 /**
@@ -473,4 +629,67 @@ export async function refreshAllUsage(
     // disk full / read-only — return the readings anyway; never reject.
   }
   return merged;
+}
+
+/** Default freshness window for the cross-process refresh throttle. */
+export const USAGE_FRESH_DEFAULT_MS = 4 * 60 * 1000;
+
+/**
+ * True iff the cache is fresh enough that no re-probe is warranted right now.
+ * Pure (exported for tests). Requires a NON-EMPTY account list where EVERY account
+ * has a cache entry with a finite `fetchedAt` in the inclusive window
+ * [nowMs - maxAgeMs, nowMs]. A future or NaN fetchedAt is treated as STALE
+ * (clock-skew / tamper safety), and a newly added account with no cache entry
+ * makes the whole cache stale — it still needs its first probe.
+ */
+export function isCacheFresh(
+  cache: UsageCache,
+  accounts: { name: string; configDir: string }[],
+  nowMs: number,
+  maxAgeMs: number,
+): boolean {
+  if (accounts.length === 0) {
+    return false;
+  }
+  for (const a of accounts) {
+    const entry = cache[a.configDir];
+    if (!entry) {
+      return false;
+    }
+    const at = entry.fetchedAt;
+    if (typeof at !== 'number' || !isFinite(at)) {
+      return false;
+    }
+    const age = nowMs - at;
+    if (age < 0 || age > maxAgeMs) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Refresh all accounts ONLY when the shared cache is stale, else return null
+ * without probing. This is the cross-process throttle: multiple editor extension
+ * hosts and the MCP server all read/write the same usage.json, so a process that
+ * finds a recent-enough cache defers to whoever refreshed it, sparing the
+ * per-account upstream endpoint from being over-probed. The cache read is wrapped
+ * defensively — a read failure counts as stale so we still refresh. Never throws.
+ */
+export async function refreshAllUsageIfStale(
+  maxAgeMs: number = USAGE_FRESH_DEFAULT_MS,
+  accounts: { name: string; configDir: string }[] = listAccounts(),
+  concurrency = 3,
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<AccountUsage[] | null> {
+  let cache: UsageCache;
+  try {
+    cache = readUsageCache();
+  } catch {
+    cache = {};
+  }
+  if (isCacheFresh(cache, accounts, Date.now(), maxAgeMs)) {
+    return null;
+  }
+  return refreshAllUsage(accounts, concurrency, timeoutMs);
 }

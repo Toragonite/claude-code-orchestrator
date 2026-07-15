@@ -85,6 +85,12 @@ export interface TaskEvent {
   costUsd?: number;
   /** Workspace the dispatch ran in (server cwd) — enables per-workspace views. */
   cwd?: string;
+  /**
+   * First ~300 chars of the dispatched prompt (whitespace-collapsed), so surfaces
+   * can show WHAT a task is running without opening its output file. Set on the
+   * initial 'running' event and carried on every later event for the task.
+   */
+  promptPreview?: string;
   /** PID of the worker `claude -p` child. Set on a second 'running' event emitted after spawn. */
   pid?: number;
   /** Process-group id of the worker, recorded only when it was spawned as its own group leader (detached). Present => the whole tree can be signalled with -pgid. */
@@ -199,9 +205,43 @@ export function applyFrontierGuard(
   return registry;
 }
 
+/**
+ * The registered worker (if any) whose configDir names the same path as `dir`.
+ * Compared via path.resolve on both sides; symlinks are NOT resolved. Used to
+ * refuse creating a second worker bound to an existing worker's directory —
+ * a worker's dir is derived from its name at creation and KEPT across renames,
+ * so re-adding a previously-used name would silently share that login.
+ */
+export function findWorkerByConfigDir(
+  workers: WorkerProfile[],
+  dir: string,
+): WorkerProfile | undefined {
+  const target = path.resolve(dir);
+  return workers.find(
+    (w) => typeof w.configDir === 'string' && path.resolve(w.configDir) === target,
+  );
+}
+
 export function appendTaskEvent(event: TaskEvent): void {
   ensureDirs();
   fs.appendFileSync(TASKS_LOG_FILE, JSON.stringify(event) + '\n');
+}
+
+/**
+ * Best-effort append of a trailing note to a task's output file. The dispatch
+ * server writes the output file when an attempt starts, so terminal paths that
+ * bypass the server's own done/failed writers must annotate the file or it keeps
+ * claiming RUNNING forever. Never throws; a no-op when outputFile is empty.
+ */
+export function appendOutputNote(outputFile: string | undefined, note: string): void {
+  if (typeof outputFile !== 'string' || outputFile === '') {
+    return;
+  }
+  try {
+    fs.appendFileSync(outputFile, note);
+  } catch {
+    // annotating the output file is best-effort — never break the caller
+  }
 }
 
 export function readTaskEvents(): TaskEvent[] {
@@ -395,6 +435,10 @@ export async function cancelRunningTask(id: string, reason: string, graceMs = 30
     }
   }
   appendTaskEvent({ ...latest, ts: Date.now(), status: 'error', error: reason });
+  appendOutputNote(
+    latest.outputFile,
+    `\n\n---\n\nCANCELLED: ${reason} (${new Date().toISOString()})\n`,
+  );
   return true;
 }
 
@@ -419,6 +463,10 @@ export function reapDeadTasks(): number {
         status: 'error',
         error: 'orphaned — worker process is no longer running',
       });
+      appendOutputNote(
+        task.outputFile,
+        `\n\n---\n\nORPHANED: worker process is no longer running (${new Date().toISOString()})\n`,
+      );
       reaped++;
     } catch {
       // a failed append must not abort the sweep of the remaining tasks

@@ -19,6 +19,8 @@ import {
 } from '../registry';
 import { isFrontierTier, orchestratorBriefing, WORKER_BASE_PROMPT } from '../prompts';
 import {
+  AccountUsage,
+  exhaustedWindows,
   ExtraUsage,
   formatAge,
   formatRelativeReset,
@@ -26,7 +28,8 @@ import {
   isElevated,
   listAccounts,
   readUsageCache,
-  refreshAllUsage,
+  refreshAllUsageIfStale,
+  UsageCache,
   UsageWindow,
 } from '../usage';
 
@@ -159,6 +162,28 @@ function registerChild(taskId: string, child: ChildProcess): void {
 }
 
 /**
+ * Best-effort terminal note appended to a task's output file so a cancelled or
+ * shut-down task does not sit at "status: RUNNING" forever. APPENDS ONLY — the
+ * RUNNING header and the prompt above it stay readable; the file is never
+ * rewritten. Called from the terminal-EVENT sites (cancelRequest / shutdown) and
+ * NOT from dispatchTask's aborted short-circuit, so the note is written once per
+ * task. Never throws.
+ */
+function appendCancelledNote(base: TaskBase, reason: string): void {
+  if (!base.outputFile) {
+    return;
+  }
+  try {
+    fs.appendFileSync(
+      base.outputFile,
+      `\n\n---\n\nCANCELLED: ${reason} (${new Date().toISOString()})\n`,
+    );
+  } catch {
+    // best effort — the terminal task event is already recorded
+  }
+}
+
+/**
  * Cancel one request: kill its workers and record them as cancelled. The
  * request's own `tools/call` sees the aborted flag and sends no response.
  * Unknown or already-settled request ids are ignored silently.
@@ -181,6 +206,7 @@ function cancelRequest(requestId: string | number): void {
       } catch {
         // a task-log write failure must not leave the child alive
       }
+      appendCancelledNote(base, CANCELLED_ERROR);
     }
     const child = childrenByTask.get(taskId);
     if (child !== undefined) {
@@ -219,6 +245,7 @@ function shutdown(reason: string): void {
     } catch {
       // best effort — exiting regardless
     }
+    appendCancelledNote(base, reason);
   }
   taskBases.clear();
 
@@ -292,21 +319,94 @@ function isQuotaError(message: string): boolean {
   );
 }
 
-/** Workers not on cooldown and not already attempted, in round-robin order. */
+/** '<label> <percent>% (resets <when>)' for a quota-exhausted window — error text and list_workers. */
+function formatExhaustedWindow(w: UsageWindow): string {
+  return `${w.label} ${Math.round(w.percent)}% (resets ${formatRelativeReset(w.resetsAt)})`;
+}
+
+/**
+ * Overage ("extra usage") billing is ON for this account: exhausting a plan
+ * window BILLS money against a monthly cap instead of blocking work (see the
+ * ExtraUsage doc comment in usage.ts). Defensive — the usage cache is an
+ * untrusted JSON file, so anything that is not a proper non-array object with
+ * `enabled === true` reads as OFF. On a money surface we never assume billing.
+ */
+function overageEnabled(usage: AccountUsage | undefined): boolean {
+  const eu = usage?.extraUsage;
+  return typeof eu === 'object' && eu !== null && !Array.isArray(eu) && eu.enabled === true;
+}
+
+/**
+ * Pick a worker for a dispatch: not already attempted, not on cooldown, and not
+ * live-quota-exhausted for the model this dispatch would actually run.
+ *
+ * `requestedModel` is the caller-validated `args.model` (undefined => each worker
+ * runs its own default), so the candidate model is `requestedModel ?? worker.model`.
+ * `cache` is the usage cache read ONCE by the caller — pickWorker never spawns.
+ *
+ * A worker is EXHAUSTED for a candidate model when exhaustedWindows() reports a
+ * window that APPLIES to that model: session/weekly_all always apply; the
+ * Fable-only weekly_scoped window applies ONLY to a frontier candidate — a
+ * saturated Fable window must never block an opus/sonnet dispatch.
+ *
+ * Returns the chosen worker plus `billableOverage` — true when the chosen worker
+ * IS exhausted for the candidate model but has overage billing enabled, so the
+ * dispatch is allowed and will BILL money rather than be blocked. An exhausted
+ * worker WITHOUT overage is refused (explicit path) or skipped (auto path) as
+ * before; overage-enabled workers are used only as a fallback when no
+ * non-exhausted worker is available.
+ */
 function pickWorker(
   workers: WorkerProfile[],
   preferred: string | undefined,
   attempted: Set<string>,
-): WorkerProfile {
+  requestedModel: string | undefined,
+  cache: UsageCache,
+): { worker: WorkerProfile; billableOverage: boolean } {
+  const exhaustedFor = (w: WorkerProfile): UsageWindow[] => {
+    const candidate = requestedModel ?? w.model;
+    return exhaustedWindows(cache[w.configDir], Date.now()).filter(
+      (win) =>
+        win.kind === 'session' ||
+        win.kind === 'weekly_all' ||
+        (win.kind === 'weekly_scoped' && isFrontierTier(candidate)),
+    );
+  };
+
   if (preferred) {
     const found = workers.find((w) => w.name === preferred);
-    if (found && !attempted.has(found.name)) {
-      // Explicitly requested worker is honored even during cooldown.
-      return found;
+    // An unknown name is interface misuse, not a hint to auto-assign: fail loudly
+    // rather than silently substitute a different account than the caller named.
+    if (!found) {
+      throw new Error(
+        `Unknown worker "${preferred}". Registered workers: ${workers.map((w) => w.name).join(', ')}.`,
+      );
     }
-    if (found) {
+    if (attempted.has(found.name)) {
       throw new Error(`Worker "${preferred}" already failed this task.`);
     }
+    const exhausted = exhaustedFor(found);
+    if (exhausted.length > 0) {
+      // Exhausted + overage ON → ALLOW, but the dispatch spends real money.
+      // Exhausted + overage off/unknown → keep the refusal (guaranteed quota failure).
+      if (overageEnabled(cache[found.configDir])) {
+        return { worker: found, billableOverage: true };
+      }
+      const candidate = requestedModel ?? found.model;
+      throw new Error(
+        `Worker "${found.name}" is quota-exhausted for ${candidate} per live plan usage: ` +
+          `${exhausted.map(formatExhaustedWindow).join(' · ')}. Refused this dispatch to avoid a ` +
+          'guaranteed quota failure (this account has no overage billing enabled to bill past the window). ' +
+          'Either dispatch to a different worker, wait for the window above to reset, or — if you believe ' +
+          'this usage reading is stale — ask the operator to run "Claude Code Orchestrator: Refresh Account ' +
+          'Usage" in VS Code.',
+      );
+    }
+    // Cooldown is deliberately NOT checked here: an explicitly named worker runs
+    // even while cooling down. The asymmetry is intentional — cooldown is a
+    // blanket 30-min penalty inferred from ONE observed error, whereas the
+    // live-exhausted refusal above is current positive evidence from plan usage.
+    return { worker: found, billableOverage: false };
   }
   const stats = readStats();
   const now = Date.now();
@@ -324,26 +424,55 @@ function pickWorker(
         : 'No eligible worker available.',
     );
   }
-  // Preferred worker (usually the main session's own account) wins when it
-  // isn't busier than the least-busy alternative — favored, never flooded.
-  const starred = eligible.find((w) => w.preferred);
-  if (starred) {
-    const others = eligible.filter((w) => !w.preferred);
-    if (others.length === 0) {
-      return starred;
+  // Preferred worker (usually the main session's own account) wins when it isn't
+  // busier than the least-busy alternative — favored, never flooded. Applied to
+  // whichever pool we are choosing from.
+  const selectFrom = (pool: WorkerProfile[]): WorkerProfile => {
+    const starred = pool.find((w) => w.preferred);
+    if (starred) {
+      const others = pool.filter((w) => !w.preferred);
+      if (others.length === 0) {
+        return starred;
+      }
+      const running = runningCounts();
+      const minOther = Math.min(...others.map((w) => running[w.name] ?? 0));
+      if ((running[starred.name] ?? 0) <= minOther) {
+        return starred;
+      }
+      const worker = others[rrIndex % others.length];
+      rrIndex++;
+      return worker;
     }
-    const running = runningCounts();
-    const minOther = Math.min(...others.map((w) => running[w.name] ?? 0));
-    if ((running[starred.name] ?? 0) <= minOther) {
-      return starred;
-    }
-    const worker = others[rrIndex % others.length];
+    const worker = pool[rrIndex % pool.length];
     rrIndex++;
     return worker;
+  };
+  // Tier 1: workers NOT exhausted for the candidate model — the normal case.
+  const pool0 = eligible.filter((w) => exhaustedFor(w).length === 0);
+  if (pool0.length > 0) {
+    return { worker: selectFrom(pool0), billableOverage: false };
   }
-  const worker = eligible[rrIndex % eligible.length];
-  rrIndex++;
-  return worker;
+  // Tier 2: every eligible worker is exhausted, but some have overage billing
+  // enabled — those still run, spending money instead of being blocked. Using
+  // them only here (after pool0 is empty) honors the user's overage opt-in
+  // without ever preferring a billable dispatch when a free one exists.
+  const poolB = eligible.filter(
+    (w) => exhaustedFor(w).length > 0 && overageEnabled(cache[w.configDir]),
+  );
+  if (poolB.length > 0) {
+    return { worker: selectFrom(poolB), billableOverage: true };
+  }
+  // Tier 3: all exhausted and none can bill past the window — refuse.
+  const detail = eligible
+    .map((w) => `${w.name}: ${exhaustedFor(w).map(formatExhaustedWindow).join(' · ')}`)
+    .join('; ');
+  throw new Error(
+    `All eligible workers are quota-exhausted per live plan usage, and none has overage billing ` +
+      `enabled to bill past the window — ${detail}. Refused to dispatch to avoid a guaranteed quota ` +
+      'failure. Naming one of these workers explicitly is ALSO refused while it is exhausted without ' +
+      'overage. Wait for the earliest reset above, or — if you believe the usage reading is stale — ask ' +
+      'the operator to run "Claude Code Orchestrator: Refresh Account Usage" in VS Code.',
+  );
 }
 
 function recordSuccess(name: string, run: RunResult): void {
@@ -474,6 +603,17 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
   // Explicit worker → single attempt; otherwise fail over across workers on quota errors.
   const maxAttempts = args.worker ? 1 : registry.workers.length;
   let lastError: Error | undefined;
+  // Whitespace-collapsed prompt head carried on every TaskEvent so surfaces can
+  // show WHAT a task is running without opening its output file.
+  const promptPreview = prompt.replace(/\s+/g, ' ').trim().slice(0, 300);
+  // Task-specific system prompt (if any), and its reusable output-file section.
+  const systemPrompt = args.system_prompt?.trim();
+  const systemPromptSection = systemPrompt ? `\n\n## Task system prompt\n\n${systemPrompt}` : '';
+  // Caller-validated model request (else each worker runs its own default) and a
+  // single usage-cache read, both passed into every pickWorker attempt.
+  const requestedModel =
+    args.model && (WORKER_MODELS as readonly string[]).includes(args.model) ? args.model : undefined;
+  const usageCache = readUsageCache();
 
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -481,15 +621,17 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
         break;
       }
       let worker: WorkerProfile;
+      let billableOverage: boolean;
       try {
-        worker = pickWorker(registry.workers, args.worker, attempted);
+        const picked = pickWorker(registry.workers, args.worker, attempted, requestedModel, usageCache);
+        worker = picked.worker;
+        billableOverage = picked.billableOverage;
       } catch (err) {
         lastError = lastError ?? (err as Error);
         break;
       }
       attempted.add(worker.name);
-      const model =
-        args.model && (WORKER_MODELS as readonly string[]).includes(args.model) ? args.model : worker.model;
+      const model = requestedModel ?? worker.model;
       // Billing guard: frontier models may bill per use rather than draw from
       // the subscription quota. The same model would be blocked on every
       // worker, so this aborts instead of failing over.
@@ -502,11 +644,22 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
             '"claudeCodeOrchestrator.frontierWorkerDispatch" setting in VS Code.',
         );
       }
-      const base = { id, title, worker: worker.name, model, outputFile, cwd: process.cwd() };
+      const base = { id, title, worker: worker.name, model, outputFile, cwd: process.cwd(), promptPreview };
       appendTaskEvent({ ...base, ts: Date.now(), status: 'running' });
       // Claim the id before spawning: a cancellation landing in the window
       // between here and the spawn must still mark this task cancelled.
       trackTask(requestId, base);
+      // Make the task inspectable WHILE RUNNING: write the output file now with a
+      // RUNNING header plus the prompt, so a reader can see what a live worker was
+      // handed before any result exists. A write failure must not fail the dispatch.
+      try {
+        fs.writeFileSync(
+          outputFile,
+          `# ${title}\n\n- status: RUNNING (started ${new Date().toISOString()})\n- worker: ${worker.name}\n- model: ${model}${args.ultrathink ? '\n- ultrathink: true' : ''}${billableOverage ? '\n- overage: billing past plan window' : ''}\n\n---\n\n## Prompt\n\n${prompt}${systemPromptSection}\n`,
+        );
+      } catch {
+        // best effort — the task still runs and the DONE/FAILED writer overwrites this
+      }
 
       // The harness scans the user message for thinking keywords; for a
       // headless worker the dispatched prompt IS the user message, so
@@ -519,7 +672,7 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
           worker.configDir,
           model,
           workerPrompt,
-          args.system_prompt?.trim() || undefined,
+          systemPrompt || undefined,
           (child) => {
             registerChild(id, child);
             try {
@@ -544,9 +697,9 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
         recordSuccess(worker.name, run);
         fs.writeFileSync(
           outputFile,
-          `# ${title}\n\n- worker: ${worker.name}\n- model: ${model}${args.ultrathink ? '\n- ultrathink: true' : ''}\n- tokens: ${run.inputTokens} in / ${run.outputTokens} out` +
+          `# ${title}\n\n- worker: ${worker.name}\n- model: ${model}${args.ultrathink ? '\n- ultrathink: true' : ''}${billableOverage ? '\n- overage: billing past plan window' : ''}\n- tokens: ${run.inputTokens} in / ${run.outputTokens} out` +
             (run.costUsd ? ` (~$${run.costUsd.toFixed(4)})` : '') +
-            `\n\n---\n\n## Prompt\n\n${prompt}\n\n## Result\n\n${run.text}\n`,
+            `\n\n---\n\n## Prompt\n\n${prompt}${systemPromptSection}\n\n## Result\n\n${run.text}\n`,
         );
         appendTaskEvent({
           ...base,
@@ -556,12 +709,20 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
           outputTokens: run.outputTokens,
           costUsd: run.costUsd,
         });
-        return `[worker: ${worker.name}, model: ${model}]\n\n${run.text}`;
+        // When the dispatch went to an exhausted-but-overage-enabled worker, warn
+        // loudly (before the [worker: …] line) that it spent real money.
+        const overageWarning = billableOverage
+          ? `⚠ ${worker.name} is past a plan window; overage billing applies — this dispatch bills real money against the account's monthly cap.\n`
+          : '';
+        return `${overageWarning}[worker: ${worker.name}, model: ${model}]\n\n${run.text}`;
       } catch (err) {
         if (isAborted(requestId)) {
           // We killed this child ourselves. A cancellation is not a quota error
           // and not a worker failure: no recordFailure (it would inflate the
-          // error count and could cool the worker down), and no failover.
+          // error count and could cool the worker down), and no failover. The
+          // terminal CANCELLED note in the output file is appended by
+          // cancelRequest/shutdown (the terminal-event sites), not here, so it is
+          // written exactly once even though both paths can fire for this task.
           break;
         }
         const message = err instanceof Error ? err.message : String(err);
@@ -592,7 +753,10 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
       registry.workers.length === 1 && isQuotaError(message)
         ? ' Only one worker account is registered, so there is nothing to fail over to — wait for its limit to reset or add another worker account.'
         : '';
-    fs.writeFileSync(outputFile, `# ${title}\n\nFAILED: ${message}\n\n## Prompt\n\n${prompt}\n`);
+    fs.writeFileSync(
+      outputFile,
+      `# ${title}\n\nFAILED: ${message}\n\n## Prompt\n\n${prompt}${systemPromptSection}\n`,
+    );
     appendTaskEvent({
       id,
       title,
@@ -600,6 +764,7 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
       model: args.model ?? '-',
       outputFile,
       cwd: process.cwd(),
+      promptPreview,
       ts: Date.now(),
       status: 'error',
       error: message,
@@ -631,35 +796,20 @@ async function dispatchTasksParallel(args: BatchArgs, requestId: string | number
   );
 }
 
-/** Live usage older than this triggers a refresh, which spawns one claude probe per account. */
-const USAGE_MAX_AGE_MS = 120_000;
-
 /**
- * Refresh the usage cache when it holds nothing or its newest reading is stale.
- * Bounds spawns: repeated list_workers calls inside the window reuse the cache.
- * Never throws — a failed refresh just leaves the previous (or absent) readings.
+ * Refresh the usage cache before a list_workers render when it is stale, bounding
+ * spawns so repeated calls inside the window reuse the cache. Delegates the
+ * staleness decision to refreshAllUsageIfStale, which skips probing only when
+ * EVERY account's cached reading is within 120s — per-account freshness, so a
+ * newly added worker (no cache entry) triggers a refresh even when the others are
+ * fresh. Never throws — a failed refresh just leaves the previous (or absent) readings.
  */
 async function refreshUsageIfStale(): Promise<void> {
   try {
-    const now = Date.now();
-    const entries = Object.values(readUsageCache());
-    const newest = entries.reduce(
-      (max, u) => (typeof u?.fetchedAt === 'number' && u.fetchedAt > max ? u.fetchedAt : max),
-      -Infinity,
-    );
-    // Fresh only when the newest reading sits in the recent past. A fetchedAt IN
-    // THE FUTURE (clock skew, tampering, a reading from a fast-clock machine)
-    // makes `now - newest` negative, and a missing/NaN newest leaves it at
-    // -Infinity so `now - newest` is +Infinity — both fall outside this range
-    // and count as stale, so a poisoned timestamp can no longer suppress the
-    // refresh indefinitely in headless CLI-only mode.
-    const age = now - newest;
-    if (entries.length === 0 || !(age >= 0 && age <= USAGE_MAX_AGE_MS)) {
-      // Short 5s per-probe timeout on this path: list_workers awaits the full
-      // refresh, so one hung/misauthenticated account must not pin a whole
-      // concurrency wave for the default 20s and block the tool call ~40s.
-      await refreshAllUsage(undefined, 3, 5000);
-    }
+    // Short 5s per-probe timeout on this path: list_workers awaits the full
+    // refresh, so one hung/misauthenticated account must not pin a whole
+    // concurrency wave for the default 20s and block the tool call ~40s.
+    await refreshAllUsageIfStale(120_000, undefined, 3, 5000);
   } catch {
     // Probe or cache-write failure degrades to whatever the cache already holds.
   }
@@ -691,6 +841,13 @@ function usageLine(configDir: string): string {
   const windows = Array.isArray(usage.windows) ? usage.windows : [];
   const overage = overageSegment(usage.extraUsage);
   if (windows.length === 0) {
+    // Distinguish an intermittent upstream gap (we HAD windows recently but the
+    // carry-forward has since expired) from an account that has simply never
+    // reported windows. lastGoodWindowsAt survives stale-carry expiry, so its
+    // presence marks the former — a transient outage, not a limitless account.
+    if (typeof usage.lastGoodWindowsAt === 'number' && isFinite(usage.lastGoodWindowsAt)) {
+      return `usage: temporarily unavailable — upstream returned no data (last good ${formatAge(usage.lastGoodWindowsAt)})${overage}`;
+    }
     return `usage: no rate-limit windows reported${overage}`;
   }
   // Carried-over windows are real readings, just not current ones. Marking them
@@ -738,10 +895,8 @@ async function listWorkers(): Promise<string> {
     ...(main ? [main.configDir] : []),
     ...registry.workers.map((w) => w.configDir),
   ];
-  const overageEnabled = overageDirs.some(
-    (dir) => getCachedUsage(dir)?.extraUsage?.enabled === true,
-  );
-  const moneyFooter = overageEnabled
+  const anyOverageEnabled = overageDirs.some((dir) => overageEnabled(getCachedUsage(dir)));
+  const moneyFooter = anyOverageEnabled
     ? "\n\nOverage billing is ENABLED on one or more accounts: dispatching past a plan window bills money against that account's monthly cap instead of being blocked. Prefer accounts with headroom, and treat a window near 100% as a spend risk, not just a wait."
     : '';
   if (registry.workers.length === 0) {
@@ -770,7 +925,31 @@ async function listWorkers(): Promise<string> {
     } else {
       line += ' — available';
     }
-    return `${line}\n  ${usageLine(w.configDir)}`;
+    // Live-usage exhaustion marker. session/weekly_all block all automatic
+    // assignment; a lone weekly_scoped (Fable) window only refuses claude-fable-5.
+    const usageForWorker = getCachedUsage(w.configDir);
+    const exhausted = exhaustedWindows(usageForWorker, now);
+    const broad = exhausted.filter((win) => win.kind === 'session' || win.kind === 'weekly_all');
+    // Only the Fable-only weekly window. Filter kind explicitly: an exhausted
+    // window of any OTHER kind (possible only with corrupt cache data) is ignored
+    // for display, exactly as pickWorker ignores it — never mislabel it 'Weekly Fable'.
+    const scoped = exhausted.filter((win) => win.kind === 'weekly_scoped');
+    let exhaustedLine = '';
+    if (broad.length > 0) {
+      // An exhausted worker with overage billing enabled is NOT skipped: it bills
+      // money past the window and auto-assignment falls back to it when nothing
+      // else is free — say so instead of "skips this worker".
+      const tail = overageEnabled(usageForWorker)
+        ? '— overage billing is ON: dispatches will BILL real money instead of being blocked; ' +
+          'auto-assignment uses it only when no non-exhausted worker is available'
+        : '— automatic assignment skips this worker';
+      exhaustedLine = `\n  ⛔ quota exhausted: ${broad.map(formatExhaustedWindow).join(' · ')} ${tail}`;
+    } else if (scoped.length > 0) {
+      exhaustedLine = `\n  ⛔ Weekly Fable exhausted (resets ${formatRelativeReset(
+        scoped[0].resetsAt,
+      )}) — claude-fable-5 dispatches to this worker are refused`;
+    }
+    return `${line}\n  ${usageLine(w.configDir)}${exhaustedLine}`;
   });
   return [mainBlock, workerBlocks.join('\n')].filter(Boolean).join('\n\n') + guard + moneyFooter;
 }
@@ -795,7 +974,9 @@ const TASK_PROPERTIES = {
   worker: {
     type: 'string',
     description:
-      'Optional worker account name (see list_workers). Omit for automatic assignment with quota-aware failover.',
+      'Optional worker account name (see list_workers). Omit for automatic assignment with quota-aware ' +
+      'failover. Workers whose live plan usage shows an exhausted window (>=99% and not yet reset) are ' +
+      'skipped by automatic assignment and refused when named explicitly.',
   },
   system_prompt: {
     type: 'string',

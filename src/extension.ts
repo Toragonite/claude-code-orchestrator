@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
-import { WorkerManager } from './workerManager';
+import { configDirForName, dirHasLogin, WorkerManager } from './workerManager';
 import { TasksProvider, WorkersProvider } from './views';
 import {
   cancelRunningTask,
@@ -17,7 +17,7 @@ import {
 } from './registry';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
-import { refreshAllUsage } from './usage';
+import { refreshAllUsage, refreshAllUsageIfStale } from './usage';
 
 const MCP_SERVER_NAME = 'cco-dispatch';
 /** Pre-rename server key — removed from .mcp.json when re-registering. */
@@ -211,10 +211,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Live-usage cache: never block activation on a probe. Fire an initial
   // refresh, keep the cache warm on a timer, and let users refresh on demand.
-  // The tree/dashboard/MCP surfaces watch the cache file this writes.
-  void refreshAllUsage().catch(() => {});
+  // The tree/dashboard/MCP surfaces watch the cache file this writes. Both the
+  // activation refresh and the timer go through the stale-guarded variant so a
+  // second editor sharing the cache doesn't re-probe readings another window
+  // just took; only the explicit Refresh command below forces a real probe.
+  void refreshAllUsageIfStale().catch(() => {});
   const usageTimer = setInterval(() => {
-    void refreshAllUsage().catch(() => {});
+    void refreshAllUsageIfStale().catch(() => {});
   }, 5 * 60 * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(usageTimer) });
 
@@ -273,6 +276,24 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!model) {
         return;
       }
+      // The config dir is derived from the name and KEPT across renames, so a
+      // leftover ~/.claude-<name> from a since-renamed worker still holds a login.
+      // If that dir belongs to a REGISTERED worker, add() throws and the catch
+      // below surfaces it; this modal is only for an unregistered leftover login.
+      const dir = configDirForName(name.trim());
+      if (dirHasLogin(dir)) {
+        const proceed = await vscode.window.showWarningMessage(
+          `The config directory ${dir} already exists and contains a Claude login — possibly from a ` +
+            'worker that was later renamed (a worker keeps its original directory when renamed). Adding ' +
+            'this worker will reuse that existing login rather than start a fresh sign-in.',
+          { modal: true },
+          'Use Existing Login',
+          'Cancel',
+        );
+        if (proceed !== 'Use Existing Login') {
+          return;
+        }
+      }
       try {
         const worker = workers.add(name.trim(), model);
         const login = await vscode.window.showInformationMessage(
@@ -326,21 +347,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('claudeCodeOrchestrator.removeWorker', async (item?: { id?: string }) => {
-      let name = item?.id;
-      if (!name) {
-        const picked = await vscode.window.showQuickPick(
-          workers.list().map((w) => ({ label: w.name, description: w.configDir })),
-          { placeHolder: 'Worker to remove (its config directory and login stay on disk)' },
-        );
-        name = picked?.label;
-      }
-      if (name) {
-        workers.remove(name);
+    vscode.commands.registerCommand('claudeCodeOrchestrator.removeWorker', async (item?: unknown) => {
+      const worker = await resolveWorker(workers, item);
+      if (worker) {
+        workers.remove(worker.name);
       }
     }),
 
-    vscode.commands.registerCommand('claudeCodeOrchestrator.togglePreferred', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.togglePreferred', async (item?: unknown) => {
       const worker = await resolveWorker(workers, item);
       if (!worker) {
         return;
@@ -353,7 +367,7 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
 
-    vscode.commands.registerCommand('claudeCodeOrchestrator.renameWorker', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.renameWorker', async (item?: unknown) => {
       const worker = await resolveWorker(workers, item);
       if (!worker) {
         return;
@@ -385,14 +399,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('claudeCodeOrchestrator.loginWorker', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.loginWorker', async (item?: unknown) => {
       const worker = await resolveWorker(workers, item);
       if (worker) {
         workers.openTerminal(worker);
       }
     }),
 
-    vscode.commands.registerCommand('claudeCodeOrchestrator.openWorkerSession', async (item?: { id?: string }) => {
+    vscode.commands.registerCommand('claudeCodeOrchestrator.openWorkerSession', async (item?: unknown) => {
       const worker = await resolveWorker(workers, item);
       if (!worker) {
         return;
@@ -531,9 +545,20 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-async function resolveWorker(workers: WorkerManager, item?: { id?: string }) {
-  if (item?.id) {
-    return workers.get(item.id);
+/**
+ * Resolve which worker a command targets. VS Code passes the tree ELEMENT (a
+ * WorkerProfile, `{ name, configDir, model }`) to view/item/context commands,
+ * while the dashboard and programmatic callers pass `{ id }`. Resolve `id`
+ * first (a string), then the element's `name` (a string), and only fall back to
+ * a quick pick when neither is present (command palette / no argument).
+ */
+async function resolveWorker(workers: WorkerManager, item?: unknown) {
+  const rec = item as { id?: unknown; name?: unknown } | undefined;
+  if (rec && typeof rec.id === 'string') {
+    return workers.get(rec.id);
+  }
+  if (rec && typeof rec.name === 'string') {
+    return workers.get(rec.name);
   }
   const picked = await vscode.window.showQuickPick(
     workers.list().map((w) => ({ label: w.name, description: w.model })),

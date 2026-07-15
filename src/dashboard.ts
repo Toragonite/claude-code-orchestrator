@@ -33,6 +33,13 @@ interface UsageCard {
    * last-good reading, e.g. `6m ago`.
    */
   stale: { since: string } | null;
+  /**
+   * Set on an `ok` card only when it has NO windows yet has reported windows
+   * before (`lastGoodWindowsAt` is finite): upstream get_usage is intermittently
+   * returning no rate-limit data. The value is the age of that last good reading,
+   * e.g. `6m ago`. null when windows are present and on every other state.
+   */
+  tempUnavailableSince: string | null;
 }
 
 /**
@@ -76,6 +83,7 @@ function usageCards(now: number): UsageCard[] {
       windows: [],
       overage: null,
       stale: null,
+      tempUnavailableSince: null,
     };
     const u = getCachedUsage(configDir);
     if (!u) {
@@ -92,31 +100,39 @@ function usageCards(now: number): UsageCard[] {
     if (!u.available) {
       return { ...card, state: 'unavailable', message: NO_LIMITS_MESSAGE };
     }
+    // The cache file is external input: a truncated/hand-edited entry may lack
+    // windows, or carry null / non-object / malformed elements inside them.
+    const windows = (Array.isArray(u.windows) ? u.windows : [])
+      .filter((w) => typeof w === 'object' && w !== null)
+      .map((w) => {
+        const rec = w as unknown as Record<string, unknown>;
+        const percent =
+          typeof rec.percent === 'number' && isFinite(rec.percent)
+            ? Math.max(0, Math.min(100, rec.percent))
+            : 0;
+        const severity = typeof rec.severity === 'string' ? rec.severity : 'normal';
+        return {
+          label: typeof rec.label === 'string' ? rec.label : '',
+          percent,
+          severity,
+          elevated: isElevated(severity),
+          reset: formatRelativeReset(typeof rec.resetsAt === 'string' ? rec.resetsAt : null),
+        };
+      });
+    // No windows now but windows were seen before => upstream is intermittently
+    // returning no data. Distinct from an account that never reported windows.
+    const tempUnavailableSince =
+      windows.length === 0 && typeof u.lastGoodWindowsAt === 'number' && isFinite(u.lastGoodWindowsAt)
+        ? formatAge(u.lastGoodWindowsAt)
+        : null;
     return {
       ...card,
       state: 'ok',
       message: null,
       overage: parseOverage(u.extraUsage),
       stale: u.windowsStale === true ? { since: formatAge(u.windowsFetchedAt) } : null,
-      // The cache file is external input: a truncated/hand-edited entry may lack
-      // windows, or carry null / non-object / malformed elements inside them.
-      windows: (Array.isArray(u.windows) ? u.windows : [])
-        .filter((w) => typeof w === 'object' && w !== null)
-        .map((w) => {
-          const rec = w as unknown as Record<string, unknown>;
-          const percent =
-            typeof rec.percent === 'number' && isFinite(rec.percent)
-              ? Math.max(0, Math.min(100, rec.percent))
-              : 0;
-          const severity = typeof rec.severity === 'string' ? rec.severity : 'normal';
-          return {
-            label: typeof rec.label === 'string' ? rec.label : '',
-            percent,
-            severity,
-            elevated: isElevated(severity),
-            reset: formatRelativeReset(typeof rec.resetsAt === 'string' ? rec.resetsAt : null),
-          };
-        }),
+      tempUnavailableSince,
+      windows,
     };
   });
 }
@@ -541,12 +557,23 @@ export function dashboardHtml(): string {
       ' — upstream returned no data</p>';
   }
 
+  const TEMP_UNAVAIL_TIP =
+    'Plan usage is temporarily unavailable: upstream get_usage is intermittently returning no rate-limit ' +
+    'data for this account. This is transient — the values return automatically once upstream reports them again.';
+
   function usageCard(c) {
     const age = Number.isFinite(c.ageMinutes) ? 'updated ' + c.ageMinutes + 'm ago' : '';
     const plan = c.subscriptionType ? ' <span class="badge muted">' + esc(c.subscriptionType) + '</span>' : '';
     let body;
     if (c.state === 'ok') {
-      body = (c.windows.length ? c.windows.map(usageBar).join('') : '<p class="u-note">no rate-limit windows reported</p>') +
+      // No windows: distinguish the intermittent-upstream state (had windows before)
+      // from an account that never reported any.
+      const noWindows = c.tempUnavailableSince
+        ? '<p class="u-stale" title="' + esc(TEMP_UNAVAIL_TIP) +
+          '">⚠ plan usage temporarily unavailable — upstream returned no data (last ' +
+          esc(c.tempUnavailableSince) + ')</p>'
+        : '<p class="u-note">no rate-limit windows reported</p>';
+      body = (c.windows.length ? c.windows.map(usageBar).join('') : noWindows) +
         staleLine(c.stale) +
         overageLine(c.overage);
     } else {
@@ -612,7 +639,9 @@ export function dashboardHtml(): string {
       const ws = t.inWorkspace ? '' : ' <span class="badge muted">other ws</span>';
       const cancel = (t.status === 'running' && t.id)
         ? ' <button class="cancel-btn" data-cancel="' + esc(t.id) + '">Cancel</button>' : '';
-      return '<tr><td>' + icon + '</td><td class="title"><span class="task-link" data-file="' + esc(t.outputFile) + '">' +
+      const previewTitle = (typeof t.promptPreview === 'string' && t.promptPreview)
+        ? ' title="' + esc(t.promptPreview) + '"' : '';
+      return '<tr><td>' + icon + '</td><td class="title"><span class="task-link"' + previewTitle + ' data-file="' + esc(t.outputFile) + '">' +
         esc(t.title) + '</span>' + ws + '</td><td>' + esc(t.worker) + '</td><td>' + esc(t.model) +
         '</td><td>' + tokens + '</td><td class="muted">' + new Date(t.ts).toLocaleTimeString() + cancel + '</td></tr>';
     }).join('') || '<tr><td colspan="6" class="muted">no dispatched tasks yet</td></tr>';

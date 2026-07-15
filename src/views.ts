@@ -94,6 +94,23 @@ function safeWindows(usage: AccountUsage): SafeWindow[] {
   return windows;
 }
 
+/**
+ * The "temporarily unavailable" plan-usage state: the account HAS reported
+ * windows before (`lastGoodWindowsAt` is finite) but the latest reading is an
+ * available, error-free response with no windows — upstream get_usage is
+ * intermittently returning no rate-limit data. Distinct from the never-had-data
+ * NO_WINDOWS state, where `lastGoodWindowsAt` is absent.
+ */
+function isTempUnavailable(usage: AccountUsage): boolean {
+  return (
+    usage.available === true &&
+    usage.error === undefined &&
+    safeWindows(usage).length === 0 &&
+    typeof usage.lastGoodWindowsAt === 'number' &&
+    isFinite(usage.lastGoodWindowsAt)
+  );
+}
+
 /** A normalized overage-billing reading, every field guaranteed well-typed. */
 interface SafeExtra {
   enabled: boolean;
@@ -137,7 +154,9 @@ function usageSummary(usage: AccountUsage | undefined): string {
   }
   const windows = safeWindows(usage);
   if (windows.length === 0) {
-    return NO_WINDOWS_MESSAGE;
+    return isTempUnavailable(usage)
+      ? `plan usage unavailable (last ${formatAge(usage.lastGoodWindowsAt)})`
+      : NO_WINDOWS_MESSAGE;
   }
   return windows
     .map((w) => {
@@ -169,7 +188,15 @@ function appendUsageTooltip(md: vscode.MarkdownString, usage: AccountUsage | und
   }
   const windows = safeWindows(usage);
   if (windows.length === 0) {
-    md.appendMarkdown(`Plan quota — ${NO_WINDOWS_MESSAGE}`);
+    if (isTempUnavailable(usage)) {
+      md.appendMarkdown(
+        `Plan quota — temporarily unavailable: upstream returned no data. Last good reading ${formatAge(
+          usage.lastGoodWindowsAt,
+        )}.`,
+      );
+    } else {
+      md.appendMarkdown(`Plan quota — ${NO_WINDOWS_MESSAGE}`);
+    }
     return;
   }
   md.appendMarkdown('**Plan quota — ');
@@ -382,6 +409,21 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     }
     const windows = safeWindows(usage);
     if (windows.length === 0) {
+      if (isTempUnavailable(usage)) {
+        rows.push({
+          kind: 'stat',
+          worker: worker.name,
+          label: 'Plan quota',
+          description: `temporarily unavailable — last good reading ${formatAge(usage.lastGoodWindowsAt)}`,
+          icon: 'warning',
+          tooltip:
+            'get_usage is intermittently returning no rate-limit data for this account — a known ' +
+            `upstream flakiness. The last good reading was ${formatAge(usage.lastGoodWindowsAt)}. This is ` +
+            "unrelated to the account having no plan (that state reads 'no plan limits'); the numbers " +
+            'return on their own once upstream reports windows again.',
+        });
+        return;
+      }
       rows.push({
         kind: 'stat',
         worker: worker.name,
@@ -488,7 +530,27 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
         : 'error';
 
     item.description = `${event.worker} · ${event.model} · ${errKind ?? event.status}`;
-    item.tooltip = event.error ?? undefined;
+    // Prompt and error text are untrusted (account-derived): build the tooltip
+    // with appendText, which escapes markdown metacharacters. Undefined when
+    // there is nothing to show, as before.
+    const preview = typeof event.promptPreview === 'string' ? event.promptPreview : '';
+    if (preview || event.error) {
+      const tip = new vscode.MarkdownString();
+      if (preview) {
+        tip.appendMarkdown('**Prompt** ');
+        tip.appendText(preview);
+      }
+      if (event.error) {
+        if (preview) {
+          tip.appendMarkdown('\n\n');
+        }
+        tip.appendMarkdown('**Error**\n\n');
+        tip.appendText(event.error);
+      }
+      item.tooltip = tip;
+    } else {
+      item.tooltip = undefined;
+    }
     item.iconPath = new vscode.ThemeIcon(
       event.status === 'running'
         ? 'sync~spin'
