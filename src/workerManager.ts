@@ -2,13 +2,16 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import {
   applyFrontierGuard,
   applyOverageGuard,
+  clampTimeoutMinutes,
   findWorkerByConfigDir,
   readRegistry,
   renameWorker,
   resolveClaudePathPreserving,
+  TIMEOUT_MINUTES_DEFAULT,
   writeRegistry,
   WorkerModel,
   WorkerProfile,
@@ -78,7 +81,7 @@ export class WorkerManager {
       throw new Error('"main" is reserved for the orchestrator session\'s own account.');
     }
     if (registry.workers.some((w) => w.name === name)) {
-      throw new Error(`A worker named "${name}" already exists.`);
+      throw new Error(vscode.l10n.t('A worker named "{0}" already exists.', name));
     }
     const dir = configDir ?? configDirForName(name);
     // A worker keeps its original directory when renamed, so a previously-used
@@ -163,6 +166,9 @@ export class WorkerManager {
       registry.claudePath,
     );
     registry.cooldownMinutes = cfg.get<number>('quotaCooldownMinutes', 30);
+    registry.workerTimeoutMinutes = clampTimeoutMinutes(
+      cfg.get<number>('workerTimeoutMinutes', TIMEOUT_MINUTES_DEFAULT),
+    );
     // Billing guards: reconcile across editors that share this registry. Use
     // inspect() (not get()) so an editor where the setting is UNSET is
     // distinguished from one that explicitly chose the default — an unset editor

@@ -1,9 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import { ChildProcess, spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import {
   appendTaskEvent,
+  clampTimeoutMinutes,
   emptyStats,
   ensureDirs,
   readRegistry,
@@ -11,6 +12,7 @@ import {
   recordOrchestrator,
   Registry,
   runningCounts,
+  touchOrchestrator,
   TASKS_DIR,
   TaskEvent,
   WORKER_MODELS,
@@ -51,18 +53,40 @@ import {
  * over to another eligible worker. With a single worker there is nothing to
  * fail over to — the error is surfaced immediately.
  *
+ * Timeouts: each run gets a wall-clock limit — the task's timeout_minutes, else
+ * the operator's workerTimeoutMinutes registry setting (45). Hitting it is a
+ * plain failure, not a quota failure: no cooldown, no failover onto a second
+ * worker that would burn the same wall clock on the same too-large task.
+ *
  * The wire protocol is newline-delimited JSON-RPC (MCP stdio transport),
  * implemented directly to keep the server dependency-free.
  */
 
 const SERVER_INFO = { name: 'cco-dispatch', version: '0.4.0' };
-const WORKER_TIMEOUT_MS = 30 * 60 * 1000;
 /** Grace between SIGTERM and SIGKILL when cancelling a single request's workers. */
 const KILL_GRACE_MS = 3000;
 /** Grace between SIGTERM and SIGKILL while the whole server is going down. */
 const SHUTDOWN_GRACE_MS = 2500;
 const CANCELLED_ERROR = 'cancelled by the orchestrator session';
 const SHUTDOWN_REASON = 'cancelled — orchestrator session ended';
+/** How long a timed-out worker gets to honor SIGTERM before it is SIGKILLed. */
+const TIMEOUT_KILL_GRACE_MS = 10_000;
+/**
+ * After 'exit' fires, how long we wait for 'close' before settling anyway.
+ * 'exit' means the process is dead; any stdout still buffered in flight is
+ * delivered within a few milliseconds because nothing more can be written.
+ * If a grandchild inherited the stdout pipe, 'close' never fires — this drain
+ * is what turns that hang into a settle.
+ */
+const DRAIN_GRACE_MS = 250;
+/**
+ * Last-resort settle on the timeout path: even 'exit' can be delayed if the
+ * child is wedged uninterruptibly. Armed after SIGKILL; if it fires we settle
+ * regardless of process state, so a dispatch is always guaranteed to return.
+ */
+const REAP_GRACE_MS = 5_000;
+/** Per-stream cap on the partial output attached to a timeout error. */
+const TIMEOUT_TAIL_CHARS = 2000;
 
 let rrIndex = 0;
 
@@ -307,6 +331,8 @@ interface DispatchArgs {
   system_prompt?: string;
   /** Escalate the worker to maximum reasoning depth via the thinking keyword. */
   ultrathink?: boolean;
+  /** Per-task wall-clock limit; falls back to registry.workerTimeoutMinutes. */
+  timeout_minutes?: number;
 }
 
 interface BatchArgs {
@@ -324,6 +350,60 @@ function isQuotaError(message: string): boolean {
   return /quota|usage limit|rate.?limit|limit (reached|exceeded)|too many requests|overloaded|429|529/i.test(
     message,
   );
+}
+
+/**
+ * A run that hit its wall-clock limit. Carried as a distinct type because a
+ * timeout message embeds the worker's own stdout, which may itself talk about
+ * quotas or contain the digits 429/529 — classifying it by regex would put a
+ * healthy worker on a cooldown and fail the task over to another one, which
+ * would then burn the same wall clock on the same too-large task.
+ */
+class WorkerTimeoutError extends Error {}
+
+/**
+ * Signal a child, tolerating one that has already exited (kill() on a reaped
+ * pid can throw). Deliberately not guarded on `child.killed`: that flag is set
+ * by the SIGTERM we just sent, so it would suppress the SIGKILL escalation.
+ * On Windows every signal maps to TerminateProcess, so the escalation is a
+ * harmless no-op there.
+ */
+function killWorker(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // already gone
+  }
+}
+
+function streamSection(label: string, text: string): string {
+  if (!text) {
+    return `--- ${label} was empty ---`;
+  }
+  return text.length > TIMEOUT_TAIL_CHARS
+    ? `--- last ${TIMEOUT_TAIL_CHARS} chars of ${label} ---\n${text.slice(-TIMEOUT_TAIL_CHARS)}`
+    : `--- ${label} (${text.length} chars) ---\n${text}`;
+}
+
+/**
+ * The leading prose is deliberately longer than 300 characters and carries no
+ * captured output: recordFailure() slices lastError to 300 chars for the tree
+ * view and dashboard, and that slice has to be the human-readable part.
+ */
+function timeoutMessage(minutes: number, stdout: string, stderr: string): string {
+  const header =
+    `Worker timed out after ${minutes} minutes and was terminated. ` +
+    'Whatever it had not yet written to disk is gone, but it may already have written files to ' +
+    'the workspace, so inspect the working tree before re-dispatching. If the task legitimately ' +
+    'needs longer, re-dispatch it with a larger timeout_minutes. Captured before the kill: ' +
+    `${stdout.length} chars of stdout, ${stderr.length} chars of stderr.`;
+  if (!stdout && !stderr) {
+    return `${header}\n\nThe worker wrote nothing to stdout or stderr before it was terminated.`;
+  }
+  return `${header}\n\n${streamSection('stdout', stdout)}\n${streamSection('stderr', stderr)}`;
 }
 
 /** '<label> <percent>% (resets <when>)' for a quota-exhausted window — error text and list_workers. */
@@ -907,6 +987,7 @@ function runClaude(
   configDir: string,
   model: string,
   prompt: string,
+  timeoutMinutes: number,
   systemPrompt?: string,
   onSpawn?: (child: ChildProcess) => void,
 ): Promise<RunResult> {
@@ -938,47 +1019,131 @@ function runClaude(
     onSpawn?.(child);
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => {
-      signalTree(child, 'SIGTERM');
-      reject(new Error(`Worker timed out after ${WORKER_TIMEOUT_MS / 60000} minutes.`));
-    }, WORKER_TIMEOUT_MS);
+    let timedOut = false;
+    // Exit status captured by the 'exit' handler. The drain and reap timers
+    // settle after 'exit' has fired (or, for reap, may fire before it), so they
+    // rely on this rather than the 'close' event's code — 'close' may never come.
+    let exitCode: number | null = null;
+    // All timers are cleared by finish(); declared before it so the closure can
+    // reach them. clearTimeout(undefined) is a legal no-op, so unarmed ones are
+    // safe to clear.
+    let timer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let reapTimer: NodeJS.Timeout | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
+
+    // Single settle gate. Every resolve()/reject() in this Promise passes
+    // through finish, so the Promise settles exactly once: the first caller
+    // wins and every later one (a drain timer firing after 'close', a reap
+    // timer firing after 'exit', etc.) is a guarded no-op. This is the guard
+    // that makes double-settle impossible.
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      clearTimeout(reapTimer);
+      clearTimeout(drainTimer);
+      fn();
+    };
+
+    interface CliResult {
+      result?: string;
+      is_error?: boolean;
+      subtype?: string;
+      total_cost_usd?: number;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    }
+
+    // The one place resolution/rejection is built, shared verbatim by the
+    // 'close' handler and the drain/reap timers so the two paths can never
+    // diverge. `forced` is true when 'close' did NOT fire (drain- or reap-timer
+    // path): the stdio streams are still open, so we destroy them and unref the
+    // child, otherwise a grandchild-held pipe keeps the Node event loop — and
+    // thus the MCP server — alive after we have already settled.
+    const settle = (code: number | null, forced: boolean): void => {
+      finish(() => {
+        if (forced) {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.stdin?.destroy();
+          child.unref();
+        }
+        if (timedOut) {
+          // Before the exit-code check: a SIGKILLed child reports code null,
+          // so a killed worker must produce the timeout message, not
+          // "exited with code null".
+          reject(new WorkerTimeoutError(timeoutMessage(timeoutMinutes, stdout, stderr)));
+          return;
+        }
+        let parsed: CliResult | undefined;
+        try {
+          parsed = JSON.parse(stdout) as CliResult;
+        } catch {
+          // non-JSON output — handled below
+        }
+        const usage = {
+          inputTokens: parsed?.usage?.input_tokens ?? 0,
+          outputTokens: parsed?.usage?.output_tokens ?? 0,
+          costUsd: parsed?.total_cost_usd ?? 0,
+        };
+        if (code !== 0) {
+          reject(new Error(`Worker exited with code ${code}: ${(stderr || stdout).slice(0, 2000)}`));
+          return;
+        }
+        if (parsed?.is_error) {
+          reject(new Error(`Worker error (${parsed.subtype ?? 'unknown'}): ${parsed.result ?? ''}`.slice(0, 2000)));
+          return;
+        }
+        resolve({ text: parsed?.result ?? stdout.trim(), ...usage });
+      });
+    };
+
+    // The timeout never settles the Promise directly: it kills the child and
+    // lets 'close' / 'exit' build the rejection so the stdout accumulated up to
+    // the kill reaches the error message. Timeout path bound: fire at N min →
+    // SIGTERM → (10 s KILL_GRACE) SIGKILL → (5 s REAP_GRACE) forced settle, so
+    // a timed-out dispatch returns at most 15 s after its deadline.
+    timer = setTimeout(
+      () => {
+        timedOut = true;
+        killWorker(child, 'SIGTERM');
+        // A CLI that ignores or is slow to handle SIGTERM would otherwise
+        // survive as an orphan while this server has moved on.
+        killTimer = setTimeout(() => {
+          killWorker(child, 'SIGKILL');
+          // Last-resort guarantee: if neither 'close' nor 'exit' settles us
+          // (e.g. the child is wedged uninterruptibly), force the timeout
+          // rejection so the dispatch always returns.
+          reapTimer = setTimeout(() => settle(exitCode, true), REAP_GRACE_MS);
+        }, TIMEOUT_KILL_GRACE_MS);
+      },
+      // clamped upstream, so always inside setTimeout's 32-bit delay range
+      timeoutMinutes * 60_000,
+    );
 
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
     child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`Failed to start "${claudePath}": ${err.message}`));
+      finish(() => reject(new Error(`Failed to start "${claudePath}": ${err.message}`)));
     });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      interface CliResult {
-        result?: string;
-        is_error?: boolean;
-        subtype?: string;
-        total_cost_usd?: number;
-        usage?: { input_tokens?: number; output_tokens?: number };
-      }
-      let parsed: CliResult | undefined;
-      try {
-        parsed = JSON.parse(stdout) as CliResult;
-      } catch {
-        // non-JSON output — handled below
-      }
-      const usage = {
-        inputTokens: parsed?.usage?.input_tokens ?? 0,
-        outputTokens: parsed?.usage?.output_tokens ?? 0,
-        costUsd: parsed?.total_cost_usd ?? 0,
-      };
-      if (code !== 0) {
-        reject(new Error(`Worker exited with code ${code}: ${(stderr || stdout).slice(0, 2000)}`));
-        return;
-      }
-      if (parsed?.is_error) {
-        reject(new Error(`Worker error (${parsed.subtype ?? 'unknown'}): ${parsed.result ?? ''}`.slice(0, 2000)));
-        return;
-      }
-      resolve({ text: parsed?.result ?? stdout.trim(), ...usage });
+    // 'exit' fires when the process itself dies, regardless of who still holds
+    // its stdio pipes. It is the event that actually tells us the worker is
+    // gone. 'close' is preferred (below) because it guarantees stdout is
+    // complete, but a grandchild that inherited the stdout pipe can hold it
+    // open forever, so 'close' may never arrive. Arm a short drain: if 'close'
+    // beats it, finish's guard makes this a no-op; if not, we settle with
+    // whatever stdout accumulated.
+    child.on('exit', (code) => {
+      exitCode = code;
+      drainTimer = setTimeout(() => settle(exitCode, true), DRAIN_GRACE_MS);
     });
+    // Preferred settle path: every stdio stream has reached EOF, so stdout is
+    // complete and the normal (non-timeout) JSON parse sees the whole result.
+    child.on('close', (code) => settle(code, false));
     // Prompt goes over stdin to avoid shell-quoting issues.
     child.stdin.write(prompt);
     child.stdin.end();
@@ -997,6 +1162,8 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
   if (!prompt) {
     throw new Error('dispatch_task requires a non-empty "prompt".');
   }
+
+  const timeoutMinutes = clampTimeoutMinutes(args.timeout_minutes ?? registry.workerTimeoutMinutes);
 
   ensureDirs();
   const id = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -1098,6 +1265,7 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
           worker.configDir,
           model,
           workerPrompt,
+          timeoutMinutes,
           systemPrompt || undefined,
           (child) => {
             registerChild(id, child);
@@ -1152,7 +1320,8 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
           break;
         }
         const message = err instanceof Error ? err.message : String(err);
-        const quota = isQuotaError(message);
+        // A timeout is never a quota error, whatever its embedded partial output says.
+        const quota = !(err instanceof WorkerTimeoutError) && isQuotaError(message);
         recordFailure(worker.name, message, quota, registry.cooldownMinutes);
         lastError = err as Error;
         if (!quota) {
@@ -1176,7 +1345,7 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
 
     const message = lastError?.message ?? 'unknown error';
     const singleWorkerHint =
-      registry.workers.length === 1 && isQuotaError(message)
+      registry.workers.length === 1 && !(lastError instanceof WorkerTimeoutError) && isQuotaError(message)
         ? ' Only one worker account is registered, so there is nothing to fail over to — wait for its limit to reset or add another worker account.'
         : '';
     fs.writeFileSync(
@@ -1463,6 +1632,13 @@ const TASK_PROPERTIES = {
       'implementation, subtle debugging, and adversarial reviews; leave unset for routine tasks ' +
       '(it spends substantially more thinking tokens).',
   },
+  timeout_minutes: {
+    type: 'number',
+    description:
+      "Optional per-task wall-clock limit in minutes (1–480). Defaults to the operator's " +
+      'workerTimeoutMinutes setting (45). Raise it for long implementation or adversarial-review ' +
+      'dispatches; a worker killed by this limit loses whatever it had not yet written to disk.',
+  },
 };
 
 const TOOLS = [
@@ -1609,6 +1785,14 @@ async function handleRequest(msg: {
     case 'tools/call': {
       const name = params?.name as string;
       const args = (params?.arguments ?? {}) as DispatchArgs & BatchArgs;
+      // Only the workspace's main session talks to this server, so any tool
+      // call proves it is alive — surfaces activity in the dashboard even
+      // before the session has (re-)briefed.
+      try {
+        touchOrchestrator(process.cwd());
+      } catch {
+        // best-effort liveness marker only
+      }
       // Only a string/number id can be named by notifications/cancelled.
       const reqId: string | number | null = typeof id === 'string' || typeof id === 'number' ? id : null;
       pending++;
@@ -1678,7 +1862,7 @@ function main(): void {
   rl.on('close', () => {
     // stdin EOF means the client is gone: nobody will ever read our responses,
     // so there is nothing to drain. Waiting for `pending` here is what let
-    // workers orphan and burn quota for the full WORKER_TIMEOUT_MS.
+    // workers orphan and burn quota for the full worker timeout window.
     stdinClosed = true;
     shutdown(SHUTDOWN_REASON);
   });

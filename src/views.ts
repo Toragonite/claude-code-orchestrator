@@ -322,14 +322,19 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     rows.push({
       kind: 'stat',
       worker: worker.name,
-      label: 'Status',
+      label: vscode.l10n.t('Status'),
       description: coolingDown
-        ? `cooling down until ${new Date(stats!.cooldownUntil!).toLocaleTimeString()} (quota error)`
-        : 'available',
+        ? vscode.l10n.t(
+            'cooling down until {0} (quota error)',
+            new Date(stats!.cooldownUntil!).toLocaleTimeString(),
+          )
+        : vscode.l10n.t('available'),
       icon: coolingDown ? 'debug-pause' : 'check',
       tooltip: coolingDown
-        ? 'Skipped by automatic assignment until the cooldown ends. Dispatches naming this worker explicitly still run.'
-        : 'Eligible for automatic assignment.',
+        ? vscode.l10n.t(
+            'Skipped by automatic assignment until the cooldown ends. Dispatches naming this worker explicitly still run.',
+          )
+        : vscode.l10n.t('Eligible for automatic assignment.'),
     });
     this.pushPlanQuotaRows(rows, worker);
     rows.push({
@@ -338,8 +343,13 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       label: 'Dispatch · Session (5h)',
       description:
         session.tasks === 0
-          ? 'no dispatches'
-          : `${session.tasks} tasks · ${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out`,
+          ? vscode.l10n.t('no dispatches')
+          : vscode.l10n.t(
+              '{0} tasks · {1} in / {2} out',
+              session.tasks,
+              fmtTokens(session.inputTokens),
+              fmtTokens(session.outputTokens),
+            ),
       icon: 'history',
       tooltip:
         'Dispatches sent by this extension in the last 5 hours. Counts only this extension\'s ' +
@@ -351,8 +361,13 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       label: 'Dispatch · Weekly (7d)',
       description:
         week.tasks === 0
-          ? 'no dispatches'
-          : `${week.tasks} tasks · ${fmtTokens(week.inputTokens)} in / ${fmtTokens(week.outputTokens)} out`,
+          ? vscode.l10n.t('no dispatches')
+          : vscode.l10n.t(
+              '{0} tasks · {1} in / {2} out',
+              week.tasks,
+              fmtTokens(week.inputTokens),
+              fmtTokens(week.outputTokens),
+            ),
       icon: 'calendar',
       tooltip:
         'Dispatches sent by this extension in the last 7 days. Counts only this extension\'s ' +
@@ -375,8 +390,10 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       rows.push({
         kind: 'stat',
         worker: worker.name,
-        label: 'Errors',
-        description: `${stats.errors}${stats.lastError ? ` · last: ${stats.lastError.slice(0, 60)}` : ''}`,
+        label: vscode.l10n.t('Errors'),
+        description: stats.lastError
+          ? vscode.l10n.t('{0} · last: {1}', stats.errors, stats.lastError.slice(0, 60))
+          : String(stats.errors),
         icon: 'warning',
         tooltip: stats.lastError,
       });
@@ -598,7 +615,7 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
     );
     item.command = {
       command: 'claudeCodeOrchestrator.showTaskOutput',
-      title: 'Show Task Output',
+      title: vscode.l10n.t('Show Task Output'),
       arguments: [event.outputFile],
     };
     return item;

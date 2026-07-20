@@ -1,8 +1,8 @@
 {
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
-  "description": "Run Claude Code across multiple accounts in parallel. Your main session designs and verifies while worker accounts (Opus/Sonnet) implement via MCP dispatch tools — with quota-aware failover and per-account usage tracking. Unofficial.",
-  "version": "1.2.1",
+  "description": "%extension.description%",
+  "version": "1.3.0",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -50,6 +50,7 @@
     "Other"
   ],
   "main": "./out/extension.js",
+  "l10n": "./l10n",
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -58,7 +59,7 @@
       "activitybar": [
         {
           "id": "claudeCodeOrchestrator",
-          "title": "Claude Code Orchestrator",
+          "title": "%viewsContainer.title%",
           "icon": "$(organization)"
         }
       ]
@@ -67,12 +68,12 @@
       "claudeCodeOrchestrator": [
         {
           "id": "claudeCodeOrchestrator.workers",
-          "name": "Worker Accounts",
+          "name": "%view.workers.name%",
           "icon": "$(server-process)"
         },
         {
           "id": "claudeCodeOrchestrator.tasks",
-          "name": "Dispatched Tasks",
+          "name": "%view.tasks.name%",
           "icon": "$(checklist)"
         }
       ]
@@ -80,20 +81,20 @@
     "commands": [
       {
         "command": "claudeCodeOrchestrator.addWorker",
-        "title": "Add Worker Account",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.addWorker.title%",
+        "category": "%command.category%",
         "icon": "$(add)"
       },
       {
         "command": "claudeCodeOrchestrator.importWorkers",
-        "title": "Import Existing Claude Config Directories",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.importWorkers.title%",
+        "category": "%command.category%",
         "icon": "$(cloud-download)"
       },
       {
         "command": "claudeCodeOrchestrator.removeWorker",
-        "title": "Remove Worker Account",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.removeWorker.title%",
+        "category": "%command.category%",
         "icon": "$(trash)"
       },
       {
@@ -104,8 +105,8 @@
       },
       {
         "command": "claudeCodeOrchestrator.loginWorker",
-        "title": "Re-login Worker Account (opens terminal to sign in)",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.loginWorker.title%",
+        "category": "%command.category%",
         "icon": "$(sign-in)"
       },
       {
@@ -116,25 +117,25 @@
       },
       {
         "command": "claudeCodeOrchestrator.openWorkerSession",
-        "title": "Open Worker Session in Terminal (watch & steer this account)",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.openWorkerSession.title%",
+        "category": "%command.category%",
         "icon": "$(terminal)"
       },
       {
         "command": "claudeCodeOrchestrator.installMcp",
-        "title": "Register Dispatch MCP Server in This Workspace",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.installMcp.title%",
+        "category": "%command.category%",
         "icon": "$(plug)"
       },
       {
         "command": "claudeCodeOrchestrator.showTaskOutput",
-        "title": "Show Task Output",
+        "title": "%command.showTaskOutput.title%",
         "category": "Claude Code Orchestrator"
       },
       {
         "command": "claudeCodeOrchestrator.clearTasks",
-        "title": "Clear Task History",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.clearTasks.title%",
+        "category": "%command.category%",
         "icon": "$(clear-all)"
       },
       {
@@ -151,26 +152,26 @@
       },
       {
         "command": "claudeCodeOrchestrator.togglePreferred",
-        "title": "Toggle Preferred Worker (same account as main — favored when idle)",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.togglePreferred.title%",
+        "category": "%command.category%",
         "icon": "$(star)"
       },
       {
         "command": "claudeCodeOrchestrator.toggleTaskScope",
-        "title": "Toggle Task Scope (This Workspace / All)",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.toggleTaskScope.title%",
+        "category": "%command.category%",
         "icon": "$(filter)"
       },
       {
         "command": "claudeCodeOrchestrator.openDashboard",
-        "title": "Open Orchestrator Dashboard",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.openDashboard.title%",
+        "category": "%command.category%",
         "icon": "$(dashboard)"
       },
       {
         "command": "claudeCodeOrchestrator.addDispatchPolicy",
-        "title": "Add Dispatch Policy to CLAUDE.md",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.addDispatchPolicy.title%",
+        "category": "%command.category%",
         "icon": "$(book)"
       },
       {
@@ -178,6 +179,30 @@
         "title": "Refresh Account Usage",
         "category": "Claude Code Orchestrator",
         "icon": "$(sync)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.openAssetManager",
+        "title": "%command.openAssetManager.title%",
+        "category": "%command.category%",
+        "icon": "$(library)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.manageAssets",
+        "title": "%command.manageAssets.title%",
+        "category": "%command.category%",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.syncAssets",
+        "title": "%command.syncAssets.title%",
+        "category": "%command.category%",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.resetAsset",
+        "title": "%command.resetAsset.title%",
+        "category": "%command.category%",
+        "icon": "$(discard)"
       }
     ],
     "menus": {
@@ -206,6 +231,11 @@
           "command": "claudeCodeOrchestrator.refreshUsage",
           "when": "view == claudeCodeOrchestrator.workers",
           "group": "navigation@4"
+        },
+        {
+          "command": "claudeCodeOrchestrator.openAssetManager",
+          "when": "view == claudeCodeOrchestrator.workers",
+          "group": "navigation@5"
         },
         {
           "command": "claudeCodeOrchestrator.cancelAllTasks",
@@ -269,13 +299,13 @@
     "walkthroughs": [
       {
         "id": "claudeCodeOrchestrator.gettingStarted",
-        "title": "Multi-account dispatch for Claude Code",
-        "description": "Fan work out from your Claude Code panel to worker Claude accounts running Opus/Sonnet.",
+        "title": "%walkthrough.title%",
+        "description": "%walkthrough.description%",
         "steps": [
           {
             "id": "addWorker",
-            "title": "Add a worker account",
-            "description": "Create a config directory for another Claude account and sign in once.\n[Add Worker Account](command:claudeCodeOrchestrator.addWorker)\n[Import Existing Directories](command:claudeCodeOrchestrator.importWorkers)",
+            "title": "%walkthrough.step.addWorker.title%",
+            "description": "%walkthrough.step.addWorker.description%",
             "media": {
               "markdown": "media/walkthrough/add-worker.md"
             },
@@ -286,8 +316,8 @@
           },
           {
             "id": "registerMcp",
-            "title": "Register the dispatch MCP server",
-            "description": "Give your Claude Code session the dispatch_task tool in this workspace.\n[Register MCP Server](command:claudeCodeOrchestrator.installMcp)",
+            "title": "%walkthrough.step.registerMcp.title%",
+            "description": "%walkthrough.step.registerMcp.description%",
             "media": {
               "markdown": "media/walkthrough/register-mcp.md"
             },
@@ -297,8 +327,8 @@
           },
           {
             "id": "useDispatch",
-            "title": "Dispatch from your Claude Code panel",
-            "description": "Restart the Claude Code session, approve the MCP server, and ask it to fan out work.",
+            "title": "%walkthrough.step.useDispatch.title%",
+            "description": "%walkthrough.step.useDispatch.description%",
             "media": {
               "markdown": "media/walkthrough/use-dispatch.md"
             }
@@ -307,7 +337,7 @@
       }
     ],
     "configuration": {
-      "title": "Claude Code Orchestrator",
+      "title": "%configuration.title%",
       "properties": {
         "claudeCodeOrchestrator.workerPermissionMode": {
           "type": "string",
@@ -318,17 +348,37 @@
             "plan",
             "bypassPermissions"
           ],
-          "description": "--permission-mode for dispatched (background) worker sessions. Background workers cannot answer permission prompts, so 'default' will stall on any edit."
+          "description": "%config.workerPermissionMode.description%"
         },
         "claudeCodeOrchestrator.claudePath": {
           "type": "string",
           "default": "claude",
-          "description": "Path to the Claude Code CLI executable."
+          "description": "%config.claudePath.description%"
         },
         "claudeCodeOrchestrator.quotaCooldownMinutes": {
           "type": "number",
           "default": 30,
-          "description": "Minutes a worker account sits out after a quota/rate-limit error before dispatches are routed to it again."
+          "description": "%config.quotaCooldownMinutes.description%"
+        },
+        "claudeCodeOrchestrator.workerTimeoutMinutes": {
+          "type": "number",
+          "default": 45,
+          "minimum": 1,
+          "maximum": 480,
+          "description": "%config.workerTimeoutMinutes.description%"
+        },
+        "claudeCodeOrchestrator.assetPacks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%config.assetPacks.description%"
+        },
+        "claudeCodeOrchestrator.assetAutoSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.assetAutoSync.description%"
         },
         "claudeCodeOrchestrator.frontierWorkerDispatch": {
           "type": "string",

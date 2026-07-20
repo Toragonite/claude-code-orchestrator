@@ -38,6 +38,8 @@ export interface Registry {
   claudePath: string;
   /** Minutes a worker sits out after a quota/rate-limit error. */
   cooldownMinutes: number;
+  /** Minutes a dispatched worker may run before it is terminated. */
+  workerTimeoutMinutes: number;
   /**
    * Billing guard over WHICH MODEL may be dispatched: 'block' rejects dispatches
    * of the frontier model (claude-fable-5) at the server with a fall-back hint.
@@ -141,6 +143,8 @@ export const ORCHESTRATORS_FILE = path.join(ROOT_DIR, 'orchestrators.json');
 export interface OrchestratorCheckin {
   model: string;
   ts: number;
+  /** Last MCP tool call from this workspace's main session (any tool). */
+  lastSeen?: number;
 }
 
 export type OrchestratorsFile = Record<string, OrchestratorCheckin>;
@@ -156,8 +160,58 @@ export function readOrchestrators(): OrchestratorsFile {
 export function recordOrchestrator(cwd: string, model: string): void {
   ensureDirs();
   const all = readOrchestrators();
-  all[cwd] = { model, ts: Date.now() };
+  const now = Date.now();
+  all[cwd] = { model, ts: now, lastSeen: now };
   fs.writeFileSync(ORCHESTRATORS_FILE, JSON.stringify(all, null, 2));
+}
+
+/**
+ * Mark the workspace's main session alive on any dispatch-server tool call.
+ * Keeps the dashboard's session indicator fresh even before the session has
+ * (re-)briefed — e.g. right after the main account was switched.
+ */
+export function touchOrchestrator(cwd: string): void {
+  ensureDirs();
+  const all = readOrchestrators();
+  const entry = all[cwd] ?? { model: '', ts: 0 };
+  entry.lastSeen = Date.now();
+  all[cwd] = entry;
+  fs.writeFileSync(ORCHESTRATORS_FILE, JSON.stringify(all, null, 2));
+}
+
+/** Drop a workspace's check-in (dashboard reset after switching accounts). */
+export function clearOrchestrator(cwd: string): void {
+  ensureDirs();
+  const all = readOrchestrators();
+  delete all[cwd];
+  fs.writeFileSync(ORCHESTRATORS_FILE, JSON.stringify(all, null, 2));
+}
+
+/** Range and default of claudeCodeOrchestrator.workerTimeoutMinutes in package.json. */
+export const TIMEOUT_MINUTES_MIN = 1;
+export const TIMEOUT_MINUTES_MAX = 480;
+export const TIMEOUT_MINUTES_DEFAULT = 45;
+
+/**
+ * Clamp to the range package.json declares; input that is not a number falls
+ * back to the default. Both the extension host (writing the registry) and the
+ * dispatch server (reading it) go through this, so a hand-edited registry.json
+ * can neither produce an instantly-expiring timer (0, -5) nor a delay above
+ * setTimeout's 32-bit ceiling, where Node silently coerces the overflow to 1 ms
+ * and the "long" timeout fires immediately.
+ */
+export function clampTimeoutMinutes(value: unknown): number {
+  const raw =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : NaN;
+  if (Number.isNaN(raw)) {
+    return TIMEOUT_MINUTES_DEFAULT;
+  }
+  // Math.round (not trunc) so 44.6 → 45; ±Infinity survives to the clamp.
+  return Math.min(TIMEOUT_MINUTES_MAX, Math.max(TIMEOUT_MINUTES_MIN, Math.round(raw)));
 }
 
 const DEFAULTS: Registry = {
@@ -165,6 +219,7 @@ const DEFAULTS: Registry = {
   permissionMode: 'acceptEdits',
   claudePath: 'claude',
   cooldownMinutes: 30,
+  workerTimeoutMinutes: TIMEOUT_MINUTES_DEFAULT,
   frontierWorkerDispatch: 'block',
   overageWorkerDispatch: 'block',
 };
