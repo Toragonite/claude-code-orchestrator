@@ -438,7 +438,7 @@ export function dashboardStrings(): DashboardStrings {
     permLabel: vscode.l10n.t('worker permission mode'),
     pathLabel: vscode.l10n.t('claude CLI path'),
     coolLabel: vscode.l10n.t('quota cooldown (minutes)'),
-    frontierLabel: vscode.l10n.t('frontier worker dispatch (claude-fable-5 — may bill per use)'),
+    frontierLabel: vscode.l10n.t('frontier model dispatch (claude-fable-5 only — its own quota / per-use billing)'),
     frontierBlock: vscode.l10n.t('block (billing guard)'),
     frontierAllow: vscode.l10n.t('allow'),
     btnInstallMcp: vscode.l10n.t('Register MCP here'),
@@ -451,7 +451,7 @@ export function dashboardStrings(): DashboardStrings {
       'Clear the recorded main-session check-in for this workspace — use after switching the main account; the next orchestrator_briefing call re-registers it.',
     ),
     footnote: vscode.l10n.t(
-      "Charts count only dispatches made through this extension. For an account's real plan quota, open its worker terminal and run /usage.",
+      "Charts and the Worker Accounts table count only dispatches made through this extension, not the account's overall consumption. For an account's real plan quota, see the Live plan usage panel above — it refreshes automatically and via the Refresh Account Usage command.",
     ),
     metaWorkspace: vscode.l10n.t('workspace: {0}'),
     metaNoWorkspace: vscode.l10n.t('no workspace open'),

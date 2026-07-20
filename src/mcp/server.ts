@@ -362,22 +362,16 @@ function isQuotaError(message: string): boolean {
 class WorkerTimeoutError extends Error {}
 
 /**
- * Signal a child, tolerating one that has already exited (kill() on a reaped
- * pid can throw). Deliberately not guarded on `child.killed`: that flag is set
- * by the SIGTERM we just sent, so it would suppress the SIGKILL escalation.
- * On Windows every signal maps to TerminateProcess, so the escalation is a
- * harmless no-op there.
+ * A run whose child died from a termination signal this server never sent — in
+ * practice the extension's own Cancel button (it signals the recorded pid/pgid
+ * directly, so the server is never told and isAborted() stays false), an OS
+ * kill, or the OOM killer. Carried as a distinct type for the same reason as
+ * WorkerTimeoutError: the message embeds the worker's captured output, so a
+ * regex would read the dead worker's own words as a quota failure. Such a death
+ * is never a quota problem and must never fail over to another worker — the
+ * replacement would run a task the user has already cancelled.
  */
-function killWorker(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  try {
-    child.kill(signal);
-  } catch {
-    // already gone
-  }
-}
+class WorkerKilledError extends Error {}
 
 function streamSection(label: string, text: string): string {
   if (!text) {
@@ -1024,6 +1018,9 @@ function runClaude(
     // settle after 'exit' has fired (or, for reap, may fire before it), so they
     // rely on this rather than the 'close' event's code — 'close' may never come.
     let exitCode: number | null = null;
+    // The signal that killed the child, from the same 'exit' event as exitCode.
+    // 'exit' always precedes 'close', so it is populated on both settle paths.
+    let exitSignal: NodeJS.Signals | null = null;
     // All timers are cleared by finish(); declared before it so the closure can
     // reach them. clearTimeout(undefined) is a legal no-op, so unarmed ones are
     // safe to clear.
@@ -1091,6 +1088,21 @@ function runClaude(
           costUsd: parsed?.total_cost_usd ?? 0,
         };
         if (code !== 0) {
+          // Only SIGTERM/SIGKILL: those are the signals a cancel or an OS kill
+          // sends. A SIGSEGV/SIGABRT death is a genuine worker fault and must
+          // keep failing over and recording as before. The timedOut branch
+          // above already claimed the kills this server sent itself.
+          if (exitSignal === 'SIGTERM' || exitSignal === 'SIGKILL') {
+            reject(
+              new WorkerKilledError(
+                `Worker was terminated externally (SIGTERM/SIGKILL) — most likely cancelled from the ` +
+                  `editor UI or killed by the OS — after ${stdout.length}/${stderr.length} chars of ` +
+                  `output. Not a worker fault; not retried.\n\n` +
+                  `${streamSection('stdout', stdout)}\n${streamSection('stderr', stderr)}`,
+              ),
+            );
+            return;
+          }
           reject(new Error(`Worker exited with code ${code}: ${(stderr || stdout).slice(0, 2000)}`));
           return;
         }
@@ -1110,11 +1122,15 @@ function runClaude(
     timer = setTimeout(
       () => {
         timedOut = true;
-        killWorker(child, 'SIGTERM');
-        // A CLI that ignores or is slow to handle SIGTERM would otherwise
-        // survive as an orphan while this server has moved on.
+        // Whole tree, not the direct child: a worker runs its own dispatch
+        // server and may have sub-workers, and signalling the parent alone
+        // leaves them orphaned and burning quota — unreachable afterwards,
+        // because signalTree() short-circuits once the child itself has exited.
+        signalTree(child, 'SIGTERM');
+        // A tree that ignores or is slow to handle SIGTERM would otherwise
+        // survive as orphans while this server has moved on.
         killTimer = setTimeout(() => {
-          killWorker(child, 'SIGKILL');
+          signalTree(child, 'SIGKILL');
           // Last-resort guarantee: if neither 'close' nor 'exit' settles us
           // (e.g. the child is wedged uninterruptibly), force the timeout
           // rejection so the dispatch always returns.
@@ -1137,8 +1153,9 @@ function runClaude(
     // open forever, so 'close' may never arrive. Arm a short drain: if 'close'
     // beats it, finish's guard makes this a no-op; if not, we settle with
     // whatever stdout accumulated.
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
       exitCode = code;
+      exitSignal = signal;
       drainTimer = setTimeout(() => settle(exitCode, true), DRAIN_GRACE_MS);
     });
     // Preferred settle path: every stdio stream has reached EOF, so stdout is
@@ -1320,8 +1337,11 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
           break;
         }
         const message = err instanceof Error ? err.message : String(err);
-        // A timeout is never a quota error, whatever its embedded partial output says.
-        const quota = !(err instanceof WorkerTimeoutError) && isQuotaError(message);
+        // A timeout and an external kill are never quota errors, whatever their
+        // embedded partial output says. Both fall through to the break below:
+        // no cooldown, and no replacement worker for a task nobody still wants.
+        const quota =
+          !(err instanceof WorkerTimeoutError) && !(err instanceof WorkerKilledError) && isQuotaError(message);
         recordFailure(worker.name, message, quota, registry.cooldownMinutes);
         lastError = err as Error;
         if (!quota) {
@@ -1345,7 +1365,10 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
 
     const message = lastError?.message ?? 'unknown error';
     const singleWorkerHint =
-      registry.workers.length === 1 && !(lastError instanceof WorkerTimeoutError) && isQuotaError(message)
+      registry.workers.length === 1 &&
+      !(lastError instanceof WorkerTimeoutError) &&
+      !(lastError instanceof WorkerKilledError) &&
+      isQuotaError(message)
         ? ' Only one worker account is registered, so there is nothing to fail over to — wait for its limit to reset or add another worker account.'
         : '';
     fs.writeFileSync(

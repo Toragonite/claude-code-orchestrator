@@ -74,6 +74,7 @@ Dispatch parameters worth knowing:
 - **`ultrathink: true`** — mechanically escalates that worker run to maximum reasoning depth. Meant for contract-critical implementation, subtle debugging, and adversarial reviews.
 - **`model`** — `claude-opus-4-8` for hard reasoning/coding, `claude-sonnet-5` for simpler or high-volume work, `claude-fable-5` only for the highest-leverage dispatches (design consults, adversarial reviews) and only if you have enabled frontier dispatch (see *Billing guard*).
 - **`worker`** — optional explicit account; omit for automatic quota-aware assignment.
+- **`timeout_minutes`** — optional per-task wall-clock limit in minutes (1–480), overriding the `workerTimeoutMinutes` setting for that one dispatch.
 
 ## The orchestration quality stack
 
@@ -96,7 +97,7 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 
 Anthropic's rate-limit windows (5-hour session, 7-day weekly, weekly Fable) behave differently once you hit them depending on whether **overage billing** is enabled on that account. With it **off**, hitting a window simply blocks further work until it resets — the cooldown-and-failover above handles it, and nothing is billed beyond the plan. With it **on**, work past a window's limit is instead billed against that account's monthly cap, so a dispatch that overruns a window starts spending real money.
 
-The extension now reads and surfaces this state per account: `list_workers` appends `overage: off` or `overage: ON ⚠ ($0.00 / $50.00)` to each account's usage line (with a footer when any account has it enabled), the Worker Accounts tree gets a `Plan · Extra usage` row (`off · plan limits block instead of billing`, or a warning-icon `ON · $0.00 / $50.00`) plus a `⚠overage` marker on the collapsed worker row, and the dashboard's Live plan usage cards gain an `Extra usage: off` line or a warning-colored `⚠ Extra usage: ON — $0.00 / $50.00`. This is informational only — it does not throttle or block dispatches when overage is enabled; that judgement remains yours. (The separate frontier billing guard for `claude-fable-5` dispatches, below, is unchanged.)
+The extension now reads and surfaces this state per account: `list_workers` appends `overage: off` or `overage: ON ⚠ ($0.00 / $50.00)` to each account's usage line (with a footer when any account has it enabled), the Worker Accounts tree gets a `Plan · Extra usage` row (`off · plan limits block instead of billing`, or a warning-icon `ON · $0.00 / $50.00`) plus a `⚠overage` marker on the collapsed worker row, and the dashboard's Live plan usage cards gain an `Extra usage: off` line or a warning-colored `⚠ Extra usage: ON — $0.00 / $50.00`. Dispatch is also guarded by `claudeCodeOrchestrator.overageWorkerDispatch`: with the default **`block`**, the dispatch server never assigns work to a quota-exhausted worker — not even one with overage enabled — so dispatches never bill past a plan window. **`allow`** permits assigning to an exhausted overage-enabled worker as a last resort, and those dispatches bill real money. (The separate frontier billing guard for `claude-fable-5` dispatches, below, is unchanged.)
 
 ## Frontier billing guard
 
@@ -113,7 +114,7 @@ The extension now reads and surfaces this state per account: `list_workers` appe
 - **Orchestrator Dashboard** (editor tab) — stat tiles (running, 7-day tasks, success rate, tokens, cost), a live usage panel (a bar per plan window with %, severity color, reset countdown, and "updated N min ago" freshness), a 14-day task chart, per-worker token distribution, workers/tasks tables, and a settings panel with quick actions. Auto-refreshes every 2 s, theme-aware. Running rows get a Cancel button, and canceling all running dispatches is available as a quick action.
 - **Open Interactive Worker Session** — run a worker visibly in an integrated terminal (optionally with an initial task) when you want to watch and steer.
 
-Stopping a dispatch actually stops it: pressing Stop on a running tool call cancels that MCP request and terminates its worker processes (a batch dispatched via `dispatch_tasks` runs as one request, so cancelling it cancels every task in the batch). Ending the orchestrator session — closing the panel, reloading the window, quitting VS Code, or killing the process — now terminates every worker it spawned instead of leaving them running until the 30-minute quota-cooldown timeout. On activation, any task still marked running whose worker process is gone is reclaimed as orphaned and the count is reported. Before terminating anything, the extension confirms the recorded process ID still belongs to one of its own workers, so a process ID recycled by the OS is never signalled; a cancellation is never counted as a worker error and never triggers a quota cooldown. Both cancellation and session-end terminate the worker's entire process tree, not just the worker process itself, so anything the worker spawned on its own — including its own dispatch server, if it delegated further — is cleaned up too.
+Stopping a dispatch actually stops it: pressing Stop on a running tool call cancels that MCP request and terminates its worker processes (a batch dispatched via `dispatch_tasks` runs as one request, so cancelling it cancels every task in the batch). Ending the orchestrator session — closing the panel, reloading the window, quitting VS Code, or killing the process — now terminates every worker it spawned instead of leaving them running until the worker wall-clock timeout (`workerTimeoutMinutes`, default 45 minutes). On activation, any task still marked running whose worker process is gone is reclaimed as orphaned and the count is reported. Before terminating anything, the extension confirms the recorded process ID still belongs to one of its own workers, so a process ID recycled by the OS is never signalled; a cancellation is never counted as a worker error and never triggers a quota cooldown. Both cancellation and session-end terminate the worker's entire process tree, not just the worker process itself, so anything the worker spawned on its own — including its own dispatch server, if it delegated further — is cleaned up too.
 
 ## Asset packs and Asset Manager
 
@@ -167,7 +168,12 @@ Run **Sync Assets** any time to pull in pack updates. `claudeCodeOrchestrator.as
 | `claudeCodeOrchestrator.workerPermissionMode` | `acceptEdits` | `--permission-mode` for background workers (`default` stalls on any edit approval) |
 | `claudeCodeOrchestrator.claudePath` | `claude` | Path to the Claude Code CLI |
 | `claudeCodeOrchestrator.quotaCooldownMinutes` | `30` | Minutes a worker sits out after a quota error |
+| `claudeCodeOrchestrator.workerTimeoutMinutes` | `45` | Wall-clock limit per dispatch, in minutes (1–480); overridable per-dispatch via `timeout_minutes` |
 | `claudeCodeOrchestrator.frontierWorkerDispatch` | `block` | Billing guard for frontier worker models (see above) |
+| `claudeCodeOrchestrator.overageWorkerDispatch` | `block` | Billing guard for overage dispatches: `block` never assigns work to a quota-exhausted worker even with overage enabled; `allow` permits it as a last resort and bills real money |
+| `claudeCodeOrchestrator.sessionKeepalive` | `false` | Send one minimal `haiku` request per subscription account per 24h to keep OAuth sessions fresh |
+| `claudeCodeOrchestrator.assetPacks` | `[]` | Additional asset pack directories (beyond the bundled pack) to load assets from |
+| `claudeCodeOrchestrator.assetAutoSync` | `true` | Silently sync enabled assets on activation and notify only when something changed |
 
 ## Data and privacy
 
@@ -176,7 +182,7 @@ Everything stays on your machine. The extension and server share state under `~/
 ## Troubleshooting
 
 - **MCP server shows “failed”** — usually a Node.js path issue in GUI-spawned processes. Re-run *Register Dispatch MCP Server*; the extension resolves the absolute `node` path via your login shell and writes it into `.mcp.json`.
-- **A worker stalls and times out** — check `workerPermissionMode`; `default` waits forever for a permission approval no one can click. Tasks time out after 30 minutes.
+- **A worker stalls and times out** — check `workerPermissionMode`; `default` waits forever for a permission approval no one can click. Tasks time out after `claudeCodeOrchestrator.workerTimeoutMinutes` (default 45, range 1–480); a single dispatch can override it with the `timeout_minutes` tool argument.
 - **“Dispatch to claude-fable-5 is blocked”** — the billing guard is on (default). Enable `frontierWorkerDispatch: allow` deliberately if you accept the cost.
 - **Quota errors on every dispatch** — check `list_workers` / the Worker Accounts view for cooldowns; with one worker there is no failover.
 

@@ -388,10 +388,10 @@
             "allow"
           ],
           "enumDescriptions": [
-            "Reject worker dispatches that request the claude-fable-5 model, with a fall-back hint — recommended when Fable bills per use instead of drawing from the subscription quota. Dispatches of every other model are unaffected.",
-            "Allow worker dispatches to request claude-fable-5. Enable only if you accept the cost (separate quota or pay-per-use billing, depending on the plan)."
+            "%config.frontierWorkerDispatch.enumDescription.block%",
+            "%config.frontierWorkerDispatch.enumDescription.allow%"
           ],
-          "description": "Billing guard over WHICH MODEL may be dispatched: it governs only the frontier model, claude-fable-5. 'block' (default) makes the dispatch server reject those dispatches and steer the orchestrator to claude-opus-4-8 + ultrathink. This setting does NOT prevent overage billing for other models — a dispatch of any model can still spend real money past an exhausted plan window; that is controlled by overageWorkerDispatch."
+          "description": "%config.frontierWorkerDispatch.description%"
         },
         "claudeCodeOrchestrator.overageWorkerDispatch": {
           "type": "string",

@@ -35,7 +35,7 @@
   "config.workerTimeoutMinutes.description": "디스패치된 워커가 강제 종료되기 전까지 실행될 수 있는 시간(분)입니다. 깊이 있는 작업(계약 핵심 구현, 적대적 리뷰)은 30분을 넘기는 경우가 많으며, 여기서 종료된 작업은 아직 기록하지 못한 결과를 잃습니다. 개별 작업은 디스패치 도구의 timeout_minutes 인자로 이 값을 덮어쓸 수 있습니다.",
   "config.assetPacks.description": "추가 에셋 팩 디렉터리입니다('~' 허용). 각 팩은 .claude/ 레이아웃 — skills/, agents/, commands/, output-styles/ — 을 그대로 따르며, 해당 에셋은 '워크스페이스 에셋 관리'에서 사용할 수 있게 됩니다. 개인 에셋을 공개 확장에서 분리하려면 비공개 에셋 저장소의 클론을 여기에 지정하세요.",
   "config.assetAutoSync.description": "시작 시, 팩 내용이 변경되면 이 워크스페이스에서 활성화된 에셋을 새로 고칩니다. 직접 편집한 파일은 절대 덮어쓰지 않습니다 — 에셋 매니저는 이를 '커스터마이즈됨'으로 표시하고 대기 중인 팩 버전과의 차이를 함께 보여줍니다.",
-  "config.frontierWorkerDispatch.enumDescription.block": "프런티어 모델(claude-fable-5)로의 워커 디스패치를 폴백 힌트와 함께 거부합니다 — Fable이 구독 쿼터에서 차감되지 않고 사용량당 과금될 때 권장됩니다.",
-  "config.frontierWorkerDispatch.enumDescription.allow": "프런티어 모델로의 워커 디스패치를 허용합니다. 비용(플랜에 따라 별도 쿼터 또는 사용량당 과금)을 감수하는 경우에만 활성화하세요.",
-  "config.frontierWorkerDispatch.description": "프런티어 워커 모델(claude-fable-5)에 대한 과금 보호 장치입니다. 'block'으로 설정하면 디스패치 서버가 이를 거부하고 오케스트레이터를 claude-opus-4-8 + ultrathink로 유도합니다."
+  "config.frontierWorkerDispatch.enumDescription.block": "claude-fable-5 모델을 요청하는 워커 디스패치를 폴백 힌트와 함께 거부합니다 — Fable이 구독 쿼터에서 차감되지 않고 사용량당 과금될 때 권장됩니다. 다른 모든 모델의 디스패치는 영향을 받지 않습니다.",
+  "config.frontierWorkerDispatch.enumDescription.allow": "claude-fable-5를 요청하는 워커 디스패치를 허용합니다. 비용(플랜에 따라 별도 쿼터 또는 사용량당 과금)을 감수하는 경우에만 활성화하세요.",
+  "config.frontierWorkerDispatch.description": "어떤 모델을 디스패치할 수 있는지에 대한 과금 보호 장치입니다. 프런티어 모델인 claude-fable-5에만 적용됩니다. 'block'(기본값)으로 설정하면 디스패치 서버가 해당 디스패치를 거부하고 오케스트레이터를 claude-opus-4-8 + ultrathink로 유도합니다. 이 설정은 다른 모델의 초과 사용 과금을 막지 않습니다 — 어떤 모델의 디스패치든 플랜 한도를 초과하면 여전히 실제 비용이 발생할 수 있으며, 이는 overageWorkerDispatch가 제어합니다."
 }

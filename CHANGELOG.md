@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the current session briefed in and how long ago it was last active, so a
   stale "not checked in yet" no longer lingers after switching accounts; a
   "Reset session check-in" button clears it manually.
+- **New commands for asset management:** **Sync Assets** (pulls in pack
+  updates, silently or on demand) and **Reset Asset** (force-overwrites a
+  file or a whole asset back to the pack version), alongside **Open Asset
+  Manager**. Two new settings back these: `claudeCodeOrchestrator.assetPacks`
+  (additional pack directories to load assets from) and
+  `claudeCodeOrchestrator.assetAutoSync` (default on — syncs enabled assets
+  silently on activation).
 
 ### Changed
 - **Worker timeout is now configurable.** The wall-clock limit per dispatch

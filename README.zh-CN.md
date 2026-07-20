@@ -74,6 +74,7 @@ worker w1       worker w2      worker w3
 - **`ultrathink: true`** — 机制化地把该次 worker 运行的推理深度拉到最高。适用于契约关键的实现、微妙的调试和对抗性评审。
 - **`model`** — 高难度推理/编码用 `claude-opus-4-8`；简单或大批量任务用 `claude-sonnet-5`；`claude-fable-5` 仅用于杠杆最高的调度（设计咨询、对抗性评审），且仅当你已开启 frontier 调度（见*计费防护*）。
 - **`worker`** — 可选的显式账号；省略则按配额感知自动分配。
+- **`timeout_minutes`** — 可选的单任务壁钟超时时间（分钟，1–480），仅对该次调度覆盖 `workerTimeoutMinutes` 设置。
 
 ## 编排质量栈
 
@@ -96,7 +97,7 @@ worker w1       worker w2      worker w3
 
 Anthropic 的限流窗口（Session 5 小时、Weekly 7 天、Weekly Fable）在触达上限后如何表现，取决于该账号是否开启了**超额计费（overage billing）**。**关闭**时，触达窗口上限只会阻塞后续工作，直到该窗口重置——上文的冷却与自动故障转移会照常处理，且不会产生超出订阅计划本身的费用。**开启**时，超出窗口上限的工作会转为按该账号的月度上限计费，也就是说超出窗口的调度会开始产生实际花费。
 
-扩展现在会读取并按账号展示这一状态：`list_workers` 会在每个账号的用量行末尾追加 `overage: off` 或 `overage: ON ⚠ ($0.00 / $50.00)`（只要有账号开启了超额计费，还会追加一行提示）；Worker Accounts 树会新增一行 `Plan · Extra usage`（`off · plan limits block instead of billing`，或带警告图标的 `ON · $0.00 / $50.00`），并在折叠的 worker 行上标注 `⚠overage`；仪表盘的 Live plan usage 卡片会新增一行 `Extra usage: off`，或警告色的 `⚠ Extra usage: ON — $0.00 / $50.00`。这仅是信息展示——即便超额计费已开启，本功能也不会限制或阻止调度，是否调度仍由你自行判断。（下文针对 `claude-fable-5` 的 frontier 计费防护是另一套机制，未受影响。）
+扩展现在会读取并按账号展示这一状态：`list_workers` 会在每个账号的用量行末尾追加 `overage: off` 或 `overage: ON ⚠ ($0.00 / $50.00)`（只要有账号开启了超额计费，还会追加一行提示）；Worker Accounts 树会新增一行 `Plan · Extra usage`（`off · plan limits block instead of billing`，或带警告图标的 `ON · $0.00 / $50.00`），并在折叠的 worker 行上标注 `⚠overage`；仪表盘的 Live plan usage 卡片会新增一行 `Extra usage: off`，或警告色的 `⚠ Extra usage: ON — $0.00 / $50.00`。调度还受 `claudeCodeOrchestrator.overageWorkerDispatch` 设置保护：默认值 **`block`** 下，调度服务器绝不会把工作分配给配额已耗尽的 worker——即便该账号开启了超额计费——因此调度不会产生超出计划窗口的费用。**`allow`** 允许把已耗尽且开启超额计费的 worker 作为最后手段分配，此时的调度会产生实际费用。（下文针对 `claude-fable-5` 的 frontier 计费防护是另一套机制，未受影响。）
 
 ## Frontier 计费防护
 
@@ -113,7 +114,7 @@ Anthropic 的限流窗口（Session 5 小时、Weekly 7 天、Weekly Fable）在
 - **编排器仪表盘**（编辑器标签页）— 统计卡片（运行中、7 天任务、成功率、token、费用）、实时用量面板（每个计划窗口一条进度条，含百分比、严重程度颜色、重置倒计时，以及”N 分钟前更新”的新鲜度提示）、14 天任务图表、各 worker 的 token 分布、worker/任务表格，以及带快捷操作的设置面板。每 2 秒自动刷新，自动适配主题。运行中的行带有 Cancel 按钮，取消所有运行中的调度也作为一项快捷操作提供。
 - **Open Interactive Worker Session** — 在集成终端中以可见方式运行 worker（可注入初始任务），适合需要盯着并随时介入的工作。
 
-停止调度确实会真正停止：在运行中的工具调用上按下 Stop，会取消对应的 MCP 请求并终止其 worker 进程（通过 `dispatch_tasks` 发出的批量调度运行在同一个请求之下，因此取消该请求会取消批次中的所有任务）。结束编排器会话 — 关闭面板、重新加载窗口、退出 VS Code，或强制结束进程 — 现在会终止它启动的所有 worker，而不再是任其挂起直到 30 分钟的配额冷却超时才结束，之前那种孤儿进程会持续消耗账号的计划配额。扩展激活时，会把仍标记为运行中、但其 worker 进程已经消失的任务回收为孤儿任务，并报告数量。在终止任何进程之前，扩展会先核实记录的进程 ID 是否仍然属于自己的某个 worker，因此不会误杀一个被操作系统回收并复用给无关程序的进程 ID。取消操作不计入 worker 错误，也不会触发配额冷却。取消调度和结束会话都会终止 worker 的整个进程树，而不仅仅是 worker 进程本身，因此 worker 自己启动的东西——如果它进一步委派任务，甚至包括它自己的调度服务器——也会一并清理。
+停止调度确实会真正停止：在运行中的工具调用上按下 Stop，会取消对应的 MCP 请求并终止其 worker 进程（通过 `dispatch_tasks` 发出的批量调度运行在同一个请求之下，因此取消该请求会取消批次中的所有任务）。结束编排器会话 — 关闭面板、重新加载窗口、退出 VS Code，或强制结束进程 — 现在会终止它启动的所有 worker，而不再是任其挂起直到 worker 壁钟超时（`workerTimeoutMinutes`，默认 45 分钟）才结束，之前那种孤儿进程会持续消耗账号的计划配额。扩展激活时，会把仍标记为运行中、但其 worker 进程已经消失的任务回收为孤儿任务，并报告数量。在终止任何进程之前，扩展会先核实记录的进程 ID 是否仍然属于自己的某个 worker，因此不会误杀一个被操作系统回收并复用给无关程序的进程 ID。取消操作不计入 worker 错误，也不会触发配额冷却。取消调度和结束会话都会终止 worker 的整个进程树，而不仅仅是 worker 进程本身，因此 worker 自己启动的东西——如果它进一步委派任务，甚至包括它自己的调度服务器——也会一并清理。
 
 ## 资源包与 Asset Manager
 
@@ -167,7 +168,12 @@ Anthropic 的限流窗口（Session 5 小时、Weekly 7 天、Weekly Fable）在
 | `claudeCodeOrchestrator.workerPermissionMode` | `acceptEdits` | 后台 worker 的 `--permission-mode`（`default` 会因等待编辑批准而卡住） |
 | `claudeCodeOrchestrator.claudePath` | `claude` | Claude Code CLI 路径 |
 | `claudeCodeOrchestrator.quotaCooldownMinutes` | `30` | 配额错误后该 worker 被排除出分配的分钟数 |
+| `claudeCodeOrchestrator.workerTimeoutMinutes` | `45` | 每次调度的壁钟超时时间（分钟，1–480）；可通过 `timeout_minutes` 按次调度覆盖 |
 | `claudeCodeOrchestrator.frontierWorkerDispatch` | `block` | frontier worker 模型的计费防护（见上文） |
+| `claudeCodeOrchestrator.overageWorkerDispatch` | `block` | 超额计费调度防护：`block` 下即便超额计费已开启也绝不把工作分配给配额已耗尽的 worker；`allow` 允许将其作为最后手段使用，并会产生实际费用 |
+| `claudeCodeOrchestrator.sessionKeepalive` | `false` | 每个订阅账号每 24 小时发送一次最小化的 `haiku` 请求，以保持 OAuth 会话新鲜 |
+| `claudeCodeOrchestrator.assetPacks` | `[]` | 内置包之外、用于加载资源的额外资源包目录 |
+| `claudeCodeOrchestrator.assetAutoSync` | `true` | 激活时静默同步已启用的资源，只有实际发生变化时才弹出通知 |
 
 ## 数据与隐私
 
@@ -176,7 +182,7 @@ Anthropic 的限流窗口（Session 5 小时、Weekly 7 天、Weekly Fable）在
 ## 疑难解答
 
 - **MCP 服务器显示 “failed”** — 通常是 GUI 进程的 Node.js 路径问题。重新运行 *Register Dispatch MCP Server*；扩展会通过登录 shell 解析 `node` 的绝对路径并写入 `.mcp.json`。
-- **worker 卡住直至超时** — 检查 `workerPermissionMode`；`default` 会永远等待一个无人能点击的权限批准。任务在 30 分钟后超时。
+- **worker 卡住直至超时** — 检查 `workerPermissionMode`；`default` 会永远等待一个无人能点击的权限批准。任务在 `claudeCodeOrchestrator.workerTimeoutMinutes`（默认 45，范围 1–480）后超时；单次调度可用 `timeout_minutes` 工具参数覆盖该值。
 - **“Dispatch to claude-fable-5 is blocked”** — 计费防护处于开启状态（默认）。若接受费用，请有意将 `frontierWorkerDispatch` 设为 `allow`。
 - **每次调度都报配额错误** — 在 `list_workers` / Worker Accounts 视图检查冷却状态；只有一个 worker 时没有故障转移。
 

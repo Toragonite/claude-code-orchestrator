@@ -35,7 +35,7 @@
   "config.workerTimeoutMinutes.description": "已分发的工作账户在被终止之前可运行的时长（分钟）。深度任务（契约关键实现、对抗式评审）经常超过 30 分钟；在此被终止的任务会丢失尚未写入的成果。单个任务可通过分发工具的 timeout_minutes 参数覆盖此值。",
   "config.assetPacks.description": "额外的资源包目录（允许使用 '~'）。每个资源包都遵循 .claude/ 布局——skills/、agents/、commands/、output-styles/——其资源将在“管理工作区资源”中可用。将此指向私有资源仓库的克隆，可将个人资源与公开扩展分开。",
   "config.assetAutoSync.description": "启动时，当资源包内容发生变化时，刷新此工作区中启用的资源。你手动编辑过的文件绝不会被覆盖——资源管理器会将它们标记为“已自定义”，并显示与待应用资源包版本的差异。",
-  "config.frontierWorkerDispatch.enumDescription.block": "拒绝向前沿模型（claude-fable-5）的工作分发并给出回退提示——当 Fable 按使用量计费而非从订阅配额中扣除时推荐使用。",
-  "config.frontierWorkerDispatch.enumDescription.allow": "允许向前沿模型的工作分发。仅在你接受相应成本（视套餐而定的独立配额或按使用量计费）时启用。",
-  "config.frontierWorkerDispatch.description": "针对前沿工作模型（claude-fable-5）的计费防护。设为 'block' 时，分发服务器会拒绝它们，并将编排器引导至 claude-opus-4-8 + ultrathink。"
+  "config.frontierWorkerDispatch.enumDescription.block": "拒绝请求 claude-fable-5 模型的工作分发，并给出回退提示——当 Fable 按使用量计费而非从订阅配额中扣除时推荐使用。其他所有模型的分发不受影响。",
+  "config.frontierWorkerDispatch.enumDescription.allow": "允许请求 claude-fable-5 的工作分发。仅在你接受相应成本（视套餐而定的独立配额或按使用量计费）时启用。",
+  "config.frontierWorkerDispatch.description": "针对可分发模型的计费防护：仅管控前沿模型 claude-fable-5。设为 'block'（默认）时，分发服务器会拒绝这些分发，并将编排器引导至 claude-opus-4-8 + ultrathink。此设置不会阻止其他模型的超额计费——任何模型的分发在超出套餐额度后仍可能产生实际费用，这由 overageWorkerDispatch 控制。"
 }

@@ -74,6 +74,7 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 - **`ultrathink: true`** — 해당 워커 실행의 추론 깊이를 기계적으로 최대로 올립니다. 계약이 걸린 구현, 미묘한 디버깅, 적대적 리뷰용.
 - **`model`** — 어려운 추론/코딩은 `claude-opus-4-8`, 단순·대량 작업은 `claude-sonnet-5`, `claude-fable-5`는 최고 레버리지 디스패치(설계 자문, 적대적 리뷰)에만 — 그리고 frontier 디스패치를 열어둔 경우에만 (아래 *과금 가드* 참고).
 - **`worker`** — 계정 명시 지정(선택). 생략하면 쿼터 인지 자동 배정.
+- **`timeout_minutes`** — 해당 태스크에만 적용되는 벽시계 제한 시간(분, 1–480)을 선택적으로 지정합니다. 그 한 번의 디스패치에 한해 `workerTimeoutMinutes` 설정을 덮어씁니다.
 
 ## 오케스트레이션 품질 스택
 
@@ -96,7 +97,7 @@ cco-dispatch MCP 서버 (워크스페이스 .mcp.json에 등록)
 
 Anthropic의 레이트리밋 윈도우(Session 5시간, Weekly 7일, Weekly Fable)는 그 계정의 **초과 과금(overage billing)** 활성화 여부에 따라 한도에 도달했을 때 서로 다르게 동작합니다. 초과 과금이 **꺼져** 있으면 윈도우 한도에 도달한 순간 단순히 작업이 막히고 리셋을 기다리게 됩니다 — 위의 쿨다운·자동 페일오버가 그대로 처리하며, 플랜 이상으로 과금되는 일은 없습니다. 초과 과금이 **켜져** 있으면 윈도우 한도를 넘긴 작업이 그 계정의 월 한도(monthly cap)에 대해 과금되므로, 윈도우를 초과하는 디스패치는 실제 비용을 발생시키기 시작합니다.
 
-이제 익스텐션은 계정별로 이 상태를 읽어 표시합니다: `list_workers`는 각 계정의 사용량 줄에 `overage: off` 또는 `overage: ON ⚠ ($0.00 / $50.00)`를 덧붙이고(하나라도 켜진 계정이 있으면 하단에 안내 문구도 추가), Worker Accounts 트리에는 `Plan · Extra usage` 행(`off · plan limits block instead of billing`, 또는 경고 아이콘이 붙은 `ON · $0.00 / $50.00`)과 접힌 워커 행의 `⚠overage` 표시가 추가되며, 대시보드의 Live plan usage 카드에는 `Extra usage: off` 줄 또는 경고색의 `⚠ Extra usage: ON — $0.00 / $50.00`가 추가됩니다. 이는 어디까지나 정보 표시일 뿐입니다 — 초과 과금이 켜져 있어도 디스패치를 제한하거나 막지 않으며, 그 판단은 여전히 사용자의 몫입니다. (아래의 `claude-fable-5` 전용 frontier 과금 가드는 이와 별개이며 변경되지 않았습니다.)
+이제 익스텐션은 계정별로 이 상태를 읽어 표시합니다: `list_workers`는 각 계정의 사용량 줄에 `overage: off` 또는 `overage: ON ⚠ ($0.00 / $50.00)`를 덧붙이고(하나라도 켜진 계정이 있으면 하단에 안내 문구도 추가), Worker Accounts 트리에는 `Plan · Extra usage` 행(`off · plan limits block instead of billing`, 또는 경고 아이콘이 붙은 `ON · $0.00 / $50.00`)과 접힌 워커 행의 `⚠overage` 표시가 추가되며, 대시보드의 Live plan usage 카드에는 `Extra usage: off` 줄 또는 경고색의 `⚠ Extra usage: ON — $0.00 / $50.00`가 추가됩니다. 디스패치는 `claudeCodeOrchestrator.overageWorkerDispatch` 설정으로도 보호됩니다: 기본값인 **`block`**에서는 디스패치 서버가 쿼터가 소진된 워커에게 — 초과 과금이 켜져 있는 계정이라도 — 절대 작업을 배정하지 않으므로, 디스패치가 플랜 윈도우를 넘겨 과금되는 일이 없습니다. **`allow`**로 설정하면 소진된 초과 과금 활성 워커를 최후 수단으로 배정할 수 있게 되며, 이때의 디스패치는 실제 비용을 발생시킵니다. (아래의 `claude-fable-5` 전용 frontier 과금 가드는 이와 별개이며 변경되지 않았습니다.)
 
 ## Frontier 과금 가드
 
@@ -113,7 +114,7 @@ Anthropic의 레이트리밋 윈도우(Session 5시간, Weekly 7일, Weekly Fabl
 - **오케스트레이터 대시보드** (에디터 탭) — 통계 타일(실행 중, 7일 태스크, 성공률, 토큰, 비용), 라이브 사용량 패널(윈도우별 막대에 %, 심각도 색상, 리셋 카운트다운, "N분 전 업데이트" 최신성 표시), 14일 태스크 차트, 워커별 토큰 분포, 워커·태스크 테이블, 빠른 액션이 있는 설정 패널. 2초마다 자동 갱신, 테마 자동 대응. 실행 중인 행에는 Cancel 버튼이 있고, 모든 실행 중인 디스패치 취소도 빠른 액션으로 제공됩니다.
 - **Open Interactive Worker Session** — 워커를 통합 터미널의 보이는 세션으로 실행합니다(초기 태스크 주입 가능). 지켜보며 개입하고 싶을 때.
 
-디스패치를 멈추면 실제로 멈춥니다: 실행 중인 도구 호출에서 Stop을 누르면 해당 MCP 요청이 취소되고 그 워커 프로세스들이 종료됩니다(`dispatch_tasks`로 보낸 배치는 하나의 요청으로 실행되므로, 취소하면 배치 안의 모든 태스크가 함께 취소됩니다). 오케스트레이터 세션이 끝나면 — 패널을 닫거나, 창을 새로고침하거나, VS Code를 종료하거나, 프로세스를 강제 종료하거나 — 이제는 그 세션이 띄운 모든 워커를 종료시킵니다. 예전처럼 30분 쿼터 쿨다운 타임아웃까지 방치해 계정 플랜 쿼터를 계속 소모하는 일은 없습니다. 활성화 시점에는, 실행 중으로 표시되어 있지만 워커 프로세스가 이미 사라진 태스크를 오펀(orphaned)으로 회수하고 그 개수를 알려줍니다. 무언가를 종료하기 전에 익스텐션은 기록된 프로세스 ID가 여전히 자신의 워커 소유인지 먼저 확인하므로, OS가 재사용한 프로세스 ID를 잘못 신호하는 일이 없습니다. 취소는 워커 에러로 집계되지 않으며 쿼터 쿨다운을 유발하지도 않습니다. 취소와 세션 종료 모두 워커 프로세스 하나만이 아니라 그 프로세스 트리 전체를 종료시키므로, 워커가 스스로 띄운 것들 — 더 위임했다면 그 자신의 디스패치 서버까지 — 도 함께 정리됩니다.
+디스패치를 멈추면 실제로 멈춥니다: 실행 중인 도구 호출에서 Stop을 누르면 해당 MCP 요청이 취소되고 그 워커 프로세스들이 종료됩니다(`dispatch_tasks`로 보낸 배치는 하나의 요청으로 실행되므로, 취소하면 배치 안의 모든 태스크가 함께 취소됩니다). 오케스트레이터 세션이 끝나면 — 패널을 닫거나, 창을 새로고침하거나, VS Code를 종료하거나, 프로세스를 강제 종료하거나 — 이제는 그 세션이 띄운 모든 워커를 종료시킵니다. 예전처럼 워커 벽시계 타임아웃(`workerTimeoutMinutes`, 기본값 45분)까지 방치해 계정 플랜 쿼터를 계속 소모하는 일은 없습니다. 활성화 시점에는, 실행 중으로 표시되어 있지만 워커 프로세스가 이미 사라진 태스크를 오펀(orphaned)으로 회수하고 그 개수를 알려줍니다. 무언가를 종료하기 전에 익스텐션은 기록된 프로세스 ID가 여전히 자신의 워커 소유인지 먼저 확인하므로, OS가 재사용한 프로세스 ID를 잘못 신호하는 일이 없습니다. 취소는 워커 에러로 집계되지 않으며 쿼터 쿨다운을 유발하지도 않습니다. 취소와 세션 종료 모두 워커 프로세스 하나만이 아니라 그 프로세스 트리 전체를 종료시키므로, 워커가 스스로 띄운 것들 — 더 위임했다면 그 자신의 디스패치 서버까지 — 도 함께 정리됩니다.
 
 ## 에셋 팩과 Asset Manager
 
@@ -167,7 +168,12 @@ Anthropic의 레이트리밋 윈도우(Session 5시간, Weekly 7일, Weekly Fabl
 | `claudeCodeOrchestrator.workerPermissionMode` | `acceptEdits` | 백그라운드 워커의 `--permission-mode` (`default`는 편집 승인 대기로 멈춤) |
 | `claudeCodeOrchestrator.claudePath` | `claude` | Claude Code CLI 경로 |
 | `claudeCodeOrchestrator.quotaCooldownMinutes` | `30` | 쿼터 에러 후 해당 워커 배정 제외 시간(분) |
+| `claudeCodeOrchestrator.workerTimeoutMinutes` | `45` | 디스패치당 벽시계 제한 시간(분, 1–480); `timeout_minutes`로 디스패치별 재정의 가능 |
 | `claudeCodeOrchestrator.frontierWorkerDispatch` | `block` | frontier 워커 모델 과금 가드 (위 참고) |
+| `claudeCodeOrchestrator.overageWorkerDispatch` | `block` | 초과 과금 디스패치 가드: `block`은 초과 과금이 켜져 있어도 쿼터가 소진된 워커에 절대 작업을 배정하지 않음; `allow`은 최후 수단으로 배정을 허용하고 실제 비용이 발생함 |
+| `claudeCodeOrchestrator.sessionKeepalive` | `false` | OAuth 세션을 최신 상태로 유지하기 위해 구독 계정마다 24시간에 한 번 최소한의 `haiku` 요청을 전송 |
+| `claudeCodeOrchestrator.assetPacks` | `[]` | 번들 팩 외에 에셋을 불러올 추가 에셋 팩 디렉토리 |
+| `claudeCodeOrchestrator.assetAutoSync` | `true` | 활성화 시 활성화된 에셋을 조용히 동기화하고, 실제로 변경된 경우에만 알림 표시 |
 
 ## 데이터와 프라이버시
 
@@ -176,7 +182,7 @@ Anthropic의 레이트리밋 윈도우(Session 5시간, Weekly 7일, Weekly Fabl
 ## 트러블슈팅
 
 - **MCP 서버가 “failed”로 표시** — 대개 GUI 프로세스의 Node.js 경로 문제입니다. *Register Dispatch MCP Server*를 다시 실행하세요; 익스텐션이 로그인 셸로 `node` 절대 경로를 찾아 `.mcp.json`에 기록합니다.
-- **워커가 멈췄다가 타임아웃** — `workerPermissionMode`를 확인하세요; `default`는 아무도 누를 수 없는 권한 승인을 무한 대기합니다. 태스크는 30분 후 타임아웃됩니다.
+- **워커가 멈췄다가 타임아웃** — `workerPermissionMode`를 확인하세요; `default`는 아무도 누를 수 없는 권한 승인을 무한 대기합니다. 태스크는 `claudeCodeOrchestrator.workerTimeoutMinutes`(기본값 45, 범위 1–480) 후 타임아웃되며, 한 번의 디스패치에 한해 `timeout_minutes` 도구 인자로 재정의할 수 있습니다.
 - **“Dispatch to claude-fable-5 is blocked”** — 과금 가드가 켜져 있습니다(기본값). 비용을 감수한다면 `frontierWorkerDispatch: allow`로 의도적으로 여세요.
 - **모든 디스패치가 쿼터 에러** — `list_workers` / Worker Accounts 뷰에서 쿨다운을 확인하세요; 워커가 하나면 페일오버가 없습니다.
 
