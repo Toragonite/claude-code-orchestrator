@@ -3,3 +3,4 @@ out/
 *.vsix
 .mcp.json
 CLAUDE.md
+.orchestrator/

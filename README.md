@@ -103,6 +103,32 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 - **Orchestrator Dashboard** (editor tab) — stat tiles (running, 7-day tasks, success rate, tokens, cost), a 14-day task chart, per-worker token distribution, workers/tasks tables, and a settings panel with quick actions. Auto-refreshes every 2 s, theme-aware.
 - **Open Interactive Worker Session** — run a worker visibly in an integrated terminal (optionally with an initial task) when you want to watch and steer.
 
+## Asset packs and Asset Manager
+
+An **asset pack** is a plain directory that mirrors the `.claude/` layout — `skills/`, `agents/`, `commands/`, `output-styles/`, `hooks/` — with an optional `pack.json`. Two kinds are available: the **bundled pack** shipped inside the extension, and any **user packs** you list in `claudeCodeOrchestrator.assetPacks` (e.g. a private repo clone).
+
+Enable individual assets per workspace; enabling installs them into that workspace's `.claude/` directory, and the choice is tracked in `.claude/cco-assets.json` — the ownership ledger sync uses to know what it wrote.
+
+**Sync** keeps enabled assets installed and up to date, but it never overwrites a file you've edited by hand — that file is reported as "customized" instead. Disabling an asset removes only the files sync itself wrote; your customized copies are left alone. **Reset** is the explicit escape hatch that force-overwrites a file, or a whole asset, back to the pack version.
+
+The **Asset Manager panel** (**Open Asset Manager**) is where you manage all of this: add or remove pack directories, toggle assets per workspace, and see a status badge for each one:
+
+| Badge | Meaning |
+|---|---|
+| synced | installed and matches the pack |
+| update available | the pack has moved ahead of what's installed |
+| customized | you edited the installed file — sync won't touch it |
+| conflict | two enabled assets claim the same install path |
+| not installed | enabled but not yet synced |
+
+From the panel you can also diff or reset any out-of-sync file, clean up orphaned installs, and scaffold a new skill, agent, command, output style, or hook with **New asset…** (writes into a writable pack — the bundled pack is read-only here).
+
+**Hooks are scripts, not markdown.** Installing a `hook` asset writes the script to disk but does not register it — you still need to add it to the `hooks` block in `.claude/settings.json` yourself; the scaffold's comments show the exact entry to add.
+
+**Privacy:** anything in the extension's own bundled `assets/` becomes public the moment the extension is published. Keep personal or team-private assets in a separate pack directory and register it via `assetPacks` instead.
+
+Run **Sync Assets** any time to pull in pack updates. `claudeCodeOrchestrator.assetAutoSync` (default on) does this silently on activation, and only shows a notification when something actually changed.
+
 ## Commands
 
 | Command | Description |

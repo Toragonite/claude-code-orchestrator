@@ -103,6 +103,32 @@ worker w1       worker w2      worker w3
 - **编排器仪表盘**（编辑器标签页）— 统计卡片（运行中、7 天任务、成功率、token、费用）、14 天任务图表、各 worker 的 token 分布、worker/任务表格，以及带快捷操作的设置面板。每 2 秒自动刷新，自动适配主题。
 - **Open Interactive Worker Session** — 在集成终端中以可见方式运行 worker（可注入初始任务），适合需要盯着并随时介入的工作。
 
+## 资源包与 Asset Manager
+
+**资源包**是一个直接镜像 `.claude/` 目录结构的普通目录 — `skills/`、`agents/`、`commands/`、`output-styles/`、`hooks/` — `pack.json` 是可选的。资源包分两种：扩展内置的**内置包**，以及在 `claudeCodeOrchestrator.assetPacks` 设置中列出的**用户包**（例如一个私有仓库的本地克隆）。
+
+资源按工作区逐个启用；启用后会安装到该工作区的 `.claude/` 目录，这一选择记录在 `.claude/cco-assets.json` 中 — 这是 sync 用来追踪自己写过哪些文件的所有权台账。
+
+**Sync** 会安装并更新已启用的资源，但绝不会覆盖你手动编辑过的文件 — 那个文件会被标记为 "customized"。禁用某个资源时，只会删除 sync 自己写入的文件，你的自定义版本会原样保留。**Reset** 是显式的强制覆盖出口，可以把单个文件或整个资源恢复成资源包中的版本。
+
+**Asset Manager 面板**（**Open Asset Manager**）是管理这一切的地方：添加或移除资源包目录、按工作区切换资源启用状态，并查看每个资源的状态徽标：
+
+| 徽标 | 含义 |
+|---|---|
+| synced | 已安装，且与资源包一致 |
+| update available | 资源包已有更新的版本 |
+| customized | 已安装文件被手动修改过 — sync 不会碰它 |
+| conflict | 两个已启用的资源争用同一个安装路径 |
+| not installed | 已启用但尚未同步 |
+
+面板中还可以对不同步的文件进行 diff 或 reset、清理孤立（orphan）的已安装文件，并用 **New asset…** 快速生成新的 skill、agent、command、output style 或 hook 骨架（写入某个可写的资源包 — 内置包在此处是只读的）。
+
+**Hook 是脚本，不是 markdown。** 安装 `hook` 资源只会把脚本文件写入磁盘，并不会自动注册它 — 你仍需自己把它加进 `.claude/settings.json` 的 `hooks` 区块；脚手架的注释里给出了确切的写法。
+
+**隐私提示：** 放进扩展自身内置 `assets/` 里的任何内容，会在扩展发布的那一刻起变为公开。个人或团队私有的资源应放在单独的资源包目录中，通过 `assetPacks` 注册。
+
+随时运行 **Sync Assets** 拉取资源包更新。`claudeCodeOrchestrator.assetAutoSync`（默认开启）会在激活时静默完成这一操作，只有真正发生变化时才会弹出通知。
+
 ## 命令
 
 | 命令 | 说明 |
