@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
-import { configDirForName, dirHasLogin, WorkerManager } from './workerManager';
+import { configDirForName, dirHasLogin, openReloginTerminal, WorkerManager } from './workerManager';
 import { TasksProvider, WorkersProvider } from './views';
 import {
   cancelRunningTask,
@@ -17,7 +17,14 @@ import {
 } from './registry';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
-import { refreshAllUsage, refreshAllUsageIfStale } from './usage';
+import {
+  getCachedUsage,
+  isLoginExpired,
+  listAccounts,
+  refreshAllUsage,
+  refreshAllUsageIfStale,
+} from './usage';
+import { KEEPALIVE_TICK_MS, runKeepaliveSweep } from './keepalive';
 
 const MCP_SERVER_NAME = 'cco-dispatch';
 /** Pre-rename server key — removed from .mcp.json when re-registering. */
@@ -221,6 +228,29 @@ export function activate(context: vscode.ExtensionContext): void {
   }, 5 * 60 * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(usageTimer) });
 
+  // Session keepalive (opt-in): one minimal request per subscription account per
+  // 24h so an idle account's OAuth session doesn't lapse into the expired state.
+  // The setting is read fresh on every tick rather than captured at activation,
+  // so toggling it takes effect without a window reload. The first sweep is
+  // deferred ~2 minutes to keep activation and the initial usage refresh clear.
+  // runKeepaliveSweep never throws and enforces the per-account 24h stamps itself.
+  const keepaliveTick = (): void => {
+    const enabled = vscode.workspace
+      .getConfiguration('claudeCodeOrchestrator')
+      .get<boolean>('sessionKeepalive', false);
+    if (enabled) {
+      void runKeepaliveSweep();
+    }
+  };
+  const keepaliveTimer = setInterval(keepaliveTick, KEEPALIVE_TICK_MS);
+  const keepaliveFirstRun = setTimeout(keepaliveTick, 2 * 60 * 1000);
+  context.subscriptions.push({
+    dispose: () => {
+      clearInterval(keepaliveTimer);
+      clearTimeout(keepaliveFirstRun);
+    },
+  });
+
   const workersProvider = new WorkersProvider(workers);
   const tasksProvider = new TasksProvider();
 
@@ -267,7 +297,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeCodeOrchestrator.addWorker', async () => {
       const name = await vscode.window.showInputBox({
         prompt: 'Worker account name (e.g. "w1") — a config directory ~/.claude-<name> will be created',
-        validateInput: (v) => (/^[\w-]+$/.test(v.trim()) ? undefined : 'Use letters, digits, - or _'),
+        validateInput: (v) => {
+          const trimmed = v.trim();
+          if (!/^[\w-]+$/.test(trimmed)) {
+            return 'Use letters, digits, - or _';
+          }
+          // 'main' is how the orchestrator's own account is listed everywhere; a
+          // worker sharing that name makes the two indistinguishable by name.
+          return trimmed === 'main'
+            ? '"main" is reserved for the orchestrator session\'s own account.'
+            : undefined;
+        },
       });
       if (!name) {
         return;
@@ -383,6 +423,11 @@ export function activate(context: vscode.ExtensionContext): void {
           if (!/^[\w-]+$/.test(trimmed)) {
             return 'Use letters, digits, - or _';
           }
+          // Mirrors addWorker: 'main' labels the orchestrator's own account, so a
+          // worker renamed into it becomes indistinguishable from that entry.
+          if (trimmed === 'main') {
+            return '"main" is reserved for the orchestrator session\'s own account.';
+          }
           return taken.has(trimmed) ? `A worker named "${trimmed}" already exists.` : undefined;
         },
       });
@@ -404,6 +449,76 @@ export function activate(context: vscode.ExtensionContext): void {
       if (worker) {
         workers.openTerminal(worker);
       }
+    }),
+
+    // Re-authenticate an account whose subscription login expired. Reachable from
+    // the dashboard card (which posts `{ configDir }`, covering 'main', which has
+    // no WorkerProfile), from the workers tree (which passes the element), and
+    // from the command palette (no argument at all).
+    vscode.commands.registerCommand('claudeCodeOrchestrator.reloginWorker', async (item?: unknown) => {
+      const accounts = listAccounts();
+      // Account NAMES are not unique: listAccounts unconditionally prepends the
+      // orchestrator's own dir as 'main' and a registry worker may legally carry
+      // that name too. The config DIRECTORY is the account's real identity, so it
+      // is matched first everywhere; a name match is only the legacy fallback.
+      const byDir = (dir: string): { name: string; configDir: string } | undefined => {
+        const matches = accounts.filter((a) => a.configDir === dir);
+        // Several entries can share one directory. Any of them re-logs the same
+        // login — only the LABEL differs, so prefer the more informative
+        // worker name over the generic 'main'.
+        return matches.find((a) => a.name !== 'main') ?? matches[0];
+      };
+      let target: { name: string; configDir: string } | undefined;
+      const asRecord =
+        typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : undefined;
+      if (asRecord && typeof asRecord.configDir === 'string') {
+        target = byDir(asRecord.configDir);
+        if (!target) {
+          // A card rendered before the account was removed or its dir changed.
+          vscode.window.showWarningMessage(`Unknown account directory "${asRecord.configDir}"`);
+          return;
+        }
+      } else if (typeof item === 'string') {
+        target = byDir(item) ?? accounts.find((a) => a.name === item);
+        if (!target) {
+          // A card rendered before the account was removed or renamed.
+          vscode.window.showWarningMessage(`Unknown account "${item}"`);
+          return;
+        }
+      } else {
+        // Only take the tree path when an element was actually passed —
+        // resolveWorker's own quick pick would otherwise pre-empt the
+        // expired-first pick below and omit 'main'.
+        const rec = item as { id?: unknown; name?: unknown } | undefined;
+        if (rec && (typeof rec.id === 'string' || typeof rec.name === 'string')) {
+          const worker = await resolveWorker(workers, item);
+          if (worker) {
+            target = { name: worker.name, configDir: worker.configDir };
+          }
+        }
+      }
+      if (!target) {
+        const picked = await vscode.window.showQuickPick(
+          accounts
+            .map((a) => ({ account: a, expired: isLoginExpired(getCachedUsage(a.configDir)) }))
+            // Expired accounts first — they are the reason this command exists.
+            .sort((a, b) => Number(b.expired) - Number(a.expired))
+            .map(({ account, expired }) => ({
+              label: account.name,
+              description: expired ? `⚠ login expired · ${account.configDir}` : account.configDir,
+              account,
+            })),
+          { placeHolder: 'Account to re-login' },
+        );
+        if (!picked) {
+          return;
+        }
+        target = picked.account;
+      }
+      openReloginTerminal(target.name, target.configDir);
+      vscode.window.showInformationMessage(
+        'Complete the login in the terminal — usage refreshes within a few minutes.',
+      );
     }),
 
     vscode.commands.registerCommand('claudeCodeOrchestrator.openWorkerSession', async (item?: unknown) => {

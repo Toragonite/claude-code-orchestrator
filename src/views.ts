@@ -16,6 +16,7 @@ import {
   formatRelativeReset,
   getCachedUsage,
   isElevated,
+  isLoginExpired,
   USAGE_CACHE_FILE,
 } from './usage';
 
@@ -52,6 +53,14 @@ function pct(n: number): string {
 
 const NO_LIMITS_MESSAGE = 'no plan limits (token/non-subscription login)';
 const NO_WINDOWS_MESSAGE = 'no rate-limit windows reported';
+/**
+ * An expired/logged-out subscription reports the same "no limits" shape as a
+ * genuine token account, so every `available !== true` branch must ask
+ * `isLoginExpired` before falling through to NO_LIMITS_MESSAGE — otherwise the
+ * row reads "no plan limits" for an account that in fact has a plan it can no
+ * longer reach.
+ */
+const EXPIRED_SUMMARY = 'login expired — re-login needed';
 
 /** A window normalized from the cache file — every field guaranteed present and well-typed. */
 interface SafeWindow {
@@ -140,7 +149,7 @@ function safeExtraUsage(usage: AccountUsage): SafeExtra | null {
 
 /**
  * One-line live-usage tail for a worker's collapsed `description`, e.g.
- * `· 5h 12% · 7d 72% · ⚠Fable 100%`. Handles all five render states.
+ * `· 5h 12% · 7d 72% · ⚠Fable 100%`. Handles all six render states.
  */
 function usageSummary(usage: AccountUsage | undefined): string {
   if (!usage) {
@@ -150,7 +159,7 @@ function usageSummary(usage: AccountUsage | undefined): string {
     return 'usage unavailable';
   }
   if (usage.available !== true) {
-    return NO_LIMITS_MESSAGE;
+    return isLoginExpired(usage) ? EXPIRED_SUMMARY : NO_LIMITS_MESSAGE;
   }
   const windows = safeWindows(usage);
   if (windows.length === 0) {
@@ -167,7 +176,7 @@ function usageSummary(usage: AccountUsage | undefined): string {
 }
 
 /**
- * Append a rich live-usage block to a worker's Markdown tooltip. Handles all five
+ * Append a rich live-usage block to a worker's Markdown tooltip. Handles all six
  * render states. Account-derived strings go through `appendText`, which escapes
  * markdown metacharacters — a crafted plan name or stderr must not break formatting.
  */
@@ -183,7 +192,9 @@ function appendUsageTooltip(md: vscode.MarkdownString, usage: AccountUsage | und
     return;
   }
   if (usage.available !== true) {
-    md.appendMarkdown(`Plan quota — ${NO_LIMITS_MESSAGE}`);
+    // The actionable "run Re-login Account" sentence is added by the caller, so
+    // this section only labels the quota state — it does not repeat the advice.
+    md.appendMarkdown(`Plan quota — ${isLoginExpired(usage) ? 'login expired' : NO_LIMITS_MESSAGE}`);
     return;
   }
   const windows = safeWindows(usage);
@@ -262,6 +273,10 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       vscode.TreeItemCollapsibleState.Collapsed,
     );
     const usage = getCachedUsage(node.configDir);
+    const expired = isLoginExpired(usage);
+    // No separate expired badge here: usageSummary already reports the expired
+    // login in place of its old "no plan limits" fall-through, and the two
+    // together read as contradictory copy on one row.
     item.description =
       node.model +
       (node.preferred ? ' · preferred' : '') +
@@ -273,6 +288,11 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       `CLAUDE_CONFIG_DIR=${node.configDir}\n\n` +
         'Expand for per-account usage · terminal button opens a live session · right-click for re-login / remove',
     );
+    if (expired) {
+      tooltip.appendMarkdown(
+        '\n\nLogin expired — run "Re-login Account" (right-click) to restore dispatches.',
+      );
+    }
     appendUsageTooltip(tooltip, usage);
     item.tooltip = tooltip;
     item.iconPath = new vscode.ThemeIcon(coolingDown ? 'debug-pause' : 'server-process');
@@ -395,6 +415,20 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       return;
     }
     if (usage.available !== true) {
+      if (isLoginExpired(usage)) {
+        rows.push({
+          kind: 'stat',
+          worker: worker.name,
+          label: 'Plan quota',
+          description: 'login expired',
+          icon: 'warning',
+          tooltip:
+            'This account\'s subscription login expired or was logged out. Plan usage is ' +
+            'unavailable and dispatches to it fail until you run "Re-login Account" ' +
+            '(right-click the worker).',
+        });
+        return;
+      }
       rows.push({
         kind: 'stat',
         worker: worker.name,

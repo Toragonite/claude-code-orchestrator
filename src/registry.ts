@@ -39,10 +39,14 @@ export interface Registry {
   /** Minutes a worker sits out after a quota/rate-limit error. */
   cooldownMinutes: number;
   /**
-   * Billing guard for frontier worker models (claude-fable-5): 'block'
-   * rejects such dispatches at the server with a fall-back hint. Defaults to
-   * 'block' because frontier models may bill per use instead of drawing from
-   * the subscription quota.
+   * Billing guard over WHICH MODEL may be dispatched: 'block' rejects dispatches
+   * of the frontier model (claude-fable-5) at the server with a fall-back hint.
+   * Defaults to 'block' because that model may bill per use instead of drawing
+   * from the subscription quota.
+   *
+   * This guard says NOTHING about overage: it does not stop a non-frontier model
+   * from billing real money past an exhausted plan window. That is
+   * `overageWorkerDispatch`, which is entirely independent of this field.
    */
   frontierWorkerDispatch: 'allow' | 'block';
   /**
@@ -52,6 +56,26 @@ export interface Registry {
    * share this one registry file — see applyFrontierGuard.
    */
   frontierGuardSetBy?: string;
+  /**
+   * Billing guard over WHETHER ANY DISPATCH MAY PROCEED past an exhausted plan
+   * window: 'block' stops the server assigning work to a quota-exhausted worker
+   * even when that account has extra usage (overage) enabled, so dispatch never
+   * spends money past a plan window. 'allow' lets such a worker be used as a
+   * last resort — those dispatches BILL REAL MONEY against the account's
+   * monthly cap. Applies to EVERY model, not just the frontier one, and defaults
+   * to 'block'.
+   *
+   * Independent of `frontierWorkerDispatch`, which only governs which model may
+   * be dispatched.
+   */
+  overageWorkerDispatch: 'allow' | 'block';
+  /**
+   * appName (vscode.env.appName) of the editor whose EXPLICIT setting produced
+   * the current `overageWorkerDispatch` value. Undefined when no editor has
+   * explicitly opted in. Used to reconcile the overage guard across editors that
+   * share this one registry file — see applyOverageGuard.
+   */
+  overageGuardSetBy?: string;
 }
 
 /** Cumulative per-worker usage, tracked from CLI JSON results. */
@@ -142,6 +166,7 @@ const DEFAULTS: Registry = {
   claudePath: 'claude',
   cooldownMinutes: 30,
   frontierWorkerDispatch: 'block',
+  overageWorkerDispatch: 'block',
 };
 
 export function ensureDirs(): void {
@@ -151,7 +176,16 @@ export function ensureDirs(): void {
 export function readRegistry(): Registry {
   try {
     const raw = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8')) as Partial<Registry>;
-    return { ...DEFAULTS, ...raw, workers: raw.workers ?? [] };
+    return {
+      ...DEFAULTS,
+      ...raw,
+      workers: raw.workers ?? [],
+      // Every registry file written before this guard existed lacks the field, and
+      // the file is hand-editable. Anything that is not exactly 'allow' — absent,
+      // null, misspelled — must read as the safe 'block': money is only ever spent
+      // past a plan window when an editor explicitly opted in.
+      overageWorkerDispatch: raw.overageWorkerDispatch === 'allow' ? 'allow' : 'block',
+    };
   } catch {
     return { ...DEFAULTS };
   }
@@ -201,6 +235,40 @@ export function applyFrontierGuard(
   } else if (registry.frontierGuardSetBy === editor) {
     registry.frontierWorkerDispatch = 'block';
     registry.frontierGuardSetBy = undefined;
+  }
+  return registry;
+}
+
+/**
+ * Reconcile the overage billing guard across editors that share this one
+ * registry file. Semantics are IDENTICAL to applyFrontierGuard — see its doc
+ * comment for why the reconciliation exists (a blind overwrite let an editor
+ * where the setting is UNSET clobber another editor's explicit choice). What
+ * differs is only what the guard governs: applyFrontierGuard controls WHICH
+ * MODEL may be dispatched (claude-fable-5), this one controls WHETHER ANY
+ * dispatch may proceed past an exhausted plan window and bill real money.
+ *
+ *  - `explicit` set (any editor)  -> take it, and record that editor as the owner.
+ *  - `explicit` unset, owner is a DIFFERENT editor -> leave the value alone (an
+ *    editor that never opted in must not override the one that did — the bug).
+ *  - `explicit` unset, owner is THIS editor -> the opt-in was revoked; revert to
+ *    the safe default `block` and clear the owner.
+ *
+ * Fail-safe: the default and any non-'allow' explicit value resolve to `block`,
+ * so overage spending is only ever enabled by an editor that explicitly asks for it.
+ * Pure and side-effect-free apart from mutating the passed registry.
+ */
+export function applyOverageGuard(
+  registry: Registry,
+  editor: string,
+  explicit: string | undefined,
+): Registry {
+  if (explicit !== undefined) {
+    registry.overageWorkerDispatch = explicit === 'allow' ? 'allow' : 'block';
+    registry.overageGuardSetBy = editor;
+  } else if (registry.overageGuardSetBy === editor) {
+    registry.overageWorkerDispatch = 'block';
+    registry.overageGuardSetBy = undefined;
   }
   return registry;
 }

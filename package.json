@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "Run Claude Code across multiple accounts in parallel. Your main session designs and verifies while worker accounts (Opus/Sonnet) implement via MCP dispatch tools — with quota-aware failover and per-account usage tracking. Unofficial.",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -105,6 +105,12 @@
       {
         "command": "claudeCodeOrchestrator.loginWorker",
         "title": "Re-login Worker Account (opens terminal to sign in)",
+        "category": "Claude Code Orchestrator",
+        "icon": "$(sign-in)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.reloginWorker",
+        "title": "Re-login Account (opens `claude auth login`)",
         "category": "Claude Code Orchestrator",
         "icon": "$(sign-in)"
       },
@@ -249,9 +255,14 @@
           "group": "1_manage@2"
         },
         {
-          "command": "claudeCodeOrchestrator.removeWorker",
+          "command": "claudeCodeOrchestrator.reloginWorker",
           "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
           "group": "1_manage@3"
+        },
+        {
+          "command": "claudeCodeOrchestrator.removeWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
+          "group": "1_manage@4"
         }
       ]
     },
@@ -327,10 +338,28 @@
             "allow"
           ],
           "enumDescriptions": [
-            "Reject worker dispatches to frontier models (claude-fable-5) with a fall-back hint — recommended when Fable bills per use instead of drawing from the subscription quota.",
-            "Allow worker dispatches to frontier models. Enable only if you accept the cost (separate quota or pay-per-use billing, depending on the plan)."
+            "Reject worker dispatches that request the claude-fable-5 model, with a fall-back hint — recommended when Fable bills per use instead of drawing from the subscription quota. Dispatches of every other model are unaffected.",
+            "Allow worker dispatches to request claude-fable-5. Enable only if you accept the cost (separate quota or pay-per-use billing, depending on the plan)."
           ],
-          "description": "Billing guard for frontier worker models (claude-fable-5). 'block' makes the dispatch server reject them and steer the orchestrator to claude-opus-4-8 + ultrathink."
+          "description": "Billing guard over WHICH MODEL may be dispatched: it governs only the frontier model, claude-fable-5. 'block' (default) makes the dispatch server reject those dispatches and steer the orchestrator to claude-opus-4-8 + ultrathink. This setting does NOT prevent overage billing for other models — a dispatch of any model can still spend real money past an exhausted plan window; that is controlled by overageWorkerDispatch."
+        },
+        "claudeCodeOrchestrator.overageWorkerDispatch": {
+          "type": "string",
+          "default": "block",
+          "enum": [
+            "block",
+            "allow"
+          ],
+          "enumDescriptions": [
+            "Never assign work to a quota-exhausted worker, even when that account has extra usage enabled — dispatch never spends money past a plan window.",
+            "Exhausted workers with extra usage enabled may be used as a last resort. Those dispatches bill real money against the account's monthly cap."
+          ],
+          "description": "Billing guard for overage (extra-credit) dispatches. 'block' (default): the dispatch server never assigns work to a quota-exhausted worker, even when that account has extra usage enabled — dispatch never spends money past a plan window. 'allow': exhausted workers with extra usage enabled may be used as a last resort; those dispatches bill real money against the account's monthly cap. Independent of frontierWorkerDispatch, which only controls the claude-fable-5 model."
+        },
+        "claudeCodeOrchestrator.sessionKeepalive": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send one minimal Claude request (haiku model) per subscription account per 24h to keep OAuth sessions fresh. Spends a negligible amount of plan usage. Off by default; recovery from an already-expired login is the Re-login command."
         }
       }
     }

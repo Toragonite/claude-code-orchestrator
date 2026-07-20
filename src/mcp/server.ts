@@ -20,15 +20,21 @@ import {
 import { isFrontierTier, orchestratorBriefing, WORKER_BASE_PROMPT } from '../prompts';
 import {
   AccountUsage,
+  AUTH_PROBE_TIMEOUT_MS,
+  AuthStatus,
   exhaustedWindows,
   ExtraUsage,
+  fetchAuthStatus,
   formatAge,
   formatRelativeReset,
   getCachedUsage,
   isElevated,
+  isLoginExpired,
   listAccounts,
+  mergeUsageCaches,
   readUsageCache,
   refreshAllUsageIfStale,
+  USAGE_CACHE_FILE,
   UsageCache,
   UsageWindow,
 } from '../usage';
@@ -337,8 +343,247 @@ function overageEnabled(usage: AccountUsage | undefined): boolean {
 }
 
 /**
- * Pick a worker for a dispatch: not already attempted, not on cooldown, and not
- * live-quota-exhausted for the model this dispatch would actually run.
+ * Wrap a value in POSIX single quotes so it survives the shell verbatim. Config
+ * dirs routinely contain spaces ("/Users/x/Library/Application Support/…"), which
+ * an unquoted assignment would split into a command. Inside single quotes nothing
+ * is special except the closing quote itself, so the only escape needed is the
+ * standard '\'' idiom: close, emit a literal quote, reopen.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** Caveat appended ONCE per message that prints a reloginCommand — the syntax is POSIX-only. */
+const RELOGIN_SHELL_CAVEAT = 'POSIX shell; on Windows set the env var first';
+
+/** Shell command that re-authenticates one account — the recovery step for an expired login. */
+function reloginCommand(configDir: string): string {
+  return `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} claude auth login`;
+}
+
+/**
+ * Refusal text for a worker whose subscription OAuth session has expired. Unlike
+ * quota exhaustion there is no billing escape hatch and no reset to wait for: the
+ * dispatch would die on "Failed to authenticate", so the only recovery is a
+ * re-login. Both recovery routes are spelled out because the reader is an
+ * orchestrating session that cannot see the VS Code UI.
+ *
+ * "retry" is a real instruction, not a platitude: the next dispatch re-probes this
+ * account's login live (see liveRecheckExpiredLogins), so a completed re-login is
+ * picked up immediately rather than waiting for a usage refresh.
+ */
+function expiredLoginRefusal(name: string, configDir: string): string {
+  return (
+    `Worker "${name}" login is expired/logged out; a dispatch would fail to authenticate. ` +
+    'Re-login this account first (VSCode: "Re-login Account" on the worker, or shell: ' +
+    `${reloginCommand(configDir)} — ${RELOGIN_SHELL_CAVEAT}) and retry.`
+  );
+}
+
+/**
+ * The cached expired-login verdict is the ONLY thing blocking this pick, and a live
+ * auth probe could clear it. Thrown instead of a bare Error so dispatchTask can
+ * re-probe the named accounts and retry the selection once — without it, a cached
+ * "logged out" reading would survive a successful re-login and refuse the very
+ * retry the refusal text asks for, forever (the cache is read once per dispatch and
+ * only the list_workers path refreshes it).
+ *
+ * `candidates` are exactly the workers whose ONLY disqualifier is that verdict, so
+ * flipping it is guaranteed to change the outcome. `message` is the refusal to
+ * raise if the re-probe confirms the logout, unchanged from the pre-existing text.
+ */
+class ExpiredLoginBlock extends Error {
+  constructor(
+    message: string,
+    readonly candidates: WorkerProfile[],
+    readonly kind: 'named' | 'auto',
+  ) {
+    super(message);
+    this.name = 'ExpiredLoginBlock';
+  }
+}
+
+/** Outcome of one round of live auth re-probes. */
+interface LiveRecheckResult {
+  /** At least one probed account is logged back IN — the selection is worth retrying. */
+  recovered: boolean;
+  /** Sentence(s) to append to the refusal when nothing recovered. '' when there is nothing to add. */
+  note: string;
+}
+
+/**
+ * Persist a refreshed `auth` reading for one account. Mirrors usage.ts's own
+ * writeUsageCache: re-read the disk cache, merge, then tmp+rename so a concurrent
+ * reader never sees a torn file. `fetchedAt` is deliberately NOT bumped — this is
+ * an auth reading, not a usage reading, and faking usage freshness would suppress
+ * the next real refresh. A consequence of leaving it: if another process wrote a
+ * strictly newer reading for this account since we loaded the cache, mergeUsageCaches
+ * keeps theirs — correct, since that reading carries its own fresher auth.
+ *
+ * Best effort. The in-memory update is what unblocks THIS dispatch; persisting only
+ * saves the NEXT one a probe.
+ */
+function persistAuthReading(configDir: string, entry: AccountUsage): void {
+  try {
+    ensureDirs();
+    const merged = mergeUsageCaches(readUsageCache(), { [configDir]: entry });
+    const tmp = `${USAGE_CACHE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2));
+    fs.renameSync(tmp, USAGE_CACHE_FILE);
+  } catch {
+    // disk full / read-only / racing writer — the dispatch proceeds on the in-memory verdict
+  }
+}
+
+/**
+ * Per-probe timeout for the live re-check, deliberately tighter than the full
+ * AUTH_PROBE_TIMEOUT_MS: this probe runs INSIDE a dispatch the caller is waiting on,
+ * so it is budgeted like the refresh path's own server budget (5s) rather than like a
+ * background refresh. A hung claude binary costs 5s here, not 10s.
+ */
+const LIVE_RECHECK_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Most distinct config dirs live-probed per DISPATCH (probedDirs is per-dispatch and
+ * only grows when a probe actually runs, so it doubles as the budget counter).
+ *
+ * Worst-case added latency before a refusal: 3 dirs × 5s = 15s — well clear of the
+ * ~60s MCP client timeout that an uncapped 10s-per-logged-out-account walk could
+ * approach (5 accounts × 10s = 50s, which presented as a hung tool call). Dirs beyond
+ * the cap keep their cached verdict and are refused as before; the refusal says so.
+ */
+const LIVE_RECHECK_MAX_DIRS = 3;
+
+/**
+ * Re-probe the login of every candidate account whose cached verdict says expired,
+ * and fold a positive result back into `cache` so isLoginExpired() flips.
+ *
+ * Only `auth` is replaced; `available` stays false until the next usage refresh
+ * re-reads plan limits. That is exactly what isLoginExpired needs (available!==true
+ * AND auth.loggedIn===false), and it keeps this function out of the quota semantics.
+ *
+ * Probes run sequentially, at most one per DISTINCT config dir (workers may share a
+ * dir) and at most once per dir per dispatch — `probedDirs` carries that across the
+ * failover attempts of one dispatchTask call, so the added latency is bounded by the
+ * number of logged-out accounts, not by the number of attempts.
+ *
+ * That bound alone still scaled with the account count, so it is capped absolutely at
+ * LIVE_RECHECK_MAX_DIRS probes per dispatch. Truncation is reported back so the
+ * refusal can admit which accounts were judged from cache rather than re-checked —
+ * the alternative, silently implying every logout was re-confirmed, would send the
+ * caller off to re-login an account that may already be fine.
+ *
+ * An undefined probe result (CLI hung, missing, unparseable) is NOT evidence of
+ * anything: the cached verdict stands, and the caller says so rather than implying
+ * the logout was re-confirmed.
+ */
+async function liveRecheckExpiredLogins(
+  candidates: WorkerProfile[],
+  kind: 'named' | 'auto',
+  cache: UsageCache,
+  probedDirs: Set<string>,
+): Promise<LiveRecheckResult> {
+  const byDir = new Map<string, string[]>();
+  for (const w of candidates) {
+    const names = byDir.get(w.configDir);
+    if (names === undefined) {
+      byDir.set(w.configDir, [w.name]);
+    } else {
+      names.push(w.name);
+    }
+  }
+  let recovered = false;
+  const confirmed: string[] = [];
+  const unknown: string[] = [];
+  let truncated = false;
+  for (const [configDir, names] of byDir) {
+    // Already probed this dispatch: skipped at zero latency, so it consumes no budget.
+    if (probedDirs.has(configDir)) {
+      continue;
+    }
+    // Budget check, auto path only. The named path probes exactly one dir (the worker
+    // the caller asked for), which is always within budget and must never be the probe
+    // the cap drops — refusing a named worker on a cached verdict we chose not to
+    // re-check is precisely the false-blocked failure this whole path exists to avoid.
+    if (kind === 'auto' && probedDirs.size >= LIVE_RECHECK_MAX_DIRS) {
+      truncated = true;
+      break;
+    }
+    probedDirs.add(configDir);
+    const auth = await fetchAuthStatus(
+      configDir,
+      Math.min(AUTH_PROBE_TIMEOUT_MS, LIVE_RECHECK_PROBE_TIMEOUT_MS),
+    );
+    if (auth === undefined) {
+      unknown.push(...names);
+      continue;
+    }
+    applyAuthReading(cache, configDir, auth);
+    if (auth.loggedIn) {
+      recovered = true;
+    } else {
+      confirmed.push(...names);
+    }
+  }
+  return {
+    recovered,
+    note: recheckNote(kind, confirmed, unknown, truncated ? probedDirs.size : 0),
+  };
+}
+
+/** Fold a fresh auth reading into the in-memory cache entry, and persist it. */
+function applyAuthReading(cache: UsageCache, configDir: string, auth: AuthStatus): void {
+  const updated: AccountUsage = { ...cache[configDir], auth };
+  cache[configDir] = updated;
+  persistAuthReading(configDir, updated);
+}
+
+/**
+ * What to add to a refusal after a re-probe failed to clear it. Says only what was
+ * actually observed: a confirmed logout, a probe that never answered, and an account
+ * never probed at all because the latency cap ran out are three different facts, and
+ * claiming a stronger one would send the caller off to re-login an account that may
+ * already be fine.
+ *
+ * `probedCount` is 0 unless LIVE_RECHECK_MAX_DIRS actually truncated the walk; when it
+ * did, it is how many accounts were live-probed before the budget ran out.
+ */
+function recheckNote(
+  kind: 'named' | 'auto',
+  confirmed: string[],
+  unknown: string[],
+  probedCount: number,
+): string {
+  if (kind === 'named') {
+    // The named path probes its single dir unconditionally, so it never truncates.
+    // Confirmed: the pre-existing refusal already says everything true and useful.
+    return unknown.length > 0
+      ? ' (The live re-check of this login could not run — the auth probe did not answer — so this ' +
+          'verdict comes from the cached reading.)'
+      : '';
+  }
+  const parts: string[] = [];
+  if (confirmed.length > 0) {
+    parts.push(`A live re-check confirmed the expired login(s): ${confirmed.join(', ')}.`);
+  }
+  if (unknown.length > 0) {
+    parts.push(
+      `The live re-check could not run for ${unknown.join(', ')} — the auth probe did not answer.`,
+    );
+  }
+  if (probedCount > 0) {
+    parts.push(
+      `Live re-check was limited to ${probedCount} account(s) this call; the remaining logged-out ` +
+        'account(s) were judged from cache — re-login them and retry, or call list_workers to refresh.',
+    );
+  }
+  return parts.length > 0 ? ` ${parts.join(' ')}` : '';
+}
+
+/**
+ * Pick a worker for a dispatch: not already attempted, not on cooldown, not
+ * logged out, and not live-quota-exhausted for the model this dispatch would
+ * actually run.
  *
  * `requestedModel` is the caller-validated `args.model` (undefined => each worker
  * runs its own default), so the candidate model is `requestedModel ?? worker.model`.
@@ -355,6 +600,23 @@ function overageEnabled(usage: AccountUsage | undefined): boolean {
  * worker WITHOUT overage is refused (explicit path) or skipped (auto path) as
  * before; overage-enabled workers are used only as a fallback when no
  * non-exhausted worker is available.
+ *
+ * `overageAllowed` is the operator's billing guard, resolved ONCE per dispatch by
+ * the caller from registry.overageWorkerDispatch === 'allow'. When it is false,
+ * `billableOverage: true` is unreachable from every branch below: the explicit
+ * path refuses an exhausted overage worker instead of billing it, and the tier-2
+ * fallback pool is never consulted at all. Nothing else about selection changes,
+ * so the free paths keep their exact previous behavior.
+ *
+ * A LOGGED-OUT worker (isLoginExpired) is handled one step earlier and more
+ * bluntly than exhaustion: it is dropped from the eligible pool outright and
+ * refused when named. Overage cannot rescue it and no window reset will fix it —
+ * the dispatch would fail to authenticate no matter which model it asks for.
+ *
+ * That verdict comes from a cache this function never refreshes, so it is raised as
+ * an ExpiredLoginBlock rather than a plain Error whenever a live re-probe could
+ * still change the answer. The caller re-probes and calls pickWorker again; only
+ * the second verdict is final. See ExpiredLoginBlock for why that matters.
  */
 function pickWorker(
   workers: WorkerProfile[],
@@ -362,6 +624,7 @@ function pickWorker(
   attempted: Set<string>,
   requestedModel: string | undefined,
   cache: UsageCache,
+  overageAllowed: boolean,
 ): { worker: WorkerProfile; billableOverage: boolean } {
   const exhaustedFor = (w: WorkerProfile): UsageWindow[] => {
     const candidate = requestedModel ?? w.model;
@@ -385,12 +648,28 @@ function pickWorker(
     if (attempted.has(found.name)) {
       throw new Error(`Worker "${preferred}" already failed this task.`);
     }
+    // Checked before exhaustion: a logged-out account cannot authenticate at all,
+    // so quota headroom (or overage billing) on it is irrelevant.
+    if (isLoginExpired(cache[found.configDir])) {
+      throw new ExpiredLoginBlock(expiredLoginRefusal(found.name, found.configDir), [found], 'named');
+    }
     const exhausted = exhaustedFor(found);
     if (exhausted.length > 0) {
-      // Exhausted + overage ON → ALLOW, but the dispatch spends real money.
+      // Exhausted + overage ON → ALLOW, but the dispatch spends real money — and
+      // only when the operator's billing guard permits it. Guard blocking turns
+      // that billable run into its own refusal, distinct from the no-overage one
+      // below: the account COULD run, the operator has forbidden the spend.
       // Exhausted + overage off/unknown → keep the refusal (guaranteed quota failure).
       if (overageEnabled(cache[found.configDir])) {
-        return { worker: found, billableOverage: true };
+        if (overageAllowed) {
+          return { worker: found, billableOverage: true };
+        }
+        throw new Error(
+          `Worker "${found.name}" is quota-exhausted and dispatching to it would bill overage ` +
+            '(extra usage), which is blocked by the operator ' +
+            '("claudeCodeOrchestrator.overageWorkerDispatch"). Wait for the reset, pick another ' +
+            'worker, or enable overage dispatch to accept the cost.',
+        );
       }
       const candidate = requestedModel ?? found.model;
       throw new Error(
@@ -410,19 +689,62 @@ function pickWorker(
   }
   const stats = readStats();
   const now = Date.now();
+  // Logged out === undispatchable: excluded here (not at the tier filters) so it
+  // composes with cooldown and stays out of the overage fallback pool too.
+  const loggedOut = workers.filter((w) => isLoginExpired(cache[w.configDir]));
   const eligible = workers.filter(
-    (w) => !attempted.has(w.name) && (stats[w.name]?.cooldownUntil ?? 0) <= now,
+    (w) =>
+      !attempted.has(w.name) &&
+      (stats[w.name]?.cooldownUntil ?? 0) <= now &&
+      !isLoginExpired(cache[w.configDir]),
   );
   if (eligible.length === 0) {
     const cooling = workers
       .filter((w) => (stats[w.name]?.cooldownUntil ?? 0) > now)
       .map((w) => `${w.name} (until ${new Date(stats[w.name]!.cooldownUntil!).toLocaleTimeString()})`);
-    throw new Error(
+    const reasons: string[] = [];
+    if (cooling.length > 0) {
+      reasons.push(`cooling down after quota errors — ${cooling.join(', ')}`);
+    }
+    if (loggedOut.length > 0) {
+      reasons.push(`login expired/logged out — ${loggedOut.map((w) => w.name).join(', ')}`);
+    }
+    // Every worker was already attempted for this task and nothing else applies:
+    // there is genuinely nothing to say beyond the bare fact.
+    if (reasons.length === 0) {
+      throw new Error('No eligible worker available.');
+    }
+    // Naming a logged-out worker explicitly is refused too, so its ONLY recovery
+    // is the re-login command — never leave the caller without it.
+    const relogin =
+      loggedOut.length > 0
+        ? ' Re-login the logged-out account(s) first (VSCode: "Re-login Account" on the worker, or ' +
+          // Workers may share a config dir — one account, one re-login command.
+          `shell: ${[...new Set(loggedOut.map((w) => reloginCommand(w.configDir)))].join(', ')} — ` +
+          `${RELOGIN_SHELL_CAVEAT}).`
+        : '';
+    const cooldownAdvice =
       cooling.length > 0
-        ? `No eligible worker: cooling down after quota errors — ${cooling.join(', ')}. ` +
-          'Wait for the cooldown, add another worker account, or retry with an explicit "worker".'
-        : 'No eligible worker available.',
+        ? ' Wait for the cooldown, or retry with an explicit "worker" — an explicitly named worker ' +
+          'runs even while cooling down.'
+        : '';
+    const message =
+      `No eligible worker: ${reasons.join('; ')}.${relogin}${cooldownAdvice} ` +
+      'Add another worker account if this keeps blocking dispatches.';
+    // Workers whose ONLY disqualifier is the cached expired-login verdict: not
+    // attempted, not cooling down, just logged out. Flipping that verdict is the
+    // one thing that could make this selection succeed, so it is worth a live
+    // probe. Anything else here (all attempted, all cooling down) no probe can fix.
+    const recoverable = workers.filter(
+      (w) =>
+        !attempted.has(w.name) &&
+        (stats[w.name]?.cooldownUntil ?? 0) <= now &&
+        isLoginExpired(cache[w.configDir]),
     );
+    if (recoverable.length > 0) {
+      throw new ExpiredLoginBlock(message, recoverable, 'auto');
+    }
+    throw new Error(message);
   }
   // Preferred worker (usually the main session's own account) wins when it isn't
   // busier than the least-busy alternative — favored, never flooded. Applied to
@@ -459,13 +781,30 @@ function pickWorker(
   const poolB = eligible.filter(
     (w) => exhaustedFor(w).length > 0 && overageEnabled(cache[w.configDir]),
   );
-  if (poolB.length > 0) {
+  // The operator's billing guard gates the WHOLE tier: when it blocks, poolB is
+  // never selected from, so an empty pool0 falls straight through to the tier-3
+  // refusal and no auto-assignment can ever spend extra credit.
+  if (overageAllowed && poolB.length > 0) {
     return { worker: selectFrom(poolB), billableOverage: true };
   }
-  // Tier 3: all exhausted and none can bill past the window — refuse.
+  // Tier 3: no worker can be dispatched for free. Two distinct causes, and the
+  // caller needs to know which: either nothing here can bill past the window at
+  // all, or something could and the operator has forbidden it — the latter is a
+  // one-setting fix, so it names the setting instead of only offering a wait.
+  // Both refusals name every exhausted window and its reset: a refusal that says
+  // "wait for the reset" without saying WHEN is not actionable.
   const detail = eligible
     .map((w) => `${w.name}: ${exhaustedFor(w).map(formatExhaustedWindow).join(' · ')}`)
     .join('; ');
+  if (!overageAllowed && poolB.length > 0) {
+    throw new Error(
+      `All eligible workers are quota-exhausted per live plan usage — ${detail}. ` +
+        `${poolB.length} of them have overage billing enabled, but overage dispatch is blocked ` +
+        'by the operator ("claudeCodeOrchestrator.overageWorkerDispatch") — no extra credit will ' +
+        'be spent. Wait for the earliest reset above, or enable overage dispatch to bill past the ' +
+        'window.',
+    );
+  }
   throw new Error(
     `All eligible workers are quota-exhausted per live plan usage, and none has overage billing ` +
       `enabled to bill past the window — ${detail}. Refused to dispatch to avoid a guaranteed quota ` +
@@ -473,6 +812,55 @@ function pickWorker(
       'overage. Wait for the earliest reset above, or — if you believe the usage reading is stale — ask ' +
       'the operator to run "Claude Code Orchestrator: Refresh Account Usage" in VS Code.',
   );
+}
+
+/**
+ * pickWorker, plus the one thing pickWorker cannot do: refresh a stale login verdict.
+ *
+ * The cache is read once per dispatch and only the list_workers path ever refreshes
+ * it, so without this a worker that was logged out when the reading was taken stays
+ * undispatchable no matter how many times the operator re-logs in and retries — the
+ * exact false-blocked failure the design forbids. Here a cached "expired" verdict
+ * costs one live auth probe before it is believed, and the selection is retried once
+ * with whatever recovered.
+ *
+ * Cost is bounded: probes happen ONLY when the cached verdict is the sole blocker,
+ * at most once per config dir per dispatch (probedDirs), at most LIVE_RECHECK_MAX_DIRS
+ * dirs per dispatch at LIVE_RECHECK_PROBE_TIMEOUT_MS each (3 × 5s = 15s worst case,
+ * whatever the account count), and the retry never re-probes — so a second
+ * ExpiredLoginBlock ends the dispatch instead of looping. The healthy path adds
+ * nothing at all: no cached-expired worker, no probe.
+ */
+async function pickWorkerLive(
+  workers: WorkerProfile[],
+  preferred: string | undefined,
+  attempted: Set<string>,
+  requestedModel: string | undefined,
+  cache: UsageCache,
+  overageAllowed: boolean,
+  probedDirs: Set<string>,
+): Promise<{ worker: WorkerProfile; billableOverage: boolean }> {
+  try {
+    return pickWorker(workers, preferred, attempted, requestedModel, cache, overageAllowed);
+  } catch (err) {
+    if (!(err instanceof ExpiredLoginBlock)) {
+      throw err;
+    }
+    const recheck = await liveRecheckExpiredLogins(err.candidates, err.kind, cache, probedDirs);
+    if (!recheck.recovered) {
+      throw new Error(err.message + recheck.note);
+    }
+    try {
+      return pickWorker(workers, preferred, attempted, requestedModel, cache, overageAllowed);
+    } catch (retryErr) {
+      // Still blocked on a login: the accounts that recovered were not enough (they
+      // may be exhausted, or other blockers remain). Carry the probe findings so the
+      // caller is not told to re-login an account we just proved is fine.
+      throw retryErr instanceof ExpiredLoginBlock
+        ? new Error(retryErr.message + recheck.note)
+        : retryErr;
+    }
+  }
 }
 
 function recordSuccess(name: string, run: RunResult): void {
@@ -614,6 +1002,16 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
   const requestedModel =
     args.model && (WORKER_MODELS as readonly string[]).includes(args.model) ? args.model : undefined;
   const usageCache = readUsageCache();
+  // Operator billing guard, resolved once for the whole dispatch (including every
+  // failover attempt) so a mid-dispatch settings change cannot make one attempt
+  // billable and the next not. Defensive like the frontier guard: anything that is
+  // not the literal 'allow' reads as blocked — on a money surface, an unreadable
+  // or unexpected value must never be taken as consent to spend.
+  const overageAllowed = registry.overageWorkerDispatch === 'allow';
+  // Config dirs whose login was already re-probed live for THIS dispatch. Workers
+  // can share a dir, and a dispatch can run pickWorker once per failover attempt —
+  // neither may turn into a second probe of the same account.
+  const probedDirs = new Set<string>();
 
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -623,11 +1021,25 @@ async function dispatchTask(args: DispatchArgs, requestId: string | number | nul
       let worker: WorkerProfile;
       let billableOverage: boolean;
       try {
-        const picked = pickWorker(registry.workers, args.worker, attempted, requestedModel, usageCache);
+        const picked = await pickWorkerLive(
+          registry.workers,
+          args.worker,
+          attempted,
+          requestedModel,
+          usageCache,
+          overageAllowed,
+          probedDirs,
+        );
         worker = picked.worker;
         billableOverage = picked.billableOverage;
       } catch (err) {
         lastError = lastError ?? (err as Error);
+        break;
+      }
+      // Selection can now await live auth probes, so a cancellation can land after
+      // the loop-top check and before this task is trackable. Re-check here: past
+      // this point the child is spawned and cancelRequest could no longer reach it.
+      if (isAborted(requestId)) {
         break;
       }
       attempted.add(worker.name);
@@ -824,8 +1236,11 @@ function renderWindow(w: UsageWindow): string {
 }
 
 /**
- * One live-usage line for an account. `available:false` with no error is a valid
- * state — a non-subscription login that simply has no plan limits — never a failure.
+ * One live-usage line for an account. `available:false` with no error is
+ * ambiguous: it is either a non-subscription login that genuinely has no plan
+ * limits, or a subscription whose OAuth session expired. isLoginExpired() is the
+ * single source of truth that separates the two (it only says yes on a fresh
+ * loggedIn:false probe), so the server and the extension can never disagree.
  */
 function usageLine(configDir: string): string {
   const usage = getCachedUsage(configDir);
@@ -836,6 +1251,12 @@ function usageLine(configDir: string): string {
     return `usage unavailable: ${usage.error}`;
   }
   if (usage.available !== true) {
+    if (isLoginExpired(usage)) {
+      return (
+        `login expired / logged out — re-login needed (${reloginCommand(configDir)}) — ` +
+        'automatic assignment skips this worker'
+      );
+    }
     return 'no plan limits (login is a token / non-subscription)';
   }
   const windows = Array.isArray(usage.windows) ? usage.windows : [];
@@ -896,9 +1317,16 @@ async function listWorkers(): Promise<string> {
     ...registry.workers.map((w) => w.configDir),
   ];
   const anyOverageEnabled = overageDirs.some((dir) => overageEnabled(getCachedUsage(dir)));
-  const moneyFooter = anyOverageEnabled
-    ? "\n\nOverage billing is ENABLED on one or more accounts: dispatching past a plan window bills money against that account's monthly cap instead of being blocked. Prefer accounts with headroom, and treat a window near 100% as a spend risk, not just a wait."
-    : '';
+  // Same defensive read as the dispatch path: only the literal 'allow' is consent.
+  // Overage billing being ON at the ACCOUNT means nothing if the operator's guard
+  // blocks it here — saying "dispatching past a plan window bills money" in that
+  // state would misreport this server's actual spending behavior.
+  const overageAllowed = registry.overageWorkerDispatch === 'allow';
+  const moneyFooter = !anyOverageEnabled
+    ? ''
+    : overageAllowed
+      ? "\n\nOverage billing is ENABLED on one or more accounts: dispatching past a plan window bills money against that account's monthly cap instead of being blocked. Prefer accounts with headroom, and treat a window near 100% as a spend risk, not just a wait. Overage dispatch is ALLOWED by the operator — an exhausted worker may be auto-selected as a last resort and bill real money."
+      : '\n\nOverage billing is enabled on one or more accounts, but overage dispatch is BLOCKED by the operator ("claudeCodeOrchestrator.overageWorkerDispatch") — dispatches never spend extra credit past a plan window; exhausted workers are refused/skipped instead.';
   if (registry.workers.length === 0) {
     return (
       ['No worker accounts registered.', mainBlock].filter(Boolean).join('\n\n') + moneyFooter
@@ -920,14 +1348,18 @@ async function listWorkers(): Promise<string> {
         line += ` (~$${s.costUsd.toFixed(2)})`;
       }
     }
-    if (s?.cooldownUntil && s.cooldownUntil > now) {
+    const usageForWorker = getCachedUsage(w.configDir);
+    // A logged-out account outranks cooldown as a status: cooldown expires on its
+    // own, an expired login never does. Saying "available" here would be a lie.
+    if (isLoginExpired(usageForWorker)) {
+      line += ' — LOGGED OUT (re-login needed)';
+    } else if (s?.cooldownUntil && s.cooldownUntil > now) {
       line += ` — COOLING DOWN until ${new Date(s.cooldownUntil).toLocaleTimeString()} (quota error)`;
     } else {
       line += ' — available';
     }
     // Live-usage exhaustion marker. session/weekly_all block all automatic
     // assignment; a lone weekly_scoped (Fable) window only refuses claude-fable-5.
-    const usageForWorker = getCachedUsage(w.configDir);
     const exhausted = exhaustedWindows(usageForWorker, now);
     const broad = exhausted.filter((win) => win.kind === 'session' || win.kind === 'weekly_all');
     // Only the Fable-only weekly window. Filter kind explicitly: an exhausted
@@ -938,11 +1370,17 @@ async function listWorkers(): Promise<string> {
     if (broad.length > 0) {
       // An exhausted worker with overage billing enabled is NOT skipped: it bills
       // money past the window and auto-assignment falls back to it when nothing
-      // else is free — say so instead of "skips this worker".
-      const tail = overageEnabled(usageForWorker)
-        ? '— overage billing is ON: dispatches will BILL real money instead of being blocked; ' +
-          'auto-assignment uses it only when no non-exhausted worker is available'
-        : '— automatic assignment skips this worker';
+      // else is free — say so instead of "skips this worker". But only while the
+      // operator's guard actually permits it: with the guard blocking, the account
+      // setting is inert and this worker is refused/skipped exactly like the rest,
+      // which is what the money footer says one screen below.
+      const tail = !overageEnabled(usageForWorker)
+        ? '— automatic assignment skips this worker'
+        : overageAllowed
+          ? '— overage billing is ON: dispatches will BILL real money instead of being blocked; ' +
+            'auto-assignment uses it only when no non-exhausted worker is available'
+          : '— overage billing is ON for this account, but overage dispatch is blocked by the ' +
+            'operator — automatic assignment skips this worker and naming it is refused';
       exhaustedLine = `\n  ⛔ quota exhausted: ${broad.map(formatExhaustedWindow).join(' · ')} ${tail}`;
     } else if (scoped.length > 0) {
       exhaustedLine = `\n  ⛔ Weekly Fable exhausted (resets ${formatRelativeReset(
@@ -951,7 +1389,23 @@ async function listWorkers(): Promise<string> {
     }
     return `${line}\n  ${usageLine(w.configDir)}${exhaustedLine}`;
   });
-  return [mainBlock, workerBlocks.join('\n')].filter(Boolean).join('\n\n') + guard + moneyFooter;
+  const loggedOutNames = registry.workers
+    .filter((w) => isLoginExpired(getCachedUsage(w.configDir)))
+    .map((w) => w.name);
+  const loginFooter =
+    loggedOutNames.length > 0
+      ? `\n\nLogged-out accounts (${loggedOutNames.join(', ')}) have an expired subscription OAuth ` +
+        'session: automatic assignment skips them and naming one explicitly is refused, until the ' +
+        `account is re-logged in (see the re-login command on each line above — ${RELOGIN_SHELL_CAVEAT}). ` +
+        'Once you have re-logged in, just dispatch: the next dispatch re-checks the login live, so a ' +
+        'recovered account becomes usable immediately without waiting for a usage refresh.'
+      : '';
+  return (
+    [mainBlock, workerBlocks.join('\n')].filter(Boolean).join('\n\n') +
+    guard +
+    loginFooter +
+    moneyFooter
+  );
 }
 
 const TASK_PROPERTIES = {
@@ -976,7 +1430,10 @@ const TASK_PROPERTIES = {
     description:
       'Optional worker account name (see list_workers). Omit for automatic assignment with quota-aware ' +
       'failover. Workers whose live plan usage shows an exhausted window (>=99% and not yet reset) are ' +
-      'skipped by automatic assignment and refused when named explicitly.',
+      'skipped by automatic assignment and refused when named explicitly. Workers whose login has ' +
+      'expired (shown as LOGGED OUT by list_workers) are skipped and refused the same way until ' +
+      'the account is re-logged in — a completed re-login is detected automatically on the next ' +
+      'dispatch, so retrying after re-logging in is enough.',
   },
   system_prompt: {
     type: 'string',

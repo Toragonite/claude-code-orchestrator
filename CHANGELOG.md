@@ -4,6 +4,68 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-07-20
+
+### Added
+- **Expired-login detection.** An account whose subscription OAuth session has
+  expired (or that was never logged in) used to be indistinguishable from a
+  token/API-key account — both showed "no plan limits". The usage refresher now
+  runs a fast `claude auth status --json` probe for exactly those ambiguous
+  accounts and surfaces an expired login as its own state on the dashboard usage
+  card, the Worker Accounts tree, and `list_workers` — instead of the misleading
+  token-account message. Genuine token/API-key logins are unaffected (they
+  report `loggedIn: true`), and the probe result for them is memoized for six
+  hours so they are not re-probed every refresh cycle.
+- **One-click re-login.** An expired account's dashboard card gains a
+  **Re-login** button, and worker items gain a **Re-login Account** context-menu
+  command. Both open a terminal with the account's `CLAUDE_CONFIG_DIR` set,
+  running `claude auth login` with the account's email pre-filled from its
+  config directory.
+- **Dispatch protection for logged-out workers, with live self-heal.**
+  Automatic assignment skips a logged-out worker and naming one explicitly is
+  refused with recovery instructions — but before refusing, the dispatch server
+  re-checks the login live (bounded: 5s per probe, at most 3 accounts per
+  dispatch), so an account you just re-logged-in becomes dispatchable
+  immediately, without waiting for the next usage refresh.
+- **Session keepalive (opt-in).** New setting
+  `claudeCodeOrchestrator.sessionKeepalive` (default **off**): sends one minimal
+  `haiku` request per subscription account per 24 hours to keep OAuth sessions
+  fresh. Pings run sequentially, skip the main session, accounts with a running
+  dispatch, and exhausted windows (a keepalive can never trigger overage
+  billing); failed pings back off for 6 hours, and editors sharing the machine
+  coordinate through a claim file so accounts are not double-pinged.
+- **Overage dispatch guard.** New setting
+  `claudeCodeOrchestrator.overageWorkerDispatch` (`block` by default): when
+  blocking, the dispatch server never assigns work to a quota-exhausted worker —
+  not even one with extra-usage billing enabled — so dispatch can never spend
+  money past a plan window. Refusals name the setting and include each worker's
+  reset time. Set it to `allow` to restore the previous last-resort fallback
+  (every such dispatch still carries the explicit ⚠ billing warning).
+
+### Changed
+- **Overage fallback now requires opt-in (behavior change).** Previously,
+  when every eligible worker was exhausted, automatic assignment silently fell
+  back to a worker with overage billing enabled and billed real money; naming
+  an exhausted overage-enabled worker also proceeded billably. Both paths are
+  now refused unless `overageWorkerDispatch` is set to `allow`.
+- **The two billing guards are now impossible to confuse.** The frontier
+  setting is relabeled "frontier **model** dispatch (claude-fable-5 only — its
+  own quota / per-use billing)" and its description now states it does **not**
+  prevent overage billing for other models; the new overage guard sits next to
+  it in the dashboard as "overage dispatch (spend extra credit past plan limits
+  — any model)". `list_workers` per-worker lines and footnotes reflect the
+  actual guard state.
+
+### Fixed
+- **Expired logins no longer masquerade as token accounts** across the
+  dashboard, tree view, and `list_workers` (previously they rendered as
+  "no plan limits — token / non-subscription", and dispatches to them failed
+  mid-task with an authentication error).
+- Worker terminals now quote a configured `claude` path containing spaces.
+- `main` is reserved as a worker name (add, import, and rename), preventing a
+  worker from shadowing the orchestrator session's own account in usage views
+  and the re-login flow.
+
 ## [1.1.2] — 2026-07-15
 
 ### Added

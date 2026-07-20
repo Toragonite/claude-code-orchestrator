@@ -5,6 +5,7 @@ import * as path from 'path';
 import { execFileSync } from 'child_process';
 import {
   applyFrontierGuard,
+  applyOverageGuard,
   findWorkerByConfigDir,
   readRegistry,
   renameWorker,
@@ -12,7 +13,7 @@ import {
   WorkerModel,
   WorkerProfile,
 } from './registry';
-import { deleteUsageEntries } from './usage';
+import { deleteUsageEntries, readOauthEmail, sanitizeEmailForShell } from './usage';
 
 /**
  * Resolve a bare command name to an absolute path via the user's login shell.
@@ -39,6 +40,16 @@ function resolveViaLoginShell(command: string): string {
     // fall through
   }
   return command;
+}
+
+/**
+ * Quote a command path for a terminal command line when it contains whitespace
+ * (e.g. `C:\Program Files\...\claude.cmd`). Double quotes are the one form
+ * POSIX shells, PowerShell and cmd.exe all accept. A path containing a double
+ * quote itself is out of scope — no escaping is attempted.
+ */
+function quoteCommandPath(command: string): string {
+  return /\s/.test(command) ? `"${command}"` : command;
 }
 
 /**
@@ -86,6 +97,13 @@ export class WorkerManager {
 
   add(name: string, model: WorkerModel, configDir?: string): WorkerProfile {
     const registry = readRegistry();
+    // 'main' is the fixed label for the orchestrator session's own account, which
+    // every account listing prepends. A worker carrying it would be ambiguous with
+    // that entry anywhere accounts are addressed by name. The addWorker input box
+    // rejects it too; this is the last line of defense (import, MCP, direct calls).
+    if (name === 'main') {
+      throw new Error('"main" is reserved for the orchestrator session\'s own account.');
+    }
     if (registry.workers.some((w) => w.name === name)) {
       throw new Error(`A worker named "${name}" already exists.`);
     }
@@ -126,6 +144,11 @@ export class WorkerManager {
 
   /** Relabel a worker; its config directory and login are untouched. */
   rename(oldName: string, newName: string): void {
+    // Same reservation add() enforces — renaming into 'main' would otherwise
+    // recreate exactly the ambiguity the reservation exists to prevent.
+    if (newName === 'main') {
+      throw new Error('"main" is reserved for the orchestrator session\'s own account.');
+    }
     renameWorker(oldName, newName);
     this._onDidChange.fire();
   }
@@ -164,13 +187,18 @@ export class WorkerManager {
     registry.permissionMode = cfg.get<string>('workerPermissionMode', 'acceptEdits');
     registry.claudePath = resolveViaLoginShell(cfg.get<string>('claudePath', 'claude'));
     registry.cooldownMinutes = cfg.get<number>('quotaCooldownMinutes', 30);
-    // Billing guard: reconcile across editors that share this registry. Use
+    // Billing guards: reconcile across editors that share this registry. Use
     // inspect() (not get()) so an editor where the setting is UNSET is
     // distinguished from one that explicitly chose the default — an unset editor
-    // must not clobber another editor's explicit `allow` back to `block`.
+    // must not clobber another editor's explicit `allow` back to `block`. The two
+    // guards are independent: frontier governs WHICH MODEL may be dispatched,
+    // overage governs whether ANY dispatch may bill past an exhausted plan window.
     const fg = cfg.inspect<string>('frontierWorkerDispatch');
     const explicit = fg?.workspaceFolderValue ?? fg?.workspaceValue ?? fg?.globalValue;
     applyFrontierGuard(registry, vscode.env.appName, explicit);
+    const og = cfg.inspect<string>('overageWorkerDispatch');
+    const overageExplicit = og?.workspaceFolderValue ?? og?.workspaceValue ?? og?.globalValue;
+    applyOverageGuard(registry, vscode.env.appName, overageExplicit);
     writeRegistry(registry);
   }
 
@@ -214,10 +242,34 @@ export class WorkerManager {
     terminal.show();
     if (initialPrompt) {
       const quoted = `"${initialPrompt.replace(/(["\\$`])/g, '\\$1')}"`;
-      terminal.sendText(`${claudePath} ${quoted}`);
+      terminal.sendText(`${quoteCommandPath(claudePath)} ${quoted}`);
     } else {
-      terminal.sendText(claudePath);
+      terminal.sendText(quoteCommandPath(claudePath));
     }
     return terminal;
   }
+}
+
+/**
+ * Open a terminal running `claude auth login` against `configDir`, to recover an
+ * expired or logged-out account. Standalone rather than a WorkerManager method
+ * because the 'main' account is not in the registry and so has no WorkerProfile —
+ * it is addressed by (label, configDir) alone, exactly like every worker.
+ */
+export function openReloginTerminal(label: string, configDir: string): vscode.Terminal {
+  const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
+  const claudePath = cfg.get<string>('claudePath', 'claude');
+  const terminal = vscode.window.createTerminal({
+    name: `login: ${label}`,
+    env: { CLAUDE_CONFIG_DIR: configDir },
+  });
+  terminal.show();
+  // The stored OAuth address pre-fills the login so the user re-authenticates the
+  // account this directory already belongs to, not whichever one their browser is
+  // signed into. sanitizeEmailForShell guarantees a shell-safe charset, so the
+  // value needs no quoting; when it rejects the address the flag is dropped
+  // entirely rather than an unvetted string reaching the command line.
+  const email = sanitizeEmailForShell(readOauthEmail(configDir));
+  terminal.sendText(`${quoteCommandPath(claudePath)} auth login${email ? ` --email ${email}` : ''}`);
+  return terminal;
 }

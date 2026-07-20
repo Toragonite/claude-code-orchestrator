@@ -62,6 +62,37 @@ export interface ExtraUsage {
   spendLabel: string | null;
 }
 
+/**
+ * Result of a `claude auth status --json` probe, used to DISAMBIGUATE the two very
+ * different accounts that both report `rate_limits_available:false`:
+ *
+ *  - a genuine token / non-subscription login (still usable — it just has no
+ *    claude.ai plan windows to show), and
+ *  - a claude.ai subscription login whose credentials have EXPIRED (unusable until
+ *    the user logs in again).
+ *
+ * Without this probe both collapse into "no plan limits", so the UI mislabels an
+ * expired login as a token account and the user never learns they must re-login.
+ */
+export interface AuthStatus {
+  /** Verbatim `loggedIn` from the CLI. false is the expired/logged-out signal. */
+  loggedIn: boolean;
+  /** Verbatim `authMethod` ('claude.ai', 'none', …), or null when absent/non-string. */
+  method: string | null;
+  /**
+   * The email the CLI itself reported, or null when it reported none. The CLI
+   * omits `email` entirely once the login has expired, so this is null in exactly
+   * the expired case — which is fine: nothing reads it. The "re-login as <email>"
+   * affordance recovers the address from `<configDir>/.claude.json` itself, via
+   * readOauthEmail, on the user-initiated terminal path. This field is NOT a
+   * fallback source and deliberately does no disk I/O: it is populated on the hot
+   * refresh path, which must not read a multi-megabyte file per account.
+   */
+  email: string | null;
+  /** Epoch ms when this auth reading was taken. */
+  checkedAt: number;
+}
+
 export interface AccountUsage {
   /** 'main' for the orchestrator's own config dir, else the worker name. */
   name: string;
@@ -106,12 +137,47 @@ export interface AccountUsage {
    * error===undefined && available===false as "no limits", NOT as a failure.
    */
   error?: string;
+  /**
+   * Auth reading taken ONLY for the ambiguous case (no probe error, but
+   * available!==true) to tell an expired login apart from a token account.
+   *
+   * CRITICAL, and asymmetric by design: a `loggedIn:false` reading is NEVER carried
+   * forward from a previous cache entry. Every refresh cycle re-probes a suspected
+   * logged-out account, so a recovery is detected within one cycle and a stale
+   * "expired" verdict can never be resurrected. That is what makes the state
+   * self-heal: once an account is re-logged-in and reports available:true we stop
+   * probing, the fresh entry simply has no `auth`, and the verdict disappears on its
+   * own.
+   *
+   * A `loggedIn:true` reading IS deliberately memoized for up to AUTH_MEMO_TTL_MS —
+   * see shouldReuseAuth, applied in refreshAllUsage. Such accounts (genuine
+   * token/API-key logins) are permanently ambiguous upstream: they report
+   * rate_limits_available:false forever and answer `loggedIn:true` every time, so
+   * re-spawning `claude auth status` every refresh cycle bought an answer that never
+   * changes. mergeStaleWindows itself still never touches `auth`; the reuse happens
+   * only in refreshAllUsage, before the merge, and only for that benign verdict.
+   *
+   * Read it through parseAuth (the cache file is hand-editable).
+   */
+  auth?: AuthStatus;
 }
 
 export const USAGE_CACHE_FILE = path.join(ROOT_DIR, 'usage.json');
 
 /** Default probe timeout. get_usage returns in ~1-2s; 20s is a generous ceiling. */
 const PROBE_TIMEOUT_MS = 20_000;
+
+/**
+ * CEILING for the `claude auth status --json` probe. It is a local credential
+ * check that returns in well under a second, so 10s is already generous.
+ *
+ * This is a ceiling, not a fixed budget: refreshAllUsage narrows it to
+ * min(AUTH_PROBE_TIMEOUT_MS, its own timeoutMs) so the probe SHARES the caller's
+ * per-account latency budget rather than adding to it. Callers that pass a tight
+ * timeout (the MCP server uses 5s to bound list_workers) would otherwise wait
+ * timeoutMs + 10s per ambiguous account, since the probe fires exactly for those.
+ */
+export const AUTH_PROBE_TIMEOUT_MS = 10_000;
 
 const clampPercent = (n: unknown): number => {
   const v = typeof n === 'number' && isFinite(n) ? n : 0;
@@ -386,6 +452,293 @@ export function fetchAccountUsage(
   });
 }
 
+/**
+ * Maximum accepted address length. RFC 5321 caps a forward path at 254 octets, so
+ * nothing longer is a real address — and an unbounded string interpolated into a
+ * terminal line is a denial-of-service shape regardless of its charset.
+ */
+const EMAIL_MAX_CHARS = 254;
+
+/**
+ * Return `email` unchanged iff it is a plausible address that is inert in EVERY
+ * shell we may hand it to, else null.
+ *
+ * This is a SECURITY boundary, not a validity check. The address ultimately comes
+ * from `<configDir>/.claude.json`, a hand-editable file, and callers interpolate it
+ * into a terminal command (`claude auth login --email <email>`) via sendText — a
+ * terminal whose shell we do not choose. Three distinct hazards are excluded:
+ *
+ *  - POSIX shells (sh/bash/zsh): a quote, backtick, `$`, `;`, `|`, `&`, newline or
+ *    glob character would let the file's contents execute arbitrary commands. None
+ *    of them are in the accepted charset.
+ *  - cmd.exe and PowerShell: `%` delimits environment expansion, so `a%PATH%b@x.com`
+ *    would interpolate host state into the command line. `%` is therefore rejected
+ *    everywhere in the address, not merely quoted.
+ *  - Argument injection in any shell: a leading `-` would make the value read as a
+ *    flag rather than a value (`--email -x@example.com`), so neither the local part
+ *    nor the domain may begin with `-` (it stays legal in interior positions).
+ *
+ * Length is capped at EMAIL_MAX_CHARS on top of the charset. Anything that passes
+ * all of these is safe to interpolate verbatim. Exported so the login affordance
+ * and its tests share exactly this one definition.
+ */
+export function sanitizeEmailForShell(email: string | null): string | null {
+  if (typeof email !== 'string' || email.length > EMAIL_MAX_CHARS) {
+    return null;
+  }
+  return /^[A-Za-z0-9._+][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$/.test(email)
+    ? email
+    : null;
+}
+
+/**
+ * Upper bound on the .claude.json we are willing to read. Real files hold project
+ * history and reach a few MB legitimately, so 8MB clears any genuine file with room
+ * to spare; a pathological (or hand-crafted) one must not be slurped into memory
+ * just to recover an email, so anything past this ceiling degrades to null like any
+ * other unreadable file.
+ */
+const OAUTH_ACCOUNT_FILE_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Recover the account email from `<configDir>/.claude.json`'s
+ * `oauthAccount.emailAddress`. This is the ONLY place the email survives an
+ * expired login: `claude auth status --json` drops the field entirely once
+ * `loggedIn` goes false, which is exactly when we need it to tell the user which
+ * account to sign back in to.
+ *
+ * Called ONLY from the user-initiated re-login path, never from the periodic usage
+ * refresh: it is synchronous disk I/O on a file that can reach megabytes, which the
+ * extension host's main thread must not do once per account every few minutes.
+ *
+ * The file is hand-editable and may be missing, huge, truncated or hold any shape
+ * at all, so every step degrades to null and nothing throws. The result is passed
+ * through sanitizeEmailForShell, so a caller can interpolate it safely.
+ */
+export function readOauthEmail(configDir: string): string | null {
+  try {
+    const file = path.join(configDir, '.claude.json');
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > OAUTH_ACCOUNT_FILE_MAX_BYTES) {
+      return null;
+    }
+    const raw: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!raw || typeof raw !== 'object') {
+      return null;
+    }
+    const account = (raw as Record<string, unknown>).oauthAccount;
+    if (!account || typeof account !== 'object') {
+      return null;
+    }
+    const email = (account as Record<string, unknown>).emailAddress;
+    return typeof email === 'string' ? sanitizeEmailForShell(email) : null;
+  } catch {
+    // missing dir/file, unreadable, or not JSON — the email is simply unknown
+    return null;
+  }
+}
+
+/**
+ * Cap on collected auth-probe stdout. The payload is a one-line JSON object of a
+ * few hundred bytes; a CLI that streams unbounded output (progress spam, a broken
+ * build) must not grow this buffer without limit. The cap is applied AFTER each
+ * append, so a single oversized chunk cannot overshoot it. Truncation loses the
+ * closing brace, so the parse fails and the probe degrades to undefined — the safe
+ * verdict.
+ */
+const AUTH_STDOUT_MAX_CHARS = 64 * 1024;
+
+/**
+ * Probe one account's login state with `claude auth status --json`.
+ *
+ * Resolves undefined — never rejects, never throws — on ANY failure: synchronous
+ * or asynchronous spawn error, timeout, non-JSON output, or a payload without a
+ * boolean `loggedIn`. undefined means "unknown", and callers must degrade to
+ * today's behavior rather than guess; a wrong "expired" verdict would wrongly block
+ * dispatches, so ambiguity must never harden into a claim.
+ *
+ * A neutral cwd (os.tmpdir()) is REQUIRED for the same reason as fetchAccountUsage:
+ * from a project directory the CLI would load that project's `.mcp.json` and spawn
+ * this extension's own dispatch server once per probe.
+ *
+ * stdout is parsed by taking the substring from the first '{' to the last '}',
+ * because the CLI may prepend update notices or other warnings to the JSON.
+ */
+export function fetchAuthStatus(
+  configDir: string,
+  timeoutMs = AUTH_PROBE_TIMEOUT_MS,
+): Promise<AuthStatus | undefined> {
+  return new Promise((resolve) => {
+    let claudePath = 'claude';
+    try {
+      claudePath = readRegistry().claudePath || 'claude';
+    } catch {
+      // registry unreadable — fall back to bare command
+    }
+
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(claudePath, ['auth', 'status', '--json'], {
+        cwd: os.tmpdir(),
+        env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      // spawn can throw synchronously for a pathological claudePath — never reject.
+      resolve(undefined);
+      return;
+    }
+
+    let settled = false;
+    let out = '';
+
+    /**
+     * Parse whatever stdout arrived so far. The exit code is deliberately ignored:
+     * a logged-out account is a legitimate answer that the CLI may report with a
+     * non-zero status, and the JSON is what we actually need.
+     */
+    const parseCollected = (): AuthStatus | undefined => {
+      const start = out.indexOf('{');
+      const end = out.lastIndexOf('}');
+      if (start < 0 || end <= start) {
+        return undefined;
+      }
+      let data: unknown;
+      try {
+        data = JSON.parse(out.slice(start, end + 1));
+      } catch {
+        return undefined;
+      }
+      if (!data || typeof data !== 'object') {
+        return undefined;
+      }
+      const o = data as Record<string, unknown>;
+      if (typeof o.loggedIn !== 'boolean') {
+        return undefined;
+      }
+      // The CLI reports `email` only while the login is healthy; once it expires the
+      // field is gone and this stays null. No fallback read of .claude.json here —
+      // this runs on the periodic refresh path, and the re-login affordance recovers
+      // the address itself via readOauthEmail when the user actually asks for it.
+      return {
+        loggedIn: o.loggedIn,
+        method: typeof o.authMethod === 'string' ? o.authMethod : null,
+        email: typeof o.email === 'string' && o.email !== '' ? o.email : null,
+        checkedAt: Date.now(),
+      };
+    };
+
+    const done = (status: AuthStatus | undefined) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+      resolve(status);
+    };
+
+    // A CLI that hangs after printing its JSON still gives us a usable answer, so
+    // the timeout parses what arrived rather than discarding it outright.
+    const timer = setTimeout(() => done(parseCollected()), timeoutMs);
+
+    // Decode as UTF-8 on the stream itself: concatenating raw Buffers would let a
+    // multi-byte character straddling two chunks decode into replacement chars and
+    // corrupt the JSON. Capping after the append keeps `out` bounded even when one
+    // chunk alone exceeds the ceiling.
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d: string) => {
+      out = (out + d).slice(0, AUTH_STDOUT_MAX_CHARS);
+    });
+    // stderr must be drained or a chatty CLI blocks on a full pipe; its content is
+    // irrelevant here since an unparseable probe is already "unknown".
+    child.stderr.on('data', () => undefined);
+    child.on('error', () => done(undefined));
+    child.on('close', () => done(parseCollected()));
+  });
+}
+
+/**
+ * Normalize a cached `auth` field, mirroring how every other cached value is read:
+ * usage.json is hand-editable and written by other processes, so nothing may be
+ * trusted to have the declared shape. Returns undefined unless `loggedIn` is
+ * genuinely a boolean — the one field a verdict may rest on. Every consumer
+ * (dashboard, isLoginExpired) goes through this rather than touching `auth` raw.
+ */
+export function parseAuth(raw: unknown): AuthStatus | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  const o = raw as Record<string, unknown>;
+  if (typeof o.loggedIn !== 'boolean') {
+    return undefined;
+  }
+  return {
+    loggedIn: o.loggedIn,
+    method: typeof o.method === 'string' ? o.method : null,
+    email: typeof o.email === 'string' ? o.email : null,
+    checkedAt: typeof o.checkedAt === 'number' && isFinite(o.checkedAt) ? o.checkedAt : 0,
+  };
+}
+
+/**
+ * How long a benign `loggedIn:true` auth reading may be reused before the account
+ * is probed again. Six hours ≈ 4 probes/day per such account, down from ~288 on a
+ * 5-minute refresh cycle. Only the benign verdict is memoized (see shouldReuseAuth).
+ */
+export const AUTH_MEMO_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * True iff a previously cached `auth` value may be reused instead of re-spawning
+ * `claude auth status`. Pure (exported for tests).
+ *
+ * Requires ALL of: the cached value parses (parseAuth — usage.json is
+ * hand-editable), it reports `loggedIn:true`, and its `checkedAt` is a finite
+ * instant whose age falls in [0, AUTH_MEMO_TTL_MS). A future or NaN `checkedAt`
+ * yields false, matching isCacheFresh's clock-skew/tamper stance: an unverifiable
+ * timestamp must cost a probe, not buy one.
+ *
+ * The `loggedIn === true` condition is the whole safety argument. A logged-out
+ * verdict is never reusable, so every refresh cycle re-probes a suspected-expired
+ * account and detects recovery within one cycle; reuse can only ever prolong a
+ * "this account is fine" verdict, which the very next available:true reading
+ * discards anyway. What it buys back is the token/API-key account that is
+ * permanently ambiguous upstream and answers identically every single time.
+ */
+export function shouldReuseAuth(prevAuth: unknown, nowMs: number): boolean {
+  const auth = parseAuth(prevAuth);
+  if (auth === undefined || auth.loggedIn !== true) {
+    return false;
+  }
+  const age = nowMs - auth.checkedAt;
+  return isFinite(age) && age >= 0 && age < AUTH_MEMO_TTL_MS;
+}
+
+/**
+ * THE single source of truth for "this account's claude.ai login has expired",
+ * shared by the extension UI and the MCP dispatch server so they can never disagree.
+ *
+ * True only when all of: a reading exists, the probe itself did not fail, the
+ * account exposes no plan limits, and the auth probe positively reported
+ * `loggedIn:false`. Every other case — no reading, probe error, plan limits
+ * present, missing or malformed `auth` — is false, which falls back to today's
+ * "no plan limits" behavior. The bias is deliberate: a FALSE "expired" verdict
+ * would wrongly block dispatches on a perfectly good account, so an unproven
+ * expiry must never be asserted.
+ */
+export function isLoginExpired(usage: AccountUsage | undefined): boolean {
+  return (
+    usage !== undefined &&
+    usage.error === undefined &&
+    usage.available !== true &&
+    parseAuth(usage.auth)?.loggedIn === false
+  );
+}
+
 export type UsageCache = Record<string, AccountUsage>;
 
 export function readUsageCache(): UsageCache {
@@ -485,6 +838,13 @@ const STALE_WINDOW_MAX_MS = 30 * 60 * 1000;
  * good windows (and the overage state that vanishes with them) forward, marked
  * stale, for up to STALE_WINDOW_MAX_MS. After that we let the account fall to the
  * honest "no windows" state rather than present very old numbers as if current.
+ *
+ * Every branch below returns a spread of `fresh` and only ever reaches into `prev`
+ * for explicitly named fields. `auth` is deliberately NOT one of them: this merge
+ * never carries any auth verdict forward, so an old "logged out" verdict can never
+ * be resurrected here. (refreshAllUsage may reuse a prior `loggedIn:true` reading
+ * before calling this — see shouldReuseAuth — but that decision is made upstream on
+ * the fresh entry itself, and never for a logged-out verdict.)
  */
 export function mergeStaleWindows(fresh: AccountUsage, prev: AccountUsage | undefined): AccountUsage {
   // Derive the last-good timestamp to carry forward. Prefer prev's own
@@ -614,7 +974,37 @@ export async function refreshAllUsage(
   const runner = async (): Promise<void> => {
     while (i < accounts.length) {
       const a = accounts[i++];
-      results.push(await fetchAccountUsage(a.name, a.configDir, timeoutMs));
+      const r = await fetchAccountUsage(a.name, a.configDir, timeoutMs);
+      // Only the ambiguous case needs a second probe: the account answered cleanly
+      // yet exposes no plan limits, which is either a token/non-subscription login
+      // or an EXPIRED claude.ai one. An account that reports limits is demonstrably
+      // healthy, and one whose probe errored tells us nothing — neither is probed,
+      // so the extra spawn stays confined to the minority that needs it. The probe
+      // SHARES the caller's latency budget: it is bounded by the smaller of its own
+      // ceiling and this refresh's timeoutMs, so a caller that asked for a 5s bound
+      // never waits 5s + 10s per ambiguous account. It leaves `auth` absent when it
+      // cannot decide.
+      //
+      // Before spawning, the previous reading is consulted: a token/API-key account
+      // is ambiguous FOREVER (rate_limits_available stays false) and answers
+      // `loggedIn:true` every time, so shouldReuseAuth memoizes that one benign
+      // verdict for AUTH_MEMO_TTL_MS — ~4 probes/day instead of ~288. A
+      // `loggedIn:false` verdict is never reusable, so a suspected-expired account
+      // is still re-probed every cycle and its recovery still lands within one. The
+      // reused value is re-normalized through parseAuth rather than copied raw, so a
+      // hand-edited usage.json cannot smuggle unknown fields into a fresh entry.
+      if (r.error === undefined && r.available !== true) {
+        const prevAuth = prev[a.configDir]?.auth;
+        if (shouldReuseAuth(prevAuth, Date.now())) {
+          r.auth = parseAuth(prevAuth);
+        } else {
+          const auth = await fetchAuthStatus(a.configDir, Math.min(AUTH_PROBE_TIMEOUT_MS, timeoutMs));
+          if (auth !== undefined) {
+            r.auth = auth;
+          }
+        }
+      }
+      results.push(r);
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, accounts.length) }, runner));

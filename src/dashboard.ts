@@ -9,17 +9,36 @@ import {
   windowUsage,
 } from './registry';
 import { isFrontierTier } from './prompts';
-import { formatAge, formatRelativeReset, getCachedUsage, isElevated, listAccounts, USAGE_CACHE_FILE } from './usage';
+import {
+  formatAge,
+  formatRelativeReset,
+  getCachedUsage,
+  isElevated,
+  isLoginExpired,
+  listAccounts,
+  USAGE_CACHE_FILE,
+} from './usage';
 
 const NO_LIMITS_MESSAGE =
   'No plan limits — this login is a token / non-subscription account. Live usage appears only for ' +
   'subscription logins (log this dir into a subscription, or point the main session at a subscription config dir).';
 
+const EXPIRED_MESSAGE =
+  'Subscription login expired or logged out — plan usage is unavailable and dispatches to this ' +
+  'account will fail until you re-login.';
+
 /** One usage card, fully resolved for the webview. `state` picks the message the card renders. */
 interface UsageCard {
   name: string;
   label: string;
-  state: 'refreshing' | 'error' | 'unavailable' | 'ok';
+  /**
+   * The account's CLAUDE_CONFIG_DIR — the identity the Re-login button carries.
+   * Names are not unique (a registry worker may legally be named 'main', which
+   * `listAccounts` also prepends for the orchestrator's own dir), so resolving a
+   * re-login by name can open `claude auth login` against the wrong directory.
+   */
+  configDir: string;
+  state: 'refreshing' | 'error' | 'unavailable' | 'expired' | 'ok';
   message: string | null;
   subscriptionType: string | null;
   ageMinutes: number | null;
@@ -76,6 +95,7 @@ function usageCards(now: number): UsageCard[] {
     const card: UsageCard = {
       name,
       label,
+      configDir,
       state: 'refreshing',
       message: 'usage: — (refreshing)',
       subscriptionType: null,
@@ -98,7 +118,13 @@ function usageCards(now: number): UsageCard[] {
       return { ...card, state: 'error', message: `usage unavailable: ${u.error}` };
     }
     if (!u.available) {
-      return { ...card, state: 'unavailable', message: NO_LIMITS_MESSAGE };
+      // An expired/logged-out subscription reports the same "no limits" shape as a
+      // genuine token account. isLoginExpired is the single source of truth that
+      // separates them; when it can't tell (missing or malformed auth in an old
+      // cache file) the card degrades to the long-standing no-limits reading.
+      return isLoginExpired(u)
+        ? { ...card, state: 'expired', message: EXPIRED_MESSAGE }
+        : { ...card, state: 'unavailable', message: NO_LIMITS_MESSAGE };
     }
     // The cache file is external input: a truncated/hand-edited entry may lack
     // windows, or carry null / non-object / malformed elements inside them.
@@ -142,6 +168,7 @@ const SETTING_KEYS = [
   'claudePath',
   'quotaCooldownMinutes',
   'frontierWorkerDispatch',
+  'overageWorkerDispatch',
 ] as const;
 const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks'] as const;
 
@@ -247,6 +274,9 @@ export function openDashboard(): void {
         frontierWorkerDispatch: cfg.get('frontierWorkerDispatch', 'block'),
         frontierEffective: reg ? reg.frontierWorkerDispatch : cfg.get('frontierWorkerDispatch', 'block'),
         frontierSetBy: reg ? (reg.frontierGuardSetBy ?? null) : null,
+        overageWorkerDispatch: cfg.get('overageWorkerDispatch', 'block'),
+        overageEffective: reg ? reg.overageWorkerDispatch : cfg.get('overageWorkerDispatch', 'block'),
+        overageSetBy: reg ? (reg.overageGuardSetBy ?? null) : null,
       },
     });
   };
@@ -260,7 +290,14 @@ export function openDashboard(): void {
     fs.unwatchFile(USAGE_CACHE_FILE, onCacheChange);
   });
   panel.webview.onDidReceiveMessage(
-    async (msg: { type: string; file?: string; key?: string; value?: unknown; id?: string }) => {
+    async (msg: {
+      type: string;
+      file?: string;
+      key?: string;
+      value?: unknown;
+      id?: string;
+      dir?: string;
+    }) => {
       if (msg.type === 'openTask' && msg.file) {
         try {
           const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.file));
@@ -280,6 +317,15 @@ export function openDashboard(): void {
         await vscode.commands.executeCommand('claudeCodeOrchestrator.cancelTask', { id: msg.id });
       } else if (msg.type === 'cancelAllTasks') {
         await vscode.commands.executeCommand('claudeCodeOrchestrator.cancelAllTasks');
+      } else if (msg.type === 'relogin' && typeof msg.dir === 'string') {
+        // A dedicated message type rather than a widened runCommand allowlist:
+        // this command takes an argument from the webview, so it must stay out
+        // of the argument-less COMMAND_IDS surface (mirrors cancelTask). The
+        // argument is the config DIRECTORY, not the name: account names are not
+        // unique, so a name would resolve to whichever entry comes first.
+        await vscode.commands.executeCommand('claudeCodeOrchestrator.reloginWorker', {
+          configDir: msg.dir,
+        });
       }
     },
   );
@@ -341,6 +387,7 @@ export function dashboardHtml(): string {
   button:disabled { opacity: 0.5; cursor: default; }
   button:disabled:hover { background: var(--vscode-button-secondaryBackground, var(--card-bg)); }
   .cancel-btn { color: var(--vscode-errorForeground, #f14c4c); padding: 1px 8px; font-size: 0.85em; }
+  .relogin-btn { margin-top: 9px; padding: 2px 10px; font-size: 0.85em; }
   #saved { color: var(--vscode-charts-green, #89d185); font-size: 0.8em; margin-left: 6px; opacity: 0; transition: opacity 0.3s; }
   .empty { color: var(--c-muted); padding: 18px 0; text-align: center; }
   .usage { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-bottom: 12px; }
@@ -417,11 +464,16 @@ export function dashboardHtml(): string {
       <input id="s-path" type="text" spellcheck="false">
       <label for="s-cool">quota cooldown (minutes)</label>
       <input id="s-cool" type="number" min="1">
-      <label for="s-frontier">frontier worker dispatch (claude-fable-5 — may bill per use)</label>
+      <label for="s-frontier">frontier model dispatch (claude-fable-5 only — its own quota / per-use billing)</label>
       <select id="s-frontier">
         <option value="block">block (billing guard)</option><option value="allow">allow</option>
       </select>
       <div id="s-frontier-note" style="font-size:0.8em;margin-top:4px"></div>
+      <label for="s-overage">overage dispatch (spend extra credit past plan limits — any model)</label>
+      <select id="s-overage">
+        <option value="block">block (billing guard)</option><option value="allow">allow</option>
+      </select>
+      <div id="s-overage-note" style="font-size:0.8em;margin-top:4px"></div>
       <div class="actions">
         <button data-cmd="installMcp">Register MCP here</button>
         <button data-cmd="addDispatchPolicy">Add policy to CLAUDE.md</button>
@@ -470,6 +522,7 @@ export function dashboardHtml(): string {
   bindSetting('s-path', 'claudePath', (v) => v.trim(), 'input', 700);
   bindSetting('s-cool', 'quotaCooldownMinutes', (v) => Math.max(1, Number(v) || 30), 'input', 700);
   bindSetting('s-frontier', 'frontierWorkerDispatch', (v) => v, 'change', 0);
+  bindSetting('s-overage', 'overageWorkerDispatch', (v) => v, 'change', 0);
   for (const b of document.querySelectorAll('button[data-cmd]')) {
     b.addEventListener('click', () => vscode.postMessage({ type: 'runCommand', id: b.dataset.cmd }));
   }
@@ -577,7 +630,13 @@ export function dashboardHtml(): string {
         staleLine(c.stale) +
         overageLine(c.overage);
     } else {
-      body = '<p class="u-note' + (c.state === 'error' ? ' err' : '') + '">' + esc(c.message) + '</p>';
+      // 'expired' reads as an error — it is actionable, not informational — and
+      // carries the only fix: a terminal running \`claude auth login\`.
+      const bad = c.state === 'error' || c.state === 'expired';
+      const relogin = c.state === 'expired'
+        ? '<button class="relogin-btn" data-relogin-dir="' + esc(c.configDir) + '">Re-login</button>'
+        : '';
+      body = '<p class="u-note' + (bad ? ' err' : '') + '">' + esc(c.message) + '</p>' + relogin;
     }
     return '<div class="card"><div class="u-head"><h2>' + esc(c.label) + plan + '</h2>' +
       '<span class="u-age">' + esc(age) + '</span></div>' + body + '</div>';
@@ -651,6 +710,9 @@ export function dashboardHtml(): string {
     for (const el of document.querySelectorAll('.cancel-btn')) {
       el.onclick = () => vscode.postMessage({ type: 'cancelTask', id: el.dataset.cancel });
     }
+    for (const el of document.querySelectorAll('.relogin-btn')) {
+      el.onclick = () => vscode.postMessage({ type: 'relogin', dir: el.dataset.reloginDir });
+    }
     document.getElementById('cancel-all').disabled = !(data.running > 0);
 
     // settings (skip fields being edited)
@@ -667,6 +729,17 @@ export function dashboardHtml(): string {
       fNote.innerHTML = '<span class="warn">' + msg + '</span>';
     } else {
       fNote.innerHTML = '<span class="muted">In effect: ' + esc(fEff) + '</span>';
+    }
+    if (editing !== 's-overage') document.getElementById('s-overage').value = data.settings.overageWorkerDispatch;
+    const oEff = data.settings.overageEffective;
+    const oSetBy = data.settings.overageSetBy;
+    const oNote = document.getElementById('s-overage-note');
+    if (oEff !== data.settings.overageWorkerDispatch) {
+      let msg = '⚠ In effect: ' + esc(oEff);
+      if (oSetBy != null) msg += ' — set in ' + esc(oSetBy) + '. Change this dropdown to take over.';
+      oNote.innerHTML = '<span class="warn">' + msg + '</span>';
+    } else {
+      oNote.innerHTML = '<span class="muted">In effect: ' + esc(oEff) + '</span>';
     }
   }
 </script>
