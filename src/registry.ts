@@ -208,6 +208,203 @@ export function writeRegistry(registry: Registry): void {
 }
 
 /**
+ * Standard install locations for a bare command name, in probe order. Order is
+ * preference, not likelihood: a user-level npm prefix or native install beats a
+ * package manager's shared bin, which beats a version manager's per-version bin.
+ * Callers must already have proved `command` matches /^[A-Za-z0-9._-]+$/ AND is
+ * neither '.' nor '..', so it carries no separator and can never escape the
+ * directory it is joined to. The dot-name exclusion is what makes that true: the
+ * pattern alone admits '..', and path.join(dir, '..') NORMALIZES away to dir's
+ * parent — a directory, not a command.
+ */
+function wellKnownLocations(command: string): string[] {
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, '.npm-global', 'bin', command),
+    // default target of the claude native installer
+    path.join(home, '.local', 'bin', command),
+    path.join('/opt/homebrew/bin', command),
+    path.join('/usr/local/bin', command),
+  ];
+  // nvm keeps one bin dir per node version; newest first. The 'v18.20.1'-style
+  // names must be compared numerically per segment — a plain string sort ranks
+  // v9 above v18 and would hand back a long-abandoned node.
+  const nvmRoot = path.join(home, '.nvm', 'versions', 'node');
+  let versions: string[] = [];
+  try {
+    versions = fs.readdirSync(nvmRoot);
+  } catch {
+    // nvm simply isn't installed (the usual case) — contributes no candidates
+  }
+  const segments = (name: string): number[] =>
+    name.replace(/^v/, '').split('.').map((part) => parseInt(part, 10) || 0);
+  versions.sort((a, b) => {
+    const left = segments(a);
+    const right = segments(b);
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+      const diff = (right[i] ?? 0) - (left[i] ?? 0);
+      if (diff !== 0) {
+        return diff;
+      }
+    }
+    return 0;
+  });
+  for (const version of versions) {
+    candidates.push(path.join(nvmRoot, version, 'bin', command));
+  }
+  candidates.push(path.join(home, 'n', 'bin', command));
+  return candidates;
+}
+
+/**
+ * Whether `p` is something spawn can actually execute: a regular FILE carrying
+ * the execute bit for this process.
+ *
+ * fs.existsSync is not that test: it is equally true for a directory and for a
+ * mode-644 file, neither of which spawn can run. statSync follows symlinks here,
+ * so only a LIVE link target passes — a dangling link is correctly "not found".
+ * The distinction is the whole incident this release fixes: during a reinstall the
+ * file exists for a moment BEFORE its exec bit is set, and an existence check
+ * records that window as a SUCCESS with no retry path, so every later spawn fails
+ * and nothing ever re-resolves. That window must read as "not found" so resolution
+ * keeps retrying.
+ *
+ * On win32 accessSync treats X_OK as F_OK (there is no exec bit), so this
+ * degrades to an existence check there — acceptable: the isFile() check still
+ * screens out directories, which is the failure mode that actually bites.
+ */
+export function isSpawnableFile(p: string): boolean {
+  try {
+    if (!fs.statSync(p).isFile()) {
+      return false;
+    }
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a bare command name to an absolute path via the user's login shell.
+ * The MCP server (and the workers and probes it spawns) may run without the shell
+ * PATH that nvm/homebrew set up, so bare names can fail there with ENOENT.
+ *
+ * The command is interpolated into `$SHELL -lc "command -v <value>"`, and its
+ * value reaches us from a workspace-level VS Code setting or the hand-editable
+ * registry file — so anything that is not a plain bare command name
+ * (/^[A-Za-z0-9._-]+$/, and neither '.' nor '..') is returned untouched WITHOUT
+ * invoking a shell: shell metacharacters must never reach that interpolation, and
+ * only bare names are worth resolving in the first place. The two dot names are
+ * excluded explicitly because the pattern admits them while they name a DIRECTORY:
+ * `command -v ..` fails, and the candidate path.join(home, '.npm-global', 'bin',
+ * '..') normalizes to '.npm-global' — a directory that an existence check would
+ * have accepted and handed back as an authoritative absolute path.
+ *
+ * A leading/trailing-whitespace value (' claude', a hand-edit typo) is TRIMMED
+ * rather than rejected: it is non-empty, so it passes every emptiness check, but
+ * untrimmed it fails the bare-name guard on the space and then fails every
+ * downstream lookup — a value class that used to resolve would become permanently
+ * unresolvable. Absolute paths need no resolution, and win32 has no login shell
+ * to ask.
+ *
+ * When the login-shell lookup comes back empty — it errors, times out, or names
+ * a file that does not exist — a fixed list of standard install locations
+ * (wellKnownLocations) is probed before giving up. A NON-INTERACTIVE login shell
+ * does not source ~/.zshrc, and that is exactly where version managers and npm
+ * prefixes edit PATH, so a genuinely clean process (GUI-launched, no inherited
+ * shell PATH) cannot see an installed binary at all: `env -i HOME=$HOME zsh -lc
+ * 'command -v claude'` exits 1 while the binary sits in ~/.npm-global/bin. An
+ * INTERACTIVE shell (-ilc) would see it, and was deliberately rejected: prompt
+ * frameworks can block on startup and hang the lookup. A deterministic candidate
+ * list covers the same installs and cannot hang.
+ *
+ * Every failure path — non-string input, shell error, timeout, output naming
+ * something that is not an executable file, no candidate being spawnable —
+ * returns the (trimmed) `command` unchanged rather than throwing.
+ */
+export function resolveViaLoginShell(command: string): string {
+  if (typeof command !== 'string') {
+    return 'claude';
+  }
+  command = command.trim();
+  if (command === '') {
+    return 'claude';
+  }
+  if (process.platform === 'win32' || path.isAbsolute(command)) {
+    return command;
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(command) || command === '.' || command === '..') {
+    return command;
+  }
+  try {
+    const shell = process.env.SHELL || '/bin/sh';
+    const out = execFileSync(shell, ['-lc', `command -v ${command}`], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+      .trim()
+      .split('\n')
+      .pop();
+    if (out && isSpawnableFile(out)) {
+      return out;
+    }
+  } catch {
+    // fall through
+  }
+  for (const candidate of wellKnownLocations(command)) {
+    if (isSpawnableFile(candidate)) {
+      return candidate;
+    }
+  }
+  return command;
+}
+
+/**
+ * Resolve the configured claude command, keeping the last known good absolute
+ * path when resolution transiently fails.
+ *
+ * Incident this exists for: while the binary was mid-reinstall, a sync resolved
+ * nothing and overwrote the stored absolute path with the bare name 'claude'.
+ * Every process that lacks the login-shell PATH — the bundled MCP server, the
+ * extension host's probes — then failed with `spawn claude ENOENT` for hours,
+ * until some later sync happened to succeed. A resolution failure says nothing
+ * about the path we already proved good, so it must not destroy it.
+ *
+ * `previous` is only reused when it is an absolute path that is still a spawnable
+ * executable file (isSpawnableFile, NOT mere existence — a half-installed binary
+ * without its exec bit is not a last-known-good) AND still names the configured
+ * command (basename, optionally minus a Windows .exe/.cmd/.bat/.ps1 suffix).
+ * Without that name check, changing the configured command would silently keep
+ * pinning the OLD command's path against the user's intent.
+ *
+ * `configured` is trimmed before use: a hand-edited ' claude' is non-empty, so it
+ * survives every emptiness check, yet untrimmed it resolves nowhere at all.
+ *
+ * An absolute `configured` is authoritative and returned verbatim even when it
+ * does not currently exist: the user may be mid-install, and second-guessing an
+ * explicit setting would silently pin a stale binary.
+ */
+export function resolveClaudePathPreserving(configured: unknown, previous: unknown): string {
+  const command = typeof configured === 'string' && configured.trim() !== '' ? configured.trim() : 'claude';
+  if (path.isAbsolute(command)) {
+    return command;
+  }
+  const resolved = resolveViaLoginShell(command);
+  if (path.isAbsolute(resolved)) {
+    return resolved;
+  }
+  if (typeof previous === 'string' && path.isAbsolute(previous) && isSpawnableFile(previous)) {
+    const base = path.basename(previous);
+    const stripped = base.replace(/\.(exe|cmd|bat|ps1)$/i, '');
+    if (base === command || stripped === command) {
+      return previous;
+    }
+  }
+  return resolved;
+}
+
+/**
  * Reconcile the frontier billing guard across editors that share this one
  * registry file. Every editor with the extension writes its settings here, so a
  * blind overwrite let an editor where the guard is UNSET clobber another editor's

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { ensureDirs, readRegistry, runningTasks, ROOT_DIR } from './registry';
-import { exhaustedWindows, listAccounts, readUsageCache } from './usage';
+import { exhaustedWindows, listAccounts, readUsageCache, resolveProbeCommand } from './usage';
 
 /**
  * Session keepalive: keep each account's OAuth credentials alive by making one
@@ -357,12 +357,7 @@ export async function runKeepaliveSweep(nowMs = Date.now()): Promise<void> {
   }
   sweepInFlight = true;
   try {
-    let claudePath = 'claude';
-    try {
-      claudePath = readRegistry().claudePath || 'claude';
-    } catch {
-      // registry unreadable — fall back to bare command
-    }
+    const claudePath = resolveProbeCommand(nowMs);
 
     const cache = readUsageCache();
     const busy = busyConfigDirs();

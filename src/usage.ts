@@ -3,7 +3,7 @@ import { Readable, Writable } from 'stream';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ensureDirs, readRegistry, ROOT_DIR } from './registry';
+import { ensureDirs, isSpawnableFile, readRegistry, resolveViaLoginShell, ROOT_DIR } from './registry';
 
 /**
  * Live account usage via the Claude Code control protocol `get_usage` request.
@@ -316,6 +316,96 @@ function parseExtraUsage(data: Record<string, unknown>): ExtraUsage | null {
 }
 
 /**
+ * How long a FAILED probe-command resolution is trusted before another login-shell
+ * attempt is made. Resolution costs a synchronous shell spawn of up to 10s, and a
+ * broken environment fails it every time — paying that per probe would stall the
+ * extension host and the dispatch server. One attempt per window is enough for
+ * recovery to land within a minute of the binary coming back.
+ */
+export const PROBE_RESOLVE_RETRY_MS = 60_000;
+
+/**
+ * Last login-shell resolution attempt: the command it was RESOLVING (`base`), its
+ * result (absolute on success, the bare base name on failure), and when it was
+ * made.
+ *
+ * `base` is part of the memo because the resolution target can change within a
+ * process lifetime, and a memo that ignores it answers for the wrong command
+ * forever: renaming the configured command (say to a wrapper script) would keep
+ * handing back the old binary's path, and after an nvm node upgrade the previous
+ * version's bin dir still exists, so its path would stay both spawnable and
+ * memoized indefinitely. A memo whose `base` differs from the current target is
+ * treated exactly like no memo at all.
+ */
+let probeCommandMemo: { base: string; value: string; at: number } | null = null;
+
+/**
+ * The command to spawn for a usage/auth probe, resolved to an absolute path when
+ * the registry's value cannot be spawned as-is.
+ *
+ * Probes run in processes that do NOT have the login-shell PATH (the bundled MCP
+ * server, and extension hosts launched from the Dock), so a bare `claude` — or an
+ * absolute path whose binary was moved or is mid-reinstall — fails with ENOENT on
+ * every probe until the extension happens to re-sync the registry. Resolving here,
+ * at spawn time, makes the probe independent of when that sync last ran.
+ *
+ * On win32 the raw value is returned untouched, because login-shell resolution has
+ * no meaning there — there is no login shell to ask. Resolving a bare name on
+ * win32 is OUT OF SCOPE for this helper: whatever the platform's own spawn
+ * semantics do with it is what happens, exactly as before this helper existed.
+ *
+ * The registry value is trimmed first: ' claude' is non-empty, so it passes every
+ * emptiness check, yet untrimmed it matches no guard and resolves nowhere.
+ *
+ * Failures are memoized as well as successes: a failed attempt suppresses further
+ * shell spawns for PROBE_RESOLVE_RETRY_MS and the raw value is returned so spawn
+ * produces its own ENOENT. A clock that jumped backwards yields a negative age,
+ * which counts as expired — recovery must never be deferred indefinitely. The
+ * memo answers only for the command it actually resolved (see probeCommandMemo),
+ * and a memoized absolute path is re-checked on disk each call — as an EXECUTABLE
+ * FILE, not merely as an existing name — so a binary that disappears, becomes a
+ * directory, or loses its exec bit mid-reinstall is re-resolved rather than
+ * trusted.
+ */
+export function resolveProbeCommand(nowMs: number = Date.now()): string {
+  let raw = 'claude';
+  try {
+    const configured = readRegistry().claudePath;
+    if (typeof configured === 'string' && configured.trim() !== '') {
+      raw = configured.trim();
+    }
+  } catch {
+    // registry unreadable — fall back to bare command
+  }
+  if (process.platform === 'win32') {
+    return raw;
+  }
+  if (path.isAbsolute(raw) && isSpawnableFile(raw)) {
+    return raw;
+  }
+  const base = path.isAbsolute(raw) ? path.basename(raw) : raw;
+  // A memo for a DIFFERENT base answers for a command we are no longer resolving.
+  const memo = probeCommandMemo && probeCommandMemo.base === base ? probeCommandMemo : null;
+  if (memo) {
+    if (path.isAbsolute(memo.value) && isSpawnableFile(memo.value)) {
+      return memo.value;
+    }
+    const age = nowMs - memo.at;
+    if (!path.isAbsolute(memo.value) && age >= 0 && age < PROBE_RESOLVE_RETRY_MS) {
+      return raw;
+    }
+  }
+  const result = resolveViaLoginShell(base);
+  probeCommandMemo = { base, value: result, at: nowMs };
+  return path.isAbsolute(result) ? result : raw;
+}
+
+/** Clear the probe-command memo. Exists for tests/verification only. */
+export function resetProbeCommandMemoForTest(): void {
+  probeCommandMemo = null;
+}
+
+/**
  * Probe one account. Resolves an AccountUsage in every case — never rejects.
  * A neutral cwd (os.tmpdir()) is REQUIRED so no project `.mcp.json` is loaded,
  * which would otherwise spawn this extension's own dispatch server per probe.
@@ -337,12 +427,7 @@ export function fetchAccountUsage(
       fetchedAt: Date.now(),
     };
 
-    let claudePath = 'claude';
-    try {
-      claudePath = readRegistry().claudePath || 'claude';
-    } catch {
-      // registry unreadable — fall back to bare command
-    }
+    const claudePath = resolveProbeCommand();
 
     let child: ChildProcessByStdio<Writable, Readable, Readable>;
     try {
@@ -569,12 +654,7 @@ export function fetchAuthStatus(
   timeoutMs = AUTH_PROBE_TIMEOUT_MS,
 ): Promise<AuthStatus | undefined> {
   return new Promise((resolve) => {
-    let claudePath = 'claude';
-    try {
-      claudePath = readRegistry().claudePath || 'claude';
-    } catch {
-      // registry unreadable — fall back to bare command
-    }
+    const claudePath = resolveProbeCommand();
 
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
@@ -1025,18 +1105,37 @@ export async function refreshAllUsage(
 export const USAGE_FRESH_DEFAULT_MS = 4 * 60 * 1000;
 
 /**
+ * Freshness window for a cached FAILURE, deliberately much shorter than the
+ * success window — see isCacheFresh.
+ */
+export const USAGE_ERROR_FRESH_MS = 60_000;
+
+/**
  * True iff the cache is fresh enough that no re-probe is warranted right now.
  * Pure (exported for tests). Requires a NON-EMPTY account list where EVERY account
  * has a cache entry with a finite `fetchedAt` in the inclusive window
- * [nowMs - maxAgeMs, nowMs]. A future or NaN fetchedAt is treated as STALE
+ * [nowMs - effective, nowMs]. A future or NaN fetchedAt is treated as STALE
  * (clock-skew / tamper safety), and a newly added account with no cache entry
  * makes the whole cache stale — it still needs its first probe.
+ *
+ * An entry carrying an `error` gets the shorter `errorMaxAgeMs` instead: a cached
+ * failure must not suppress re-probing for the full success window. When the
+ * environment recovers (the CLI reinstalled, the network back), the next round is
+ * at most errorMaxAgeMs away rather than a full maxAgeMs — while retries stay
+ * throttled to one round per window so a persistently broken setup is not probed
+ * in a loop. Math.min, not a plain substitution, so a caller asking for
+ * tighter-than-default freshness is never loosened by this.
+ *
+ * Entries that are merely `available: false` WITHOUT an error — API-token
+ * accounts, logged-out accounts — are stable, legitimate states, not failures, and
+ * keep the normal window.
  */
 export function isCacheFresh(
   cache: UsageCache,
   accounts: { name: string; configDir: string }[],
   nowMs: number,
   maxAgeMs: number,
+  errorMaxAgeMs: number = USAGE_ERROR_FRESH_MS,
 ): boolean {
   if (accounts.length === 0) {
     return false;
@@ -1050,8 +1149,9 @@ export function isCacheFresh(
     if (typeof at !== 'number' || !isFinite(at)) {
       return false;
     }
+    const effective = entry.error !== undefined ? Math.min(maxAgeMs, errorMaxAgeMs) : maxAgeMs;
     const age = nowMs - at;
-    if (age < 0 || age > maxAgeMs) {
+    if (age < 0 || age > effective) {
       return false;
     }
   }

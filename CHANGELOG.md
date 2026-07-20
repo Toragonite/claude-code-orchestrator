@@ -4,6 +4,43 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-07-20
+
+### Fixed
+- **Usage probes no longer break for hours after the `claude` CLI is
+  reinstalled or moved** (the "usage unavailable: spawn failed: spawn claude
+  ENOENT" incident). Two layers: settings sync no longer overwrites a
+  previously-good absolute `claude` path with the bare fallback name when
+  login-shell resolution transiently fails — the last known good path is kept
+  while it still exists on disk as an executable file and still matches the
+  configured command name — and every usage/auth probe now re-resolves the
+  `claude` binary at spawn time when the registry value is a bare name or a
+  dead absolute path, memoized per process with a 60-second retry throttle, so
+  probes work even in processes that lack the login-shell PATH (VS Code
+  extension hosts, the bundled MCP dispatch server). The same re-resolution now
+  covers worker dispatch too — the bundled MCP dispatch server resolves the
+  `claude` binary the same way when launching worker sessions, so dispatches
+  recover alongside the usage panel instead of silently staying broken behind a
+  healthy-looking panel. Resolution also gained a deterministic fallback: when
+  the non-interactive login-shell lookup can't find the binary (login shells
+  don't read `.zshrc`, where version managers commonly edit PATH), well-known
+  install locations are checked directly — `~/.npm-global/bin`, `~/.local/bin`,
+  Homebrew and `/usr/local/bin`, the newest nvm version, and `~/n/bin`.
+- **Failed usage probes are no longer cached as if they were successes.** An
+  errored account entry now goes stale after 60 seconds instead of the full
+  4-minute freshness window, so the next refresh picks it up promptly instead
+  of showing a stale error for the rest of the window — in practice the
+  bundled MCP dispatch server's usage path recovers within about a minute of
+  the underlying cause being fixed, and the editor's periodic refresh within
+  its normal cycle.
+- **Hardened login-shell path resolution against shell injection.** The
+  configured `claude` command is only interpolated into the `command -v`
+  lookup when it is a plain bare command name (letters, digits, dot,
+  underscore, hyphen); absolute paths are used as-is and anything else is
+  never passed to a shell. The value can originate from workspace-level
+  settings or the hand-editable shared registry file, so it is now treated
+  as untrusted.
+
 ## [1.2.0] — 2026-07-20
 
 ### Added

@@ -34,6 +34,7 @@ import {
   mergeUsageCaches,
   readUsageCache,
   refreshAllUsageIfStale,
+  resolveProbeCommand,
   USAGE_CACHE_FILE,
   UsageCache,
   UsageWindow,
@@ -889,6 +890,18 @@ function recordFailure(name: string, message: string, quota: boolean, cooldownMi
   writeStats(stats);
 }
 
+/**
+ * Run one worker session as a `claude -p` child.
+ *
+ * The command comes from resolveProbeCommand() rather than registry.claudePath:
+ * this server is spawned by the CLI and routinely runs without the login-shell
+ * PATH, so a bare `claude` in the registry — or an absolute path whose binary
+ * moved — kills EVERY dispatch with ENOENT until some editor happens to re-sync
+ * the registry. Resolving at spawn time makes dispatch independent of when the
+ * last successful settings sync ran, exactly as the usage probes already are;
+ * without it a self-healed usage panel would sit next to a dispatch path that
+ * still fails, which is the harder failure to diagnose.
+ */
 function runClaude(
   registry: Registry,
   configDir: string,
@@ -915,7 +928,8 @@ function runClaude(
     // POSIX only: on Windows `detached` gives the child its own console and lets
     // it OUTLIVE this process — the opposite of what we want. There the tree is
     // taken down with `taskkill /T` instead, and no pgid is recorded.
-    const child = spawn(registry.claudePath, args, {
+    const claudePath = resolveProbeCommand();
+    const child = spawn(claudePath, args, {
       cwd: process.cwd(),
       env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
       shell: useShell,
@@ -933,7 +947,7 @@ function runClaude(
     child.stderr.on('data', (d) => (stderr += d));
     child.on('error', (err) => {
       clearTimeout(timer);
-      reject(new Error(`Failed to start "${registry.claudePath}": ${err.message}`));
+      reject(new Error(`Failed to start "${claudePath}": ${err.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(timer);

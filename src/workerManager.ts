@@ -2,45 +2,18 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
 import {
   applyFrontierGuard,
   applyOverageGuard,
   findWorkerByConfigDir,
   readRegistry,
   renameWorker,
+  resolveClaudePathPreserving,
   writeRegistry,
   WorkerModel,
   WorkerProfile,
 } from './registry';
 import { deleteUsageEntries, readOauthEmail, sanitizeEmailForShell } from './usage';
-
-/**
- * Resolve a bare command name to an absolute path via the user's login shell.
- * The MCP server (and the workers it spawns) may run without the shell PATH
- * that nvm/homebrew set up, so bare names can fail there.
- */
-function resolveViaLoginShell(command: string): string {
-  if (process.platform === 'win32' || path.isAbsolute(command)) {
-    return command;
-  }
-  try {
-    const shell = process.env.SHELL || '/bin/sh';
-    const out = execFileSync(shell, ['-lc', `command -v ${command}`], {
-      encoding: 'utf8',
-      timeout: 10_000,
-    })
-      .trim()
-      .split('\n')
-      .pop();
-    if (out && fs.existsSync(out)) {
-      return out;
-    }
-  } catch {
-    // fall through
-  }
-  return command;
-}
 
 /**
  * Quote a command path for a terminal command line when it contains whitespace
@@ -185,7 +158,10 @@ export class WorkerManager {
     const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
     const registry = readRegistry();
     registry.permissionMode = cfg.get<string>('workerPermissionMode', 'acceptEdits');
-    registry.claudePath = resolveViaLoginShell(cfg.get<string>('claudePath', 'claude'));
+    registry.claudePath = resolveClaudePathPreserving(
+      cfg.get<string>('claudePath', 'claude'),
+      registry.claudePath,
+    );
     registry.cooldownMinutes = cfg.get<number>('quotaCooldownMinutes', 30);
     // Billing guards: reconcile across editors that share this registry. Use
     // inspect() (not get()) so an editor where the setting is UNSET is
