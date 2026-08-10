@@ -1740,7 +1740,15 @@ async function handleRequest(msg: {
             throw new Error('orchestrator_briefing requires "model".');
           }
           recordOrchestrator(process.cwd(), model);
-          text = orchestratorBriefing(model);
+          // Mesh doctrine is injected only when Mesh Mode is on, so the orchestrator
+          // learns when to reach for the mesh_* tools instead of always dispatching.
+          let meshOn = false;
+          try {
+            meshOn = readRegistry().meshMode === 'on';
+          } catch {
+            meshOn = false;
+          }
+          text = orchestratorBriefing(model, meshOn);
         } else if (name === 'list_workers') {
           text = await listWorkers();
         } else if (name === 'mesh_status') {

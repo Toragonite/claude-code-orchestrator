@@ -108,9 +108,9 @@ This stack is benchmark-tuned: across four two-orchestrator A/B builds of increa
 
 ## Overage billing visibility
 
-Anthropic's rate-limit windows (5-hour session, 7-day weekly, weekly Fable) behave differently once you hit them depending on whether **overage billing** is enabled on that account. With it **off**, hitting a window simply blocks further work until it resets — the cooldown-and-failover above handles it, and nothing is billed beyond the plan. With it **on**, work past a window's limit is instead billed against that account's monthly cap, so a dispatch that overruns a window starts spending real money.
+Anthropic's rate-limit windows (5-hour session, 7-day weekly, weekly Fable) behave differently once you hit them depending on whether **overage billing** is enabled on that account. With it **off**, hitting a window just blocks further work until it resets (cooldown-and-failover handles it, nothing billed beyond the plan). With it **on**, work past a window is billed against that account's monthly cap — so a dispatch that overruns starts spending real money.
 
-The extension now reads and surfaces this state per account: `list_workers` appends `overage: off` or `overage: ON ⚠ ($0.00 / $50.00)` to each account's usage line (with a footer when any account has it enabled), the Worker Accounts tree gets a `Plan · Extra usage` row (`off · plan limits block instead of billing`, or a warning-icon `ON · $0.00 / $50.00`) plus a `⚠overage` marker on the collapsed worker row, and the dashboard's Live plan usage cards gain an `Extra usage: off` line or a warning-colored `⚠ Extra usage: ON — $0.00 / $50.00`. Dispatch is also guarded by `claudeCodeOrchestrator.overageWorkerDispatch`: with the default **`block`**, the dispatch server never assigns work to a quota-exhausted worker — not even one with overage enabled — so dispatches never bill past a plan window. **`allow`** permits assigning to an exhausted overage-enabled worker as a last resort, and those dispatches bill real money. (The separate frontier billing guard for `claude-fable-5` dispatches, below, is unchanged.)
+The extension surfaces each account's overage state across `list_workers`, the Worker Accounts tree, and the dashboard usage cards, and guards dispatch with `claudeCodeOrchestrator.overageWorkerDispatch`: the default **`block`** never assigns work to a quota-exhausted worker even if overage is enabled (so dispatches never bill past a plan window); **`allow`** permits it as a last resort, and those dispatches bill real money. (The separate frontier guard for `claude-fable-5`, below, is unchanged.)
 
 ## Frontier billing guard
 
@@ -123,6 +123,21 @@ The extension now reads and surfaces this state per account: `list_workers` appe
 ## Mesh Mode (experimental)
 
 Mesh Mode adds a **live, bidirectional coordination layer** between your orchestrator session and persistent background workers, built on top of Claude Code's own cross-session messaging. It complements fire-and-forget dispatch — it does not replace it. Dispatch stays the durable, quota-precise path (structured `result.json`, timeouts, cancellation, failover); mesh is for when you want to spawn a worker once and then have a live conversation with it — send it messages, get status updates, watch it work in a terminal tab — while it holds context across the whole exchange.
+
+### How it works — gateway vs bridge
+
+Two pieces, and it helps to keep them separate:
+
+- **Gateway** — a small `claude -p` relay session the server spawns as its *own identity on the mesh*. The orchestrator can't message the mesh directly: a VS Code panel session registers without a messaging socket (upstream [#82313](https://github.com/anthropics/claude-code/issues/82313)), and the MCP server isn't a Claude session at all — so the gateway sends and receives on their behalf. It only relays messages, so it runs a cheap model (haiku by default).
+- **Bridge** — mirrors session discovery across accounts. Workers on the **same** account find each other natively; the bridge is only what lets you reach workers on **other** accounts.
+
+|  | Gateway | Bridge |
+|---|---|---|
+| **Why** | the orchestrator (panel/server) can't join the mesh directly | discovery is scoped per `CLAUDE_CONFIG_DIR` |
+| **Needed** | always, whenever Mesh Mode is on (single- or multi-account) | only for multi-account |
+| **Setting** | `meshMode` | `meshCrossAccountBridge` |
+
+(If you instead run the orchestrator as a Claude session in a **terminal**, it *is* a full mesh participant and could message workers without a gateway — the gateway exists specifically for the panel/server entry point this extension uses.)
 
 ### Requirements
 
@@ -170,7 +185,7 @@ See [docs/session-messaging-spike.md](docs/session-messaging-spike.md) for the f
 - **Orchestrator Dashboard** (editor tab) — stat tiles (running, 7-day tasks, success rate, tokens, cost), a live usage panel (a bar per plan window with %, severity color, reset countdown, and "updated N min ago" freshness), a 14-day task chart, per-worker token distribution, workers/tasks tables, and a settings panel with quick actions. Auto-refreshes every 2 s, theme-aware. Running rows get a Cancel button, and canceling all running dispatches is available as a quick action.
 - **Open Interactive Worker Session** — run a worker visibly in an integrated terminal (optionally with an initial task) when you want to watch and steer.
 
-Stopping a dispatch actually stops it: pressing Stop on a running tool call cancels that MCP request and terminates its worker processes (a batch dispatched via `dispatch_tasks` runs as one request, so cancelling it cancels every task in the batch). Ending the orchestrator session — closing the panel, reloading the window, quitting VS Code, or killing the process — now terminates every worker it spawned instead of leaving them running until the worker wall-clock timeout (`workerTimeoutMinutes`, default 45 minutes). On activation, any task still marked running whose worker process is gone is reclaimed as orphaned and the count is reported. Before terminating anything, the extension confirms the recorded process ID still belongs to one of its own workers, so a process ID recycled by the OS is never signalled; a cancellation is never counted as a worker error and never triggers a quota cooldown. Both cancellation and session-end terminate the worker's entire process tree, not just the worker process itself, so anything the worker spawned on its own — including its own dispatch server, if it delegated further — is cleaned up too.
+Stopping a dispatch actually stops it: pressing Stop cancels the MCP request and terminates its worker's whole process tree (a `dispatch_tasks` batch is one request, so cancelling it stops every task in the batch). Ending the orchestrator session — closing the panel, reloading, quitting, or killing the process — terminates every worker it spawned rather than leaving them to run out the `workerTimeoutMinutes` clock. It only ever signals a process ID it has confirmed is still its own worker (never one the OS recycled), a cancellation is never counted as a worker error or a quota cooldown, and any task left marked running with a dead worker is reclaimed as orphaned on the next activation.
 
 ## Asset packs and Asset Manager
 

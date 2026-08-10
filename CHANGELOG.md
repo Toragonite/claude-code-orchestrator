@@ -4,6 +4,21 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] — 2026-08-10
+
+### Fixed
+- **The orchestrator now actually reaches for Mesh Mode.** With Mesh Mode enabled,
+  `orchestrator_briefing` returns a mesh doctrine (injected only when `meshMode` is on)
+  that tells the main session when to prefer the `mesh_*` tools — a persistent,
+  conversational, or self-coordinating worker — over one-shot dispatch. Previously the
+  `mesh_*` tools were exposed but nothing instructed the orchestrator to use them, so a
+  session following the dispatch policy never did.
+
+### Changed
+- **Slimmer, clearer README.** Added a "gateway vs bridge" explainer to the Mesh Mode
+  section (why the gateway exists, and that the bridge is only for multiple accounts),
+  and condensed the most reference-heavy passages. Tri-lingual (en/ko/zh).
+
 ## [1.4.1] — 2026-08-10
 
 ### Added

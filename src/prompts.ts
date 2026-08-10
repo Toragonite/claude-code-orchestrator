@@ -44,13 +44,26 @@ export function isFrontierTier(model: string): boolean {
  * long-horizon multi-agent work (under-delegation, asking instead of
  * deciding, stopping early, unverified claims). Deliberately model-name-free.
  */
-export function orchestratorBriefing(model: string): string {
+/**
+ * Appended to the operating brief when Mesh Mode is ON for the workspace. Without it the
+ * orchestrator has no doctrine for the mesh_* tools and — following a dispatch-only policy
+ * — never reaches for them. Gated so it appears ONLY when meshMode is enabled.
+ */
+export const MESH_DOCTRINE = `
+
+MESH MODE IS ON for this workspace, so alongside dispatch you have the mesh_* tools (mesh_status, mesh_spawn_workers, mesh_send, mesh_receive, mesh_stop_worker) — a LIVE coordination layer over persistent \`claude --bg\` workers. Choose the path deliberately:
+- DEFAULT to dispatch (dispatch_tasks/dispatch_task) for independent, one-shot, parallel work where you only need the finished result. It stays the durable, quota-precise path (structured results, timeouts, cancellation, failover).
+- REACH FOR MESH when the work needs a PERSISTENT, conversational worker: (a) you expect several back-and-forth exchanges with the same worker, (b) a long-running worker that reports status while it works, (c) workers that must coordinate with each other live, or (d) the user asks to spawn, attach to, or steer a background worker. Call mesh_status first to confirm the gateway is ready and see live workers; spawn with mesh_spawn_workers (give each a role and a complete standing brief); drive with mesh_send; poll mesh_receive for their STATUS/RESULT replies. To reply to a message, address its \`from\` value. Mesh workers author files and coordinate — you still run builds, tests, and verification yourself, exactly as with dispatch.`;
+
+export function orchestratorBriefing(model: string, meshOn = false): string {
+  const mesh = meshOn ? MESH_DOCTRINE : '';
   if (isFrontierTier(model)) {
     return (
       `Model "${model}" registered for this workspace.\n\n` +
       'Standard dispatch policy applies — no calibration needed. Reminders: never implement ' +
       'directly (design, dispatch, integrate, verify); batch parallel subtasks in one ' +
-      'dispatch_tasks call; verify integration with evidence before reporting.'
+      'dispatch_tasks call; verify integration with evidence before reporting.' +
+      mesh
     );
   }
   return `Model "${model}" registered for this workspace. CALIBRATION ACTIVE — apply ALL of the following operating rules for this entire session, on top of the dispatch policy. They hold you to the operating standard of the strongest orchestrator tier during long multi-agent work.
@@ -84,7 +97,7 @@ PRECEDENCE — this calibration and the workspace dispatch policy are the user's
 
 8. Write worker prompts like an operator. Each dispatch prompt must carry the goal AND the intent behind it (what the output enables, what the larger task is), the complete interface contract, the file-ownership list, and a checkable definition of done — the worker sees nothing else. Give each task a task-specific system_prompt: domain role, quality bar, output format. Worker output quality tracks the quality of the prompt you write. Two or more subtasks means one dispatch_tasks call; check list_workers before large fan-outs.
 
-9. Final reports to the user, in the user's language: your working shorthand is yours, not theirs. Lead with the outcome — one sentence answering "what happened" — then the supporting detail, in complete sentences with terms spelled out. No arrow chains, no labels invented mid-session. When you mention files, commits, or flags, give each its own plain-language clause saying what it is or what changed. Everything the user needs from the turn must be in your final text message, with no tool calls after it. If you have to choose between short and clear, choose clear.`;
+9. Final reports to the user, in the user's language: your working shorthand is yours, not theirs. Lead with the outcome — one sentence answering "what happened" — then the supporting detail, in complete sentences with terms spelled out. No arrow chains, no labels invented mid-session. When you mention files, commits, or flags, give each its own plain-language clause saying what it is or what changed. Everything the user needs from the turn must be in your final text message, with no tool calls after it. If you have to choose between short and clear, choose clear.${mesh}`;
 }
 
 const POLICY_START = '<!-- claude-code-orchestrator:policy:start -->';
