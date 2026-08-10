@@ -28,6 +28,8 @@
   "walkthrough.step.registerMcp.description": "이 워크스페이스에서 Claude Code 세션에 dispatch_task 도구를 제공합니다.\n[MCP 서버 등록](command:claudeCodeOrchestrator.installMcp)",
   "walkthrough.step.useDispatch.title": "Claude Code 패널에서 디스패치",
   "walkthrough.step.useDispatch.description": "Claude Code 세션을 재시작하고 MCP 서버를 승인한 다음 작업을 분산하도록 요청합니다.",
+  "walkthrough.step.meshMode.title": "메시 모드 사용해 보기 (실험적)",
+  "walkthrough.step.meshMode.description": "메시지 사이에도 살아 있는 상시 백그라운드 워커를 실행하고 실시간으로 주고받으세요. claudeCodeOrchestrator.meshMode 설정을 켜서 활성화합니다.",
   "configuration.title": "Claude Code Orchestrator",
   "config.workerPermissionMode.description": "디스패치된(백그라운드) 워커 세션에 사용할 --permission-mode입니다. 백그라운드 워커는 권한 프롬프트에 응답할 수 없으므로 'default'는 편집 시 멈춥니다.",
   "config.claudePath.description": "Claude Code CLI 실행 파일 경로입니다.",
@@ -37,5 +39,13 @@
   "config.assetAutoSync.description": "시작 시, 팩 내용이 변경되면 이 워크스페이스에서 활성화된 에셋을 새로 고칩니다. 직접 편집한 파일은 절대 덮어쓰지 않습니다 — 에셋 매니저는 이를 '커스터마이즈됨'으로 표시하고 대기 중인 팩 버전과의 차이를 함께 보여줍니다.",
   "config.frontierWorkerDispatch.enumDescription.block": "claude-fable-5 모델을 요청하는 워커 디스패치를 폴백 힌트와 함께 거부합니다 — Fable이 구독 쿼터에서 차감되지 않고 사용량당 과금될 때 권장됩니다. 다른 모든 모델의 디스패치는 영향을 받지 않습니다.",
   "config.frontierWorkerDispatch.enumDescription.allow": "claude-fable-5를 요청하는 워커 디스패치를 허용합니다. 비용(플랜에 따라 별도 쿼터 또는 사용량당 과금)을 감수하는 경우에만 활성화하세요.",
-  "config.frontierWorkerDispatch.description": "어떤 모델을 디스패치할 수 있는지에 대한 과금 보호 장치입니다. 프런티어 모델인 claude-fable-5에만 적용됩니다. 'block'(기본값)으로 설정하면 디스패치 서버가 해당 디스패치를 거부하고 오케스트레이터를 claude-opus-4-8 + ultrathink로 유도합니다. 이 설정은 다른 모델의 초과 사용 과금을 막지 않습니다 — 어떤 모델의 디스패치든 플랜 한도를 초과하면 여전히 실제 비용이 발생할 수 있으며, 이는 overageWorkerDispatch가 제어합니다."
+  "config.frontierWorkerDispatch.description": "어떤 모델을 디스패치할 수 있는지에 대한 과금 보호 장치입니다. 프런티어 모델인 claude-fable-5에만 적용됩니다. 'block'(기본값)으로 설정하면 디스패치 서버가 해당 디스패치를 거부하고 오케스트레이터를 claude-opus-4-8 + ultrathink로 유도합니다. 이 설정은 다른 모델의 초과 사용 과금을 막지 않습니다 — 어떤 모델의 디스패치든 플랜 한도를 초과하면 여전히 실제 비용이 발생할 수 있으며, 이는 overageWorkerDispatch가 제어합니다.",
+  "config.meshMode.description": "실험적. Claude Code 크로스 세션 메시징 위에 얹는 라이브 세션 메시 계층인 메시 모드를 켭니다. macOS 또는 Linux에서 Claude Code 2.1.224 이상이 필요합니다. mesh_* MCP 도구(릴레이 게이트웨이와, 메시지 사이에도 살아 있으면서 메시를 통해 보고하는 상시 `claude --bg` 워커)를 활성화합니다. 오케스트레이션 결과는 여전히 파일 기반으로 유지됩니다 — 디스패치와 결과 파일은 그대로이며, 메시는 라이브 조율 채널만 추가합니다. 기본값은 꺼짐입니다.",
+  "config.meshCrossAccountBridge.description": "실험적². 서로 다른 계정에서 실행되는 메시 워커가 상호 도달 가능하도록 세션 레지스트리 항목을 여러 계정 설정 디렉터리에 걸쳐 미러링합니다. 문서화되지 않은 Claude Code 파일 형식에 의존하므로 Claude Code 업데이트 시 깨질 수 있으며, 프로토콜 불일치가 감지되면 자동으로 비활성화됩니다. 메시 모드가 켜져 있을 때만 적용됩니다. 기본값은 꺼짐입니다.",
+  "config.meshGatewayModel.description": "실험적. 아주 작은 릴레이 턴만 수행하는 메시 릴레이 게이트웨이 세션에 사용할 모델입니다. 'haiku'를 권장합니다. 메시 모드가 켜져 있을 때만 적용됩니다.",
+  "config.meshGatewayModel.enumDescription.haiku": "릴레이 게이트웨이를 Haiku로 실행합니다 — 가장 저렴하며 게이트웨이의 아주 작은 릴레이 턴에는 충분합니다(권장).",
+  "config.meshGatewayModel.enumDescription.sonnet": "릴레이 게이트웨이를 Sonnet으로 실행합니다 — 더 강력하지만 더 비싸며, 순수 릴레이 작업에는 거의 필요하지 않습니다.",
+  "command.attachMeshWorker.title": "터미널에서 메시 워커에 연결",
+  "command.meshWorkerLogs.title": "메시 워커 로그 표시",
+  "command.stopMeshWorker.title": "메시 워커 중지"
 }

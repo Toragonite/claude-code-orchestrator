@@ -78,6 +78,31 @@ export interface Registry {
    * share this one registry file — see applyOverageGuard.
    */
   overageGuardSetBy?: string;
+  /**
+   * Experimental master switch for the v1.4.0 session mesh (the mesh_* MCP tools).
+   * 'off' disables every mesh tool; 'on' arms them behind a per-workspace owner lock.
+   * Default 'off' — the mesh is an experimental same-machine layer over Claude Code
+   * cross-session messaging and must be opted into explicitly. Any value other than the
+   * literal 'on' — absent, null, misspelled, hand-edited — reads as the safe 'off'.
+   */
+  meshMode: 'on' | 'off';
+  /**
+   * Experimental² cross-account registry-mirror bridge (spike P11). Meaningful ONLY
+   * when meshMode is 'on': it mirrors live session-registry entries between accounts so
+   * mesh workers under different CLAUDE_CONFIG_DIRs can discover each other. A double
+   * opt-in because the mirrored file format is undocumented and version-fragile. Default
+   * 'off'; any value other than the literal 'on' reads as 'off'.
+   */
+  meshCrossAccountBridge: 'on' | 'off';
+  /**
+   * Model alias the mesh gateway relay runs under (the gateway does trivial relay turns
+   * only, so a small model is the right default). The default duplicates the contract
+   * constant MESH_GATEWAY_MODEL_DEFAULT's literal 'haiku' ON PURPOSE: registry.ts must
+   * NOT import src/mesh/contract.ts, which already imports ROOT_DIR and WorkerModel from
+   * here — importing it back would create a module cycle. A non-string or empty value
+   * coerces to that default.
+   */
+  meshGatewayModel: string;
 }
 
 /** Cumulative per-worker usage, tracked from CLI JSON results. */
@@ -121,6 +146,14 @@ export interface TaskEvent {
   pid?: number;
   /** Process-group id of the worker, recorded only when it was spawned as its own group leader (detached). Present => the whole tree can be signalled with -pgid. */
   pgid?: number;
+  /**
+   * PID of the detach SUPERVISOR process (out/mcp/run-task.js) that owns this task.
+   * Set on a detach task's running/interim events (contract §5.5). The reaper treats
+   * the task as alive while EITHER the worker pid OR this supervisor pid is alive-and-
+   * ours, which closes the failover-gap window where a detach task briefly has no live
+   * worker between attempts. Absent on default (in-process) tasks.
+   */
+  supervisorPid?: number;
 }
 
 /** Pre-rename data directory — migrated to ROOT_DIR on first load. */
@@ -222,6 +255,12 @@ const DEFAULTS: Registry = {
   workerTimeoutMinutes: TIMEOUT_MINUTES_DEFAULT,
   frontierWorkerDispatch: 'block',
   overageWorkerDispatch: 'block',
+  meshMode: 'off',
+  meshCrossAccountBridge: 'off',
+  // Duplicates the contract's MESH_GATEWAY_MODEL_DEFAULT literal — registry.ts must not
+  // import src/mesh/contract.ts (that module imports ROOT_DIR/WorkerModel from here, so
+  // importing it back would cycle).
+  meshGatewayModel: 'haiku',
 };
 
 export function ensureDirs(): void {
@@ -240,6 +279,16 @@ export function readRegistry(): Registry {
       // null, misspelled — must read as the safe 'block': money is only ever spent
       // past a plan window when an editor explicitly opted in.
       overageWorkerDispatch: raw.overageWorkerDispatch === 'allow' ? 'allow' : 'block',
+      // Experimental mesh switches are opt-in and the file is hand-editable: anything
+      // that is not exactly 'on' — absent, null, misspelled — reads as the safe 'off'.
+      meshMode: raw.meshMode === 'on' ? 'on' : 'off',
+      meshCrossAccountBridge: raw.meshCrossAccountBridge === 'on' ? 'on' : 'off',
+      // Free-form gateway model alias; a non-string or empty value coerces to the
+      // default (contract MESH_GATEWAY_MODEL_DEFAULT, duplicated here as 'haiku').
+      meshGatewayModel:
+        typeof raw.meshGatewayModel === 'string' && raw.meshGatewayModel.trim() !== ''
+          ? raw.meshGatewayModel.trim()
+          : 'haiku',
     };
   } catch {
     return { ...DEFAULTS };
@@ -257,9 +306,184 @@ function atomicWrite(file: string, data: string): void {
   fs.renameSync(tmp, file);
 }
 
+/**
+ * How long a lock holder is presumed alive before its lock is treated as stale. A
+ * protected critical section here is a single JSON read + tmp+rename write —
+ * milliseconds — so any lock older than this belongs to a process that crashed
+ * while holding it (or one whose pid we could not read), and breaking it is safe.
+ */
+const LOCK_STALE_MS = 30_000;
+/** Give up WAITING for a contended lock after this long, then break + take it (deadlock backstop). */
+const LOCK_ACQUIRE_TIMEOUT_MS = 15_000;
+/** Poll interval while a lock is held by a live, non-stale holder. */
+const LOCK_SPIN_MS = 15;
+
+/**
+ * Block the calling thread for `ms` WITHOUT a busy-loop. Atomics.wait on a private
+ * SharedArrayBuffer parks the thread (no CPU burn) and needs no async plumbing, so
+ * the synchronous read-modify-write helpers below can spin-wait for a contended
+ * lock without turning into async functions and rippling through every caller.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(1, ms));
+}
+
+/**
+ * Whether the advisory lock at `lockPath` is abandoned: its file is older than
+ * LOCK_STALE_MS, or it names a pid that is no longer alive. A vanished lock (the
+ * holder released it between our EEXIST and this check) is NOT stale — returning
+ * false there simply sends the caller back to retry the exclusive create, which now
+ * succeeds. Best-effort: any read error reads as "not stale" so we keep waiting
+ * rather than stomp a lock we could not inspect.
+ */
+function lockIsStale(lockPath: string): boolean {
+  try {
+    const st = fs.statSync(lockPath);
+    if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+      return true;
+    }
+    const pid = parseInt(fs.readFileSync(lockPath, 'utf8').trim().split(/\s+/)[0], 10);
+    return Number.isFinite(pid) && pid > 0 && !isPidAlive(pid);
+  } catch {
+    return false;
+  }
+}
+
+/** The exact bytes stored in a lock file, or undefined if it cannot be read. */
+function readLockToken(lockPath: string): string | undefined {
+  try {
+    return fs.readFileSync(lockPath, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Break an abandoned lock ATOMICALLY: rename it to a unique side-name and then remove
+ * that side file. rename(2) is atomic, so of several waiters that all judged the same
+ * lock stale, exactly ONE wins the rename — the source link vanishes for everyone else,
+ * whose rename fails ENOENT and simply sends them back to retry the exclusive create.
+ * A blind `unlinkSync(lockPath)` here was the F1 double-entry: two waiters each deleted
+ * the file and each then won a fresh `wx` create, entering the critical section together.
+ * Best-effort; a failure only leaves the lock name occupied, which the caller retries past.
+ */
+function breakLock(lockPath: string): void {
+  const sidePath = `${lockPath}.break.${process.pid}.${Date.now()}`;
+  try {
+    fs.renameSync(lockPath, sidePath);
+  } catch {
+    // another waiter already broke or re-took it — retry the create
+    return;
+  }
+  try {
+    fs.unlinkSync(sidePath);
+  } catch {
+    // best effort — the lock name is already free, which is all the caller needs
+  }
+}
+
+/**
+ * Run `fn` while holding an advisory exclusive lock on `targetFile` (a sibling
+ * `<targetFile>.lock`), so concurrent read-modify-write of registry.json / stats.json
+ * across the server and N detach supervisors never loses an update (contract R4).
+ * The lock is acquired by an exclusive create (`wx`) that only one process can win;
+ * losers spin (parked, not busy) until it frees, breaking a lock that a crashed
+ * holder left behind (stale by age or dead pid). NOT reentrant — `fn` must not call
+ * back into a helper that locks the SAME file. The lock is always released, even if
+ * `fn` throws. Reads never take the lock: tmp+rename makes every write atomic, so a
+ * lock-free reader can only ever see a complete old or new file.
+ *
+ * Acquisition and release are IDENTITY-SAFE (contract F1). Each holder stamps a unique
+ * token (pid first — lockIsStale reads it — then time + randomness) and, after winning
+ * the exclusive create, RE-READS the lock and confirms the token is still its own before
+ * entering `fn`: a concurrent stale-break or the deadline backstop could have removed and
+ * re-taken the file in the window between the create and the stamp, and only the re-read
+ * proves we still hold it. On release we unlink ONLY when a re-read still shows OUR token,
+ * so a lock a successor has since taken (after we were force-broken while slow) is never
+ * deleted out from under it — which is what let a third waiter enter alongside the second.
+ */
+function withFileLock<T>(targetFile: string, fn: () => T): T {
+  const lockPath = `${targetFile}.lock`;
+  const token = `${process.pid} ${Date.now()} ${Math.random().toString(36).slice(2)}`;
+  const started = Date.now();
+  // -1 is never closed: the loop only breaks once we have created AND re-confirmed a
+  // lock carrying our own token.
+  let fd = -1;
+  for (;;) {
+    try {
+      fd = fs.openSync(lockPath, 'wx');
+      // Won the exclusive create. Stamp our token, then re-read: if the bytes are ours
+      // we own the section; if a stale-breaker or the deadline backstop stomped us in
+      // between, drop this fd and start over.
+      try {
+        fs.writeSync(fd, token);
+      } catch {
+        // ownership is decided by the re-read below, not by whether the stamp wrote
+      }
+      if (readLockToken(lockPath) === token) {
+        break;
+      }
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // already closed
+      }
+      fd = -1;
+      continue;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
+      }
+      // Held by someone else. Break it only when it is genuinely abandoned, or when
+      // we have waited past the deadline (a backstop against a wedged holder that
+      // never cleared its lock). The break is a single atomic rename so at most one
+      // waiter can claim it — either way, retry the create on the next loop.
+      if (lockIsStale(lockPath) || Date.now() - started > LOCK_ACQUIRE_TIMEOUT_MS) {
+        breakLock(lockPath);
+        continue;
+      }
+      sleepSync(LOCK_SPIN_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      // already closed
+    }
+    // Release ONLY our own lock. If we were force-broken while slow and a successor now
+    // holds the file, its token differs from ours — unlinking it would free a lock still
+    // in use and let a third waiter enter alongside the successor.
+    if (readLockToken(lockPath) === token) {
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+        // already removed (e.g. a stale-breaker) — nothing to do
+      }
+    }
+  }
+}
+
 export function writeRegistry(registry: Registry): void {
   ensureDirs();
-  atomicWrite(REGISTRY_FILE, JSON.stringify(registry, null, 2));
+  withFileLock(REGISTRY_FILE, () => atomicWrite(REGISTRY_FILE, JSON.stringify(registry, null, 2)));
+}
+
+/**
+ * Read-modify-write registry.json under the advisory lock (contract R4): the whole
+ * read → mutate → atomic write runs while the lock is held, so a concurrent updater
+ * can neither interleave nor lose an edit. `mutate` receives the freshly re-read
+ * registry (defaults applied) and mutates it in place.
+ */
+export function updateRegistry(mutate: (registry: Registry) => void): void {
+  ensureDirs();
+  withFileLock(REGISTRY_FILE, () => {
+    const registry = readRegistry();
+    mutate(registry);
+    atomicWrite(REGISTRY_FILE, JSON.stringify(registry, null, 2));
+  });
 }
 
 /**
@@ -621,6 +845,33 @@ function latestById(): Map<string, TaskEvent> {
   return latest;
 }
 
+/** Latest event recorded for one task id, or undefined if the id has none. */
+export function latestEventById(id: string): TaskEvent | undefined {
+  let latest: TaskEvent | undefined;
+  for (const e of readTaskEvents()) {
+    if (e.id === id) {
+      latest = e;
+    }
+  }
+  return latest;
+}
+
+/**
+ * Latest event for each requested id, reading the log ONCE. Ids with no event are
+ * simply absent from the returned map (the caller reports them as not-found).
+ * Read-only — used by the dispatch_status retrieval tool.
+ */
+export function latestEventsByIds(ids: string[]): Map<string, TaskEvent> {
+  const want = new Set(ids);
+  const out = new Map<string, TaskEvent>();
+  for (const e of readTaskEvents()) {
+    if (want.has(e.id)) {
+      out.set(e.id, e);
+    }
+  }
+  return out;
+}
+
 /** Tasks whose latest event is still 'running' (mirrors runningCounts' latest-per-id logic). */
 export function runningTasks(): TaskEvent[] {
   const running: TaskEvent[] = [];
@@ -672,6 +923,43 @@ function isOurWorker(pid: number): boolean {
       return false;
     }
     return args.includes('claude') && args.includes(' -p');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Companion to isOurWorker for the DETACH SUPERVISOR process. A supervisor is spawned
+ * `node <…>/run-task.js <…>/tasks/<id>.spec.json` (see dispatchDetached in server.ts).
+ * Same safety rationale as isOurWorker — a 'running' event's supervisorPid can be stale
+ * and the OS may have recycled it — but the bar is TWO anchored tokens, like isOurWorker's
+ * `claude`+` -p` (contract F4): the command line must contain BOTH the `run-task.js`
+ * entrypoint AND THIS task's unique `tasks/<id>.spec.json` argument. The loose lone
+ * `run-task` substring matched a recycled pid, an editor with the file open, an unrelated
+ * `run-task-fake.mjs`, or a DIFFERENT task's supervisor — any of which would have wrongly
+ * kept a dead task `running` forever (a false-negative reap). Pairing the entrypoint with
+ * the per-task spec path (unique to this id, and still on the argv even after the supervisor
+ * unlinks the spec file) makes such a false match effectively impossible.
+ * On win32 there is no `ps`, so this degrades to "not ours" (the declared R9 gap).
+ */
+function isOurSupervisor(pid: number, id: string): boolean {
+  if (process.platform === 'win32') {
+    return false;
+  }
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    // -ww: never truncate to terminal width. The spec argument is the LAST token on a
+    // long `node <abs>/run-task.js <abs>/tasks/<id>.spec.json` command line, and a
+    // width-truncated `ps` would drop it — a false-negative supervisor match that would
+    // let a live supervisor's task be wrongly orphaned. isOurWorker's tokens sit early
+    // in the argv so it does not need this; here the second anchor is at the tail.
+    const args = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8' });
+    if (!args) {
+      return false;
+    }
+    return args.includes('run-task.js') && args.includes(`${id}.spec.json`);
   } catch {
     return false;
   }
@@ -763,36 +1051,207 @@ export async function cancelRunningTask(id: string, reason: string, graceMs = 30
 }
 
 /**
- * Mark every running task whose worker is gone as orphaned. A task is reaped when
- * it has no pid (older builds), a dead pid, or a pid that no longer matches our
- * worker's command line. Never signals anything — reaping only records terminal
- * events. A task whose pid is alive and still ours is left running. Returns the
- * number reaped; never throws, and a failed append does not abort the sweep.
+ * Signal the WORKER of a detach task by its recorded pgid/pid — the server's half of
+ * a detach cancel (contract §7 R7). Unlike cancelRunningTask this appends NO terminal
+ * event: for a detach task the supervisor is the sole author of terminal events
+ * (§5.3), and it writes the `cancelled` record itself once the dropped `.cancel`
+ * marker makes its worker die. The server cannot reach the worker through
+ * childrenByTask (a detach worker was spawned by the supervisor, not the server), so
+ * it signals the recorded group directly here — SIGTERM, then SIGKILL after the grace
+ * if it is still alive-and-ours. A no-op when the task is not running or its worker
+ * pid is dead/absent (e.g. cancelled between attempts, where the marker alone
+ * suffices). Never throws.
  */
-export function reapDeadTasks(): number {
+export async function terminateDetachWorker(id: string, graceMs = 3000): Promise<void> {
+  const latest = latestById().get(id);
+  if (!latest || latest.status !== 'running') {
+    return;
+  }
+  const pid = latest.pid;
+  // On win32 isOurWorker returns false unconditionally (no `ps`), so this whole function
+  // no-ops there: detach cancel of a RUNNING worker is marker-only on Windows (declared R9
+  // gap) — the taskkill /T branch in signalWorker is unreachable from this path, not a claim
+  // that a running Windows worker gets signalled.
+  if (typeof pid !== 'number' || !isPidAlive(pid) || !isOurWorker(pid)) {
+    return;
+  }
+  signalWorker(latest, 'SIGTERM');
+  await new Promise((resolve) => setTimeout(resolve, graceMs));
+  // Re-confirm alive AND still ours before escalating: if it exited during the grace
+  // its pid may have been recycled, and SIGKILL to a recycled pid would hit a stranger.
+  if (isPidAlive(pid) && isOurWorker(pid)) {
+    signalWorker(latest, 'SIGKILL');
+  }
+}
+
+/**
+ * Fields the reaper reads from a detach task's tasks/<id>.result.json to reconcile a
+ * completed-but-unrecorded run (contract §7 R8). A structural subset of run-task.ts's
+ * TaskResult; declared locally so registry.ts stays free of any mcp/ import. Read-only.
+ */
+export interface ResultRecord {
+  id?: string;
+  status?: 'done' | 'error';
+  text?: string;
+  worker?: string;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  error?: string;
+}
+
+/** Parse tasks/<id>.result.json, or undefined if it is absent or unreadable. Read-only. */
+export function readResultJson(id: string): ResultRecord | undefined {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(path.join(TASKS_DIR, `${id}.result.json`), 'utf8'),
+    ) as ResultRecord;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a task's DONE output file (tasks/<id>.md) shows a completed run: the DONE
+ * writer emits a `## Result` section and a `- tokens: N in / M out` line, neither of
+ * which a RUNNING header or a FAILED body carries. Used as the reconcile fallback
+ * when result.json is absent but the output file proves the run finished.
+ */
+function outputFileLooksDone(outputFile: string | undefined): boolean {
+  if (typeof outputFile !== 'string' || outputFile === '') {
+    return false;
+  }
+  try {
+    const body = fs.readFileSync(outputFile, 'utf8');
+    return body.includes('\n## Result') && /\n- tokens: \d+ in \/ \d+ out/.test(body);
+  } catch {
+    return false;
+  }
+}
+
+/** Best-effort parse of the '- tokens: N in / M out (~$C)' line from a DONE output file. */
+function parseUsageFromOutput(outputFile: string | undefined): {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+} {
+  const zero = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  if (typeof outputFile !== 'string' || outputFile === '') {
+    return zero;
+  }
+  try {
+    const body = fs.readFileSync(outputFile, 'utf8');
+    const tok = body.match(/\n- tokens: (\d+) in \/ (\d+) out(?: \(~\$([\d.]+)\))?/);
+    if (!tok) {
+      return zero;
+    }
+    return {
+      inputTokens: parseInt(tok[1], 10) || 0,
+      outputTokens: parseInt(tok[2], 10) || 0,
+      costUsd: tok[3] ? parseFloat(tok[3]) || 0 : 0,
+    };
+  } catch {
+    return zero;
+  }
+}
+
+/**
+ * Reconcile every running task whose owner is gone. A task is left running while
+ * EITHER its worker pid is alive-and-ours OR — for a detach task — its supervisorPid
+ * is alive-and-ours (contract §7 R8): a detach task briefly has no live worker
+ * between failover attempts, and orphaning it in that window would be a false
+ * orphan. Only when BOTH are dead is the task terminal, and then:
+ *
+ *  - a completed result.json (status done) → record `done` from its usage fields;
+ *  - a result.json that recorded an error → record that error faithfully;
+ *  - no result.json but a DONE-shaped output file → record `done` (usage parsed
+ *    from the file, best-effort);
+ *  - otherwise → `orphaned`, exactly as before.
+ *
+ * Never signals anything — reconciling only records terminal events. Returns the
+ * number reconciled; never throws, and a failed append does not abort the sweep.
+ *
+ * `onlyIds`, when given, scopes the sweep to those task ids — the bounded reconcile the
+ * MCP server runs opportunistically from dispatch_status so a crashed supervisor's ledger
+ * is healed even in a headless/CLI deployment with no VS Code extension host (contract F2 /
+ * R8). Omitted (the extension's startup sweep) reconciles every running task, as before.
+ */
+export function reapDeadTasks(onlyIds?: Iterable<string>): number {
+  const wanted = onlyIds ? new Set(onlyIds) : undefined;
   let reaped = 0;
   for (const task of runningTasks()) {
+    if (wanted && !wanted.has(task.id)) {
+      continue;
+    }
     const pid = task.pid;
-    if (typeof pid === 'number' && isPidAlive(pid) && isOurWorker(pid)) {
+    const workerAlive = typeof pid === 'number' && isPidAlive(pid) && isOurWorker(pid);
+    const sup = task.supervisorPid;
+    const supervisorAlive = typeof sup === 'number' && isPidAlive(sup) && isOurSupervisor(sup, task.id);
+    if (workerAlive || supervisorAlive) {
       continue;
     }
     try {
-      appendTaskEvent({
-        ...task,
-        ts: Date.now(),
-        status: 'error',
-        error: 'orphaned — worker process is no longer running',
-      });
-      appendOutputNote(
-        task.outputFile,
-        `\n\n---\n\nORPHANED: worker process is no longer running (${new Date().toISOString()})\n`,
-      );
+      const reconciled = reconcileTerminalEvent(task);
+      appendTaskEvent(reconciled.event);
+      appendOutputNote(task.outputFile, reconciled.note);
       reaped++;
     } catch {
       // a failed append must not abort the sweep of the remaining tasks
     }
   }
   return reaped;
+}
+
+/**
+ * Build the terminal event + output-file note for a running task whose worker and
+ * supervisor are both gone. See reapDeadTasks for the reconcile precedence.
+ */
+function reconcileTerminalEvent(task: TaskEvent): { event: TaskEvent; note: string } {
+  const now = Date.now();
+  const iso = new Date(now).toISOString();
+  const result = readResultJson(task.id);
+  if (result && result.status === 'done') {
+    return {
+      event: {
+        ...task,
+        ts: now,
+        status: 'done',
+        inputTokens: result.inputTokens ?? 0,
+        outputTokens: result.outputTokens ?? 0,
+        costUsd: result.costUsd ?? 0,
+        error: undefined,
+      },
+      note: `\n\n---\n\nRECONCILED: supervisor completed; recorded done from result.json (${iso})\n`,
+    };
+  }
+  if (result && result.status === 'error') {
+    const message = result.error ?? result.text ?? 'failed';
+    return {
+      event: { ...task, ts: now, status: 'error', error: message },
+      note: `\n\n---\n\nRECONCILED: supervisor completed with error from result.json (${iso})\n`,
+    };
+  }
+  if (outputFileLooksDone(task.outputFile)) {
+    const usage = parseUsageFromOutput(task.outputFile);
+    return {
+      event: { ...task, ts: now, status: 'done', ...usage, error: undefined },
+      note: `\n\n---\n\nRECONCILED: recorded done from a completed output file (${iso})\n`,
+    };
+  }
+  return {
+    event: {
+      ...task,
+      ts: now,
+      status: 'error',
+      error: 'orphaned — worker process is no longer running',
+    },
+    note: `\n\n---\n\nORPHANED: worker process is no longer running (${iso})\n`,
+  };
 }
 
 /** Dispatch usage for one worker within a trailing time window. */
@@ -827,7 +1286,24 @@ export function readStats(): StatsFile {
 
 export function writeStats(stats: StatsFile): void {
   ensureDirs();
-  atomicWrite(STATS_FILE, JSON.stringify(stats, null, 2));
+  withFileLock(STATS_FILE, () => atomicWrite(STATS_FILE, JSON.stringify(stats, null, 2)));
+}
+
+/**
+ * Read-modify-write stats.json under the advisory lock (contract R4). This is the
+ * hot concurrent path: the server and every detach supervisor call it through
+ * recordSuccess / recordFailure, so without the lock two processes could read the
+ * same stats, each add one task, and one increment would be lost. Holding the lock
+ * across the fresh re-read → mutate → atomic write makes the update atomic. `mutate`
+ * receives the freshly re-read stats and mutates it in place.
+ */
+export function updateStats(mutate: (stats: StatsFile) => void): void {
+  ensureDirs();
+  withFileLock(STATS_FILE, () => {
+    const stats = readStats();
+    mutate(stats);
+    atomicWrite(STATS_FILE, JSON.stringify(stats, null, 2));
+  });
 }
 
 /**
@@ -883,15 +1359,17 @@ export function renameWorker(oldName: string, newName: string): void {
     atomicWrite(TASKS_LOG_FILE, migrated);
   }
 
-  // b. stats.json — move the entry to the new key (skip if already migrated).
-  const stats = readStats();
-  if (oldName in stats) {
-    if (!(newName in stats)) {
-      stats[newName] = stats[oldName];
+  // b. stats.json — move the entry to the new key (skip if already migrated). The
+  //    read-modify-write runs under the stats lock so it cannot race a concurrent
+  //    recordSuccess/recordFailure (contract R4).
+  updateStats((stats) => {
+    if (oldName in stats) {
+      if (!(newName in stats)) {
+        stats[newName] = stats[oldName];
+      }
+      delete stats[oldName];
     }
-    delete stats[oldName];
-    writeStats(stats);
-  }
+  });
 
   // c. registry.json — the authoritative identity; written last so a crash
   //    before this point leaves oldName as the retry marker.

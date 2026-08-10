@@ -12,9 +12,15 @@ import {
   readRegistry,
   ROOT_DIR,
   runningTasks,
+  updateRegistry,
   WORKER_MODELS,
   WorkerModel,
 } from './registry';
+import {
+  MESH_GATEWAY_MODEL_DEFAULT,
+  MESH_GATEWAY_MODELS,
+  MESH_SETTING_FIELDS,
+} from './mesh/contract';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
 import {
@@ -206,6 +212,62 @@ async function maybeOfferMcpRegistration(
 }
 
 /**
+ * Show-once-per-feature-version "What's New" notice. Runs on every activation
+ * but self-gates via globalState: it fires only when the major.minor pair
+ * advances (a feature release, not a patch bump), and never on a first install
+ * (the getting-started walkthrough already onboards). A failure here must never
+ * break activation.
+ */
+function maybeShowWhatsNew(context: vscode.ExtensionContext): void {
+  try {
+    const KEY = 'cco.lastNotifiedVersion';
+    const current = String(context.extension.packageJSON.version);
+    const prev = context.globalState.get<string>(KEY);
+    if (prev === undefined) {
+      // First install — record the version and stay silent; onboarding is the
+      // walkthrough's job.
+      void context.globalState.update(KEY, current);
+      return;
+    }
+    if (prev === current) {
+      return;
+    }
+    // A version change: advance the stamp unconditionally, so a patch bump goes
+    // silent and the notice never repeats for the same version.
+    void context.globalState.update(KEY, current);
+    const featurePair = (v: string): string => {
+      const [major = '0', minor = '0'] = v.split('.');
+      return `${major}.${minor}`;
+    };
+    if (featurePair(prev) === featurePair(current)) {
+      // Patch-only bump — advance silently.
+      return;
+    }
+    void (async () => {
+      const whatsNew = vscode.l10n.t('See what’s new');
+      const dismiss = vscode.l10n.t('Dismiss');
+      const choice = await vscode.window.showInformationMessage(
+        vscode.l10n.t(
+          'Claude Code Orchestrator {0}: Mesh Mode (experimental) — spawn persistent background workers and hold a live back-and-forth with them, riding Claude Code’s own cross-session messaging.',
+          current,
+        ),
+        whatsNew,
+        dismiss,
+      );
+      if (choice === whatsNew) {
+        void vscode.commands.executeCommand(
+          'workbench.action.openWalkthrough',
+          'toragonite.claude-code-orchestrator#claudeCodeOrchestrator.gettingStarted',
+          false,
+        );
+      }
+    })();
+  } catch {
+    // a notification failure must never break activation
+  }
+}
+
+/**
  * Asset packs to draw from: the extension's bundled `assets/` directory plus
  * any directories in the assetPacks setting (e.g. a private asset-repo clone).
  */
@@ -252,12 +314,93 @@ async function migrateLegacySettings(): Promise<void> {
   }
 }
 
+/**
+ * Push the experimental Mesh Mode settings into the shared registry, under the
+ * field names the MCP server reads (MESH_SETTING_FIELDS — frozen in the mesh
+ * contract). Booleans map to the 'on'/'off' toggle the server expects; the
+ * gateway model is validated against the allowed set and falls back to the
+ * default. Mirrors WorkerManager.syncSettings' plain synced-setting pattern, but
+ * lives here because it writes contract-named fields the WorkerManager does not
+ * own. updateRegistry runs the read-modify-write under the registry lock, so it
+ * composes safely with the WorkerManager's own writes.
+ */
+function syncMeshSettings(): void {
+  const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
+  const meshMode = cfg.get<boolean>('meshMode', false);
+  const bridge = cfg.get<boolean>('meshCrossAccountBridge', false);
+  const gatewayModel = cfg.get<string>('meshGatewayModel', MESH_GATEWAY_MODEL_DEFAULT);
+  const validModel = (MESH_GATEWAY_MODELS as readonly string[]).includes(gatewayModel)
+    ? gatewayModel
+    : MESH_GATEWAY_MODEL_DEFAULT;
+  updateRegistry((registry) => {
+    const fields = registry as unknown as Record<string, string>;
+    fields[MESH_SETTING_FIELDS.mode] = meshMode ? 'on' : 'off';
+    fields[MESH_SETTING_FIELDS.bridge] = bridge ? 'on' : 'off';
+    fields[MESH_SETTING_FIELDS.gatewayModel] = validModel;
+  });
+}
+
+/** Quote a claude-path with whitespace for a terminal command line (mirrors WorkerManager). */
+function quoteClaudePath(command: string): string {
+  return /\s/.test(command) ? `"${command}"` : command;
+}
+
+/**
+ * The tree node a mesh-worker command was invoked on. VS Code passes the tree
+ * ELEMENT (a MeshWorkerRow, `{ name, jobId, configDir }`); no other caller exists.
+ */
+function meshNodeInfo(
+  node: unknown,
+): { name: string; jobId?: string; configDir?: string } | undefined {
+  const rec = node as { name?: unknown; jobId?: unknown; configDir?: unknown } | undefined;
+  if (!rec || typeof rec.name !== 'string') {
+    return undefined;
+  }
+  return {
+    name: rec.name,
+    jobId: typeof rec.jobId === 'string' ? rec.jobId : undefined,
+    configDir: typeof rec.configDir === 'string' ? rec.configDir : undefined,
+  };
+}
+
+/**
+ * Run one of the native `claude` background-agent lifecycle commands (attach /
+ * logs / stop) for a mesh worker in an integrated terminal, under the worker's
+ * account (CLAUDE_CONFIG_DIR). The terminal is shown so the user sees the
+ * outcome — attach opens an interactive session (Ctrl+Z detaches, the worker
+ * keeps running), logs prints a quick peek, stop tears it down. A node without a
+ * job id (not finished starting, or a stale registry row) cannot be addressed.
+ */
+function runMeshWorkerCommand(node: unknown, verb: 'attach' | 'logs' | 'stop'): void {
+  const info = meshNodeInfo(node);
+  if (!info || !info.jobId) {
+    void vscode.window.showWarningMessage(
+      vscode.l10n.t('This mesh worker has no job id yet — it may not have finished starting.'),
+    );
+    return;
+  }
+  const claudePath = vscode.workspace
+    .getConfiguration('claudeCodeOrchestrator')
+    .get<string>('claudePath', 'claude');
+  const terminal = vscode.window.createTerminal({
+    name: `mesh: ${info.name}`,
+    env: info.configDir ? { CLAUDE_CONFIG_DIR: info.configDir } : undefined,
+  });
+  terminal.show();
+  terminal.sendText(`${quoteClaudePath(claudePath)} ${verb} ${info.jobId}`);
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const workers = new WorkerManager();
-  void migrateLegacySettings().then(() => workers.syncSettings());
+  void migrateLegacySettings().then(() => {
+    workers.syncSettings();
+    syncMeshSettings();
+  });
   workers.syncSettings();
+  syncMeshSettings();
   const serverPath = ensureStableServerCopy(context);
   void maybeOfferMcpRegistration(context, serverPath);
+  maybeShowWhatsNew(context);
 
   // Live-usage cache: never block activation on a probe. Fire an initial
   // refresh, keep the cache warm on a timer, and let users refresh on demand.
@@ -324,6 +467,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeCodeOrchestrator')) {
         workers.syncSettings();
+        syncMeshSettings();
       }
     }),
   );
@@ -850,6 +994,21 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showInformationMessage(
         vscode.l10n.t('"{0}" reset: {1}.', picked.asset.id, describeSyncReport(report)),
       );
+    }),
+
+    // Mesh worker lifecycle (experimental Mesh Mode) — each is invoked from the
+    // workers tree with the MeshWorkerRow element and opens a terminal running
+    // the native `claude` background-agent command under the worker's account.
+    vscode.commands.registerCommand('claudeCodeOrchestrator.attachMeshWorker', (node?: unknown) => {
+      runMeshWorkerCommand(node, 'attach');
+    }),
+
+    vscode.commands.registerCommand('claudeCodeOrchestrator.meshWorkerLogs', (node?: unknown) => {
+      runMeshWorkerCommand(node, 'logs');
+    }),
+
+    vscode.commands.registerCommand('claudeCodeOrchestrator.stopMeshWorker', (node?: unknown) => {
+      runMeshWorkerCommand(node, 'stop');
     }),
   );
 

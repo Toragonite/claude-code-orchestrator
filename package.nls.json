@@ -28,6 +28,8 @@
   "walkthrough.step.registerMcp.description": "Give your Claude Code session the dispatch_task tool in this workspace.\n[Register MCP Server](command:claudeCodeOrchestrator.installMcp)",
   "walkthrough.step.useDispatch.title": "Dispatch from your Claude Code panel",
   "walkthrough.step.useDispatch.description": "Restart the Claude Code session, approve the MCP server, and ask it to fan out work.",
+  "walkthrough.step.meshMode.title": "Try Mesh Mode (experimental)",
+  "walkthrough.step.meshMode.description": "Spawn persistent background workers and hold a live back-and-forth with them. Enable the claudeCodeOrchestrator.meshMode setting to switch it on.",
   "configuration.title": "Claude Code Orchestrator",
   "config.workerPermissionMode.description": "--permission-mode for dispatched (background) worker sessions. Background workers cannot answer permission prompts, so 'default' will stall on any edit.",
   "config.claudePath.description": "Path to the Claude Code CLI executable.",
@@ -37,5 +39,13 @@
   "config.assetAutoSync.description": "On startup, refresh assets enabled in this workspace when their pack content changed. Files you have edited by hand are never overwritten — the Asset Manager shows them as 'customized', with a diff against the pending pack version.",
   "config.frontierWorkerDispatch.enumDescription.block": "Reject worker dispatches that request the claude-fable-5 model, with a fall-back hint — recommended when Fable bills per use instead of drawing from the subscription quota. Dispatches of every other model are unaffected.",
   "config.frontierWorkerDispatch.enumDescription.allow": "Allow worker dispatches to request claude-fable-5. Enable only if you accept the cost (separate quota or pay-per-use billing, depending on the plan).",
-  "config.frontierWorkerDispatch.description": "Billing guard over WHICH MODEL may be dispatched: it governs only the frontier model, claude-fable-5. 'block' (default) makes the dispatch server reject those dispatches and steer the orchestrator to claude-opus-4-8 + ultrathink. This setting does NOT prevent overage billing for other models — a dispatch of any model can still spend real money past an exhausted plan window; that is controlled by overageWorkerDispatch."
+  "config.frontierWorkerDispatch.description": "Billing guard over WHICH MODEL may be dispatched: it governs only the frontier model, claude-fable-5. 'block' (default) makes the dispatch server reject those dispatches and steer the orchestrator to claude-opus-4-8 + ultrathink. This setting does NOT prevent overage billing for other models — a dispatch of any model can still spend real money past an exhausted plan window; that is controlled by overageWorkerDispatch.",
+  "config.meshMode.description": "EXPERIMENTAL. Turn on Mesh Mode, a live session-mesh layer over Claude Code cross-session messaging. Requires Claude Code >= 2.1.224 on macOS or Linux. Enables the mesh_* MCP tools (a relay gateway plus persistent `claude --bg` workers that stay alive between messages and report back over the mesh). Orchestration results remain file-based — dispatch and result files are unchanged; the mesh only adds a live coordination channel. Off by default.",
+  "config.meshCrossAccountBridge.description": "EXPERIMENTAL². Mirror session-registry entries across account config directories so mesh workers running on DIFFERENT accounts become reachable from one another. Depends on undocumented Claude Code file formats and may break on Claude Code updates; it auto-disables on a protocol mismatch. Only takes effect when Mesh Mode is on. Off by default.",
+  "config.meshGatewayModel.description": "EXPERIMENTAL. Model for the mesh relay gateway session, which performs only tiny relay turns. 'haiku' is recommended. Only takes effect when Mesh Mode is on.",
+  "config.meshGatewayModel.enumDescription.haiku": "Run the relay gateway on Haiku — the cheapest option and enough for the gateway's tiny relay turns (recommended).",
+  "config.meshGatewayModel.enumDescription.sonnet": "Run the relay gateway on Sonnet — more capable but more expensive; rarely needed for pure relay work.",
+  "command.attachMeshWorker.title": "Attach to Mesh Worker in Terminal",
+  "command.meshWorkerLogs.title": "Show Mesh Worker Logs",
+  "command.stopMeshWorker.title": "Stop Mesh Worker"
 }

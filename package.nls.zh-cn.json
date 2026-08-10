@@ -28,6 +28,8 @@
   "walkthrough.step.registerMcp.description": "在此工作区为 Claude Code 会话提供 dispatch_task 工具。\n[注册 MCP 服务器](command:claudeCodeOrchestrator.installMcp)",
   "walkthrough.step.useDispatch.title": "从 Claude Code 面板分发",
   "walkthrough.step.useDispatch.description": "重启 Claude Code 会话，批准 MCP 服务器，然后让它分发工作。",
+  "walkthrough.step.meshMode.title": "试用网格模式（实验性）",
+  "walkthrough.step.meshMode.description": "启动在消息之间保持存活的常驻后台工作账户，并与它们实时来回协调。开启 claudeCodeOrchestrator.meshMode 设置即可启用。",
   "configuration.title": "Claude Code Orchestrator",
   "config.workerPermissionMode.description": "用于已分发（后台）工作会话的 --permission-mode。后台工作账户无法响应权限提示，因此 'default' 会在任何编辑时卡住。",
   "config.claudePath.description": "Claude Code CLI 可执行文件的路径。",
@@ -37,5 +39,13 @@
   "config.assetAutoSync.description": "启动时，当资源包内容发生变化时，刷新此工作区中启用的资源。你手动编辑过的文件绝不会被覆盖——资源管理器会将它们标记为“已自定义”，并显示与待应用资源包版本的差异。",
   "config.frontierWorkerDispatch.enumDescription.block": "拒绝请求 claude-fable-5 模型的工作分发，并给出回退提示——当 Fable 按使用量计费而非从订阅配额中扣除时推荐使用。其他所有模型的分发不受影响。",
   "config.frontierWorkerDispatch.enumDescription.allow": "允许请求 claude-fable-5 的工作分发。仅在你接受相应成本（视套餐而定的独立配额或按使用量计费）时启用。",
-  "config.frontierWorkerDispatch.description": "针对可分发模型的计费防护：仅管控前沿模型 claude-fable-5。设为 'block'（默认）时，分发服务器会拒绝这些分发，并将编排器引导至 claude-opus-4-8 + ultrathink。此设置不会阻止其他模型的超额计费——任何模型的分发在超出套餐额度后仍可能产生实际费用，这由 overageWorkerDispatch 控制。"
+  "config.frontierWorkerDispatch.description": "针对可分发模型的计费防护：仅管控前沿模型 claude-fable-5。设为 'block'（默认）时，分发服务器会拒绝这些分发，并将编排器引导至 claude-opus-4-8 + ultrathink。此设置不会阻止其他模型的超额计费——任何模型的分发在超出套餐额度后仍可能产生实际费用，这由 overageWorkerDispatch 控制。",
+  "config.meshMode.description": "实验性。开启网格模式（Mesh Mode），这是叠加在 Claude Code 跨会话消息之上的实时会话网格层。需要 macOS 或 Linux 上的 Claude Code 2.1.224 或更高版本。启用 mesh_* MCP 工具（一个中继网关，以及在消息之间保持存活并通过网格回报的常驻 `claude --bg` 工作账户）。编排结果仍为基于文件的方式——分发和结果文件保持不变，网格仅新增一条实时协调通道。默认关闭。",
+  "config.meshCrossAccountBridge.description": "实验性²。在多个账户配置目录之间镜像会话注册表条目，使运行在不同账户上的网格工作账户能够彼此可达。它依赖未公开的 Claude Code 文件格式，可能在 Claude Code 更新时失效，并在检测到协议不匹配时自动禁用。仅在网格模式开启时生效。默认关闭。",
+  "config.meshGatewayModel.description": "实验性。用于网格中继网关会话的模型，该会话只执行极小的中继轮次。推荐使用 'haiku'。仅在网格模式开启时生效。",
+  "config.meshGatewayModel.enumDescription.haiku": "在 Haiku 上运行中继网关——最经济的选项，足以应对网关极小的中继轮次（推荐）。",
+  "config.meshGatewayModel.enumDescription.sonnet": "在 Sonnet 上运行中继网关——能力更强但更昂贵；纯中继工作很少需要。",
+  "command.attachMeshWorker.title": "在终端中连接网格工作账户",
+  "command.meshWorkerLogs.title": "显示网格工作账户日志",
+  "command.stopMeshWorker.title": "停止网格工作账户"
 }

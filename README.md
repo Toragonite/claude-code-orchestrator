@@ -8,6 +8,11 @@
 
 Turn your existing **Claude Code** panel into a multi-account orchestrator. You chat with your main session as usual; it designs and verifies, and fans implementation work out **in parallel** to worker Claude accounts (Opus / Sonnet — or Fable, behind a billing guard) through MCP dispatch tools. Per-account usage tracking (including each account's real, live plan usage and resets), quota-aware failover, and a live dashboard included.
 
+> **New in v1.4 — Mesh Mode (experimental)**
+> Built on top of Claude Code's own cross-session messaging — default-on since CLI 2.1.224 — this release surfaces it as a live orchestration layer.
+> Spawn persistent `claude --bg` background workers and hold a real two-way conversation with them (attach to any worker in a terminal tab to watch or steer it) — complementing, not replacing, fire-and-forget dispatch.
+> Off by default. Requires Claude Code CLI ≥ 2.1.224, macOS or Linux. → [Mesh Mode](#mesh-mode-experimental)
+
 ```
 Claude Code panel (main account — the orchestrator)     ← use it as usual
    │  MCP tools: dispatch_tasks / dispatch_task / list_workers / orchestrator_briefing
@@ -106,6 +111,49 @@ The extension now reads and surfaces this state per account: `list_workers` appe
 - Default: **block** — frontier dispatches are rejected with an instructive error that steers the orchestrator to `claude-opus-4-8` + `ultrathink` (no retry, no failover).
 - `list_workers` and the tool schema surface the guard state before any dispatch is attempted.
 - Flip it deliberately: the `claudeCodeOrchestrator.frontierWorkerDispatch` setting, or the dropdown in the dashboard. A surgical pattern that works well: enable, dispatch one adversarial review of a significant build, disable.
+
+## Mesh Mode (experimental)
+
+Mesh Mode adds a **live, bidirectional coordination layer** between your orchestrator session and persistent background workers, built on top of Claude Code's own cross-session messaging. It complements fire-and-forget dispatch — it does not replace it. Dispatch stays the durable, quota-precise path (structured `result.json`, timeouts, cancellation, failover); mesh is for when you want to spawn a worker once and then have a live conversation with it — send it messages, get status updates, watch it work in a terminal tab — while it holds context across the whole exchange.
+
+### Requirements
+
+- Claude Code CLI 2.1.224 or newer (cross-session messaging ships default-on from this version)
+- macOS or Linux only — the mesh runs over unix domain sockets, so it does not work on Windows
+- Same machine as the orchestrator (mesh workers are spawned as `claude --bg` background processes, and mesh messaging does not cross machines)
+
+### Enabling it
+
+Mesh Mode is off by default and layered as two independent opt-ins, both experimental:
+
+- `claudeCodeOrchestrator.meshMode` (default `off`) — the master switch. Turning it on starts the gateway relay session (below) and exposes the `mesh_*` MCP tools to the orchestrator.
+- `claudeCodeOrchestrator.meshCrossAccountBridge` (default `off`) — **experimental²**, see the caveat below. Only relevant once `meshMode` is on.
+- `claudeCodeOrchestrator.meshGatewayModel` (default `haiku`) — the model the gateway relay session runs as. The gateway performs only trivial message-relay turns, so the default is deliberately cheap.
+
+### The mesh_* tools
+
+| Tool | Purpose |
+|---|---|
+| `mesh_status` | Report gateway health, cross-account bridge status, and every mesh worker (name, account, model, live registry status, attach command). Call this before other `mesh_*` tools. |
+| `mesh_spawn_workers` | Spawn one or more persistent `claude --bg` mesh workers in one call, each with a role slug and a complete standing brief. Quota-aware account placement mirrors dispatch's guards (logged-out, cooldown, exhausted, overage, frontier). |
+| `mesh_send` | Send a live message to a mesh worker (or any reachable peer session), addressed by worker name or by its `uds:...` reply address. Returns actual delivery state. |
+| `mesh_receive` | Long-poll the gateway inbox for messages from mesh workers. |
+| `mesh_stop_worker` | Stop a mesh worker (`claude stop <jobId>` under its account; `force: true` falls back to killing the process). |
+
+### Worker lifecycle
+
+A mesh worker moves through: **spawn** (`mesh_spawn_workers` starts a `claude --bg` background session with a standing brief — it stays alive holding its own context) → **message** (`mesh_send`/`mesh_receive` carry a live back-and-forth, distinct from a one-shot dispatch prompt) → **attach** (open the worker in an integrated terminal tab from the Worker Accounts view, or run the `attachCommand` from `mesh_status`, to watch and steer it directly — `Ctrl+Z` detaches without stopping it; or peek without attaching via `claude logs <jobId>`) → **stop** (`mesh_stop_worker`, or `claude stop` from the terminal).
+
+### Cross-account bridge (experimental²)
+
+> ⚠️ **Off by default — depends on an undocumented Claude Code file format.** The bridge mirrors live session-registry entries across every registered account's `CLAUDE_CONFIG_DIR` so mesh workers on other worker accounts (not just the main account) become reachable. This works only because of empirically observed, unpublished behavior of the Claude Code CLI (see `docs/session-messaging-spike.md`) — there is no public API for it. A future Claude Code release can change that format without notice; the bridge is built to auto-degrade rather than break dispatch when that happens, but keep it off unless you specifically need cross-account mesh workers.
+
+### Known upstream limitations
+
+- **The IDE panel session cannot join the mesh directly** — it registers without a messaging socket, so it can receive nothing and its own sends silently fail to deliver. This is why Mesh Mode hosts its own background relay ("gateway") session as the orchestrator's mesh identity instead. Tracked upstream: [anthropics/claude-code#82313](https://github.com/anthropics/claude-code/issues/82313).
+- **The VS Code extension ignores `CLAUDE_CONFIG_DIR` overrides** and always resolves to `~/.claude` — a factor in why the cross-account bridge above exists and why it works by mirroring files rather than by having the extension host see other accounts directly. Tracked upstream: [anthropics/claude-code#30538](https://github.com/anthropics/claude-code/issues/30538).
+
+See [docs/session-messaging-spike.md](docs/session-messaging-spike.md) for the full verification evidence (probes P1–P11) behind every claim in this section.
 
 ## Views and dashboard
 

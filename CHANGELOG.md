@@ -4,6 +4,58 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-08-10
+
+### Added
+- **Mesh Mode — a live session mesh (experimental).** Built on Claude Code's
+  own cross-session messaging (default-on since CC 2.1.224; macOS or Linux
+  only — unix sockets, no Windows support). Five new MCP tools —
+  `mesh_status`, `mesh_spawn_workers`, `mesh_send`, `mesh_receive`,
+  `mesh_stop_worker` — let the orchestrator spawn persistent `claude --bg`
+  background workers with quota-aware account placement (mirroring
+  dispatch's logged-out/cooldown/exhausted/overage/frontier guards), hold a
+  live back-and-forth with them between messages while each keeps its own
+  context, and stop them individually. The Worker Accounts view gains
+  attach, logs, and stop actions for mesh workers, so a background worker
+  can be opened in an integrated terminal tab to watch and steer directly.
+  Mesh is a live coordination layer, not a replacement for dispatch:
+  durable results, timeouts, cancellation, and quota-precise per-task
+  routing stay on `dispatch_task`/`dispatch_tasks`. New setting
+  `claudeCodeOrchestrator.meshMode` (default `off`) is the master switch.
+- **Cross-account bridge (experimental², off by default).** New
+  `claudeCodeOrchestrator.meshCrossAccountBridge` setting mirrors live
+  session-registry entries across every registered account's
+  `CLAUDE_CONFIG_DIR`, so mesh workers on other worker accounts — not only
+  the main account — become reachable. This depends on an unpublished
+  Claude Code file format with no public API; it is built to auto-degrade
+  rather than break dispatch if a future Claude Code release changes that
+  format, but keep it off unless you specifically need cross-account mesh
+  workers.
+- **Gateway relay session.** Because the VS Code panel session cannot join
+  the mesh directly (an upstream limitation), Mesh Mode hosts its own
+  background `claude -p` relay session — the gateway — as the
+  orchestrator's mesh identity, handling `mesh_send`/`mesh_receive` on its
+  behalf. New setting `claudeCodeOrchestrator.meshGatewayModel` (default
+  `haiku`) selects the gateway's model; it performs only trivial relay
+  turns.
+- **Detachable (survivable) dispatch.** `dispatch_task`/`dispatch_tasks`
+  gain an opt-in `detach` flag: a standalone background supervisor owns the
+  task, records its result, and keeps running even if the orchestrator
+  session ends mid-dispatch — while the session stays alive the blocking
+  behavior and returned result are unchanged. The new `dispatch_status`
+  tool inspects or retrieves a dispatched task's result by id, including a
+  detached task whose session was interrupted. Internally the per-task
+  dispatch core is factored into a standalone runner so the in-process
+  server and the detach supervisor run identical logic.
+
+### Notes
+- Mesh Mode is experimental and version-sensitive to Claude Code's own
+  internals, including file formats that are not part of any public API —
+  see `docs/session-messaging-spike.md` for the full verification evidence
+  it is pinned against (Claude Code 2.1.226). Dispatch remains the durable,
+  quota-precise path for production work; treat mesh as a live coordination
+  layer on top of it, not a substitute.
+
 ## [1.3.0] — 2026-07-20
 
 ### Added

@@ -1,46 +1,69 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
 import { spawn, type ChildProcess } from 'child_process';
 import {
   appendTaskEvent,
   clampTimeoutMinutes,
-  emptyStats,
   ensureDirs,
+  isPidAlive,
+  latestEventsByIds,
   readRegistry,
+  readResultJson,
   readStats,
+  reapDeadTasks,
   recordOrchestrator,
-  Registry,
-  runningCounts,
-  touchOrchestrator,
   TASKS_DIR,
-  TaskEvent,
+  terminateDetachWorker,
+  touchOrchestrator,
   WORKER_MODELS,
-  WorkerProfile,
-  writeStats,
 } from '../registry';
-import { isFrontierTier, orchestratorBriefing, WORKER_BASE_PROMPT } from '../prompts';
+import { orchestratorBriefing } from '../prompts';
 import {
-  AccountUsage,
-  AUTH_PROBE_TIMEOUT_MS,
-  AuthStatus,
   exhaustedWindows,
   ExtraUsage,
-  fetchAuthStatus,
   formatAge,
   formatRelativeReset,
   getCachedUsage,
   isElevated,
   isLoginExpired,
   listAccounts,
-  mergeUsageCaches,
-  readUsageCache,
   refreshAllUsageIfStale,
   resolveProbeCommand,
-  USAGE_CACHE_FILE,
-  UsageCache,
   UsageWindow,
 } from '../usage';
+import {
+  CANCELLED_ERROR,
+  DispatchArgs,
+  formatExhaustedWindow,
+  overageEnabled,
+  RELOGIN_SHELL_CAVEAT,
+  reloginCommand,
+  runDispatchTask,
+  TaskBase,
+} from './task-runner';
+import { GatewayManager } from '../mesh/gateway';
+import { WorkerPool } from '../mesh/pool';
+import { Bridge } from '../mesh/bridge';
+import {
+  IBridge,
+  IGatewayManager,
+  IWorkerPool,
+  meshError,
+  meshGatewayName,
+  meshPlatformSupported,
+  meshStateFile,
+  MeshState,
+  MESH_TOOLS,
+  RECEIVE_MESSAGES_DEFAULT,
+  RECEIVE_MESSAGES_MAX,
+  RECEIVE_WAIT_DEFAULT_S,
+  RECEIVE_WAIT_MAX_S,
+  renderInboundMessage,
+  validateSendInput,
+  WorkerSpawnSpec,
+} from '../mesh/contract';
 
 /**
  * cco-dispatch — a minimal MCP stdio server the Claude Code panel connects
@@ -62,33 +85,12 @@ import {
  * implemented directly to keep the server dependency-free.
  */
 
-const SERVER_INFO = { name: 'cco-dispatch', version: '0.4.0' };
+const SERVER_INFO = { name: 'cco-dispatch', version: '0.5.0' };
 /** Grace between SIGTERM and SIGKILL when cancelling a single request's workers. */
 const KILL_GRACE_MS = 3000;
 /** Grace between SIGTERM and SIGKILL while the whole server is going down. */
 const SHUTDOWN_GRACE_MS = 2500;
-const CANCELLED_ERROR = 'cancelled by the orchestrator session';
 const SHUTDOWN_REASON = 'cancelled — orchestrator session ended';
-/** How long a timed-out worker gets to honor SIGTERM before it is SIGKILLed. */
-const TIMEOUT_KILL_GRACE_MS = 10_000;
-/**
- * After 'exit' fires, how long we wait for 'close' before settling anyway.
- * 'exit' means the process is dead; any stdout still buffered in flight is
- * delivered within a few milliseconds because nothing more can be written.
- * If a grandchild inherited the stdout pipe, 'close' never fires — this drain
- * is what turns that hang into a settle.
- */
-const DRAIN_GRACE_MS = 250;
-/**
- * Last-resort settle on the timeout path: even 'exit' can be delayed if the
- * child is wedged uninterruptibly. Armed after SIGKILL; if it fires we settle
- * regardless of process state, so a dispatch is always guaranteed to return.
- */
-const REAP_GRACE_MS = 5_000;
-/** Per-stream cap on the partial output attached to a timeout error. */
-const TIMEOUT_TAIL_CHARS = 2000;
-
-let rrIndex = 0;
 
 /**
  * Process lifecycle. A worker is a `claude -p` child that bills real quota, so
@@ -97,15 +99,20 @@ let rrIndex = 0;
  * request id; a dead orchestrator session arrives as stdin EOF or a signal.
  */
 
-/** Identity of a task, enough to append a terminal event for it. */
-type TaskBase = Pick<TaskEvent, 'id' | 'title' | 'worker' | 'model' | 'outputFile' | 'cwd'>;
-
 /** Live worker children, by task id. Present only while the child is running. */
 const childrenByTask = new Map<string, ChildProcess>();
 /** JSON-RPC request id → the task ids it spawned. dispatch_tasks maps one id to N tasks. */
 const tasksByRequest = new Map<string | number, Set<string>>();
 /** Non-terminal tasks, by task id — the tasks a cancellation must mark as errored. */
 const taskBases = new Map<string, TaskBase>();
+/**
+ * JSON-RPC request id → detach task ids it spawned. Detach tasks are deliberately
+ * kept OUT of childrenByTask/taskBases/tasksByRequest (that omission is the whole
+ * shutdown-exclusion mechanism — see dispatchDetached). This separate map lets an
+ * explicit client cancel still reach a detach task via the marker+signal path (R7)
+ * without ever exposing it to shutdown()'s signal/terminal-event sweep.
+ */
+const detachTasksByRequest = new Map<string | number, Set<string>>();
 /** tools/call requests currently being served. Bounds what a cancellation can name. */
 const inFlightRequests = new Set<string | number>();
 /** Requests the client cancelled: no response, no failover, no recordFailure. */
@@ -224,6 +231,16 @@ function cancelRequest(requestId: string | number): void {
     return;
   }
   abortedRequests.add(requestId);
+  // Detach tasks: the server owns neither their terminal event nor their worker
+  // handle. Cancel drops a tasks/<id>.cancel marker (so the supervisor records the
+  // cancelled event + result.json and does not fail over) and signals the recorded
+  // worker group directly (contract §7 R7). No terminal event is written here.
+  const detachIds = detachTasksByRequest.get(requestId);
+  if (detachIds !== undefined) {
+    for (const taskId of detachIds) {
+      cancelDetachTask(taskId);
+    }
+  }
   const taskIds = tasksByRequest.get(requestId);
   if (taskIds === undefined) {
     return;
@@ -247,6 +264,25 @@ function cancelRequest(requestId: string | number): void {
 }
 
 /**
+ * Cancel one detach task (contract §7 R7). Writes the tasks/<id>.cancel marker FIRST
+ * — so by the time the worker dies from the signal below, the supervisor's shouldAbort
+ * already sees it and breaks out without failing over — then signals the worker's
+ * recorded group. The supervisor authors the terminal `cancelled` event + result.json;
+ * the server writes neither. Never throws.
+ */
+function cancelDetachTask(taskId: string): void {
+  try {
+    fs.writeFileSync(path.join(TASKS_DIR, `${taskId}.cancel`), String(Date.now()));
+  } catch {
+    // even without the marker the signal below still kills the worker; the supervisor
+    // classifies the death as a WorkerKilledError (no failover) as a fallback
+  }
+  // Fire-and-forget: terminateDetachWorker escalates SIGTERM→SIGKILL over a grace and
+  // appends no events. cancelRequest is synchronous, so we do not await it.
+  void terminateDetachWorker(taskId, KILL_GRACE_MS);
+}
+
+/**
  * Tear the server down without orphaning workers. Signals the children first
  * (they burn quota every second they live), records the tasks as failed, and
  * only exits once the SIGKILL grace has elapsed. Safe to call from a signal
@@ -266,6 +302,10 @@ function shutdown(reason: string): void {
   for (const id of inFlightRequests) {
     abortedRequests.add(id);
   }
+  // Tear down the mesh before exit: stop the bridge (prune its mirrors) and the gateway
+  // (kill the relay child — it is not in childrenByTask, so the sweep below never reaches
+  // it), and release the owner lock. The `--bg` mesh workers are deliberately left running.
+  stopMesh();
   const children = [...childrenByTask.values()];
   for (const child of children) {
     signalTree(child, 'SIGTERM');
@@ -323,1074 +363,287 @@ function shutdown(reason: string): void {
   }, SHUTDOWN_GRACE_MS);
 }
 
-interface DispatchArgs {
-  title?: string;
-  prompt?: string;
-  model?: string;
-  worker?: string;
-  system_prompt?: string;
-  /** Escalate the worker to maximum reasoning depth via the thinking keyword. */
-  ultrathink?: boolean;
-  /** Per-task wall-clock limit; falls back to registry.workerTimeoutMinutes. */
-  timeout_minutes?: number;
-}
-
 interface BatchArgs {
   tasks?: DispatchArgs[];
 }
 
-interface RunResult {
-  text: string;
-  inputTokens: number;
-  outputTokens: number;
-  costUsd: number;
-}
-
-function isQuotaError(message: string): boolean {
-  return /quota|usage limit|rate.?limit|limit (reached|exceeded)|too many requests|overloaded|429|529/i.test(
-    message,
-  );
-}
-
 /**
- * A run that hit its wall-clock limit. Carried as a distinct type because a
- * timeout message embeds the worker's own stdout, which may itself talk about
- * quotas or contain the digits 429/529 — classifying it by regex would put a
- * healthy worker on a cooldown and fail the task over to another one, which
- * would then burn the same wall clock on the same too-large task.
+ * In-process default dispatch: build the request-scoped context — cancellation
+ * check, id tracking, child registration, and cleanup, all backed by this
+ * server's live maps — and run the shared per-task core. The default path still
+ * registers each worker child in childrenByTask via onSpawn, so stdin-close
+ * shutdown (D4) and request cancel (D5) keep signalling in-flight workers exactly
+ * as before.
  */
-class WorkerTimeoutError extends Error {}
-
-/**
- * A run whose child died from a termination signal this server never sent — in
- * practice the extension's own Cancel button (it signals the recorded pid/pgid
- * directly, so the server is never told and isAborted() stays false), an OS
- * kill, or the OOM killer. Carried as a distinct type for the same reason as
- * WorkerTimeoutError: the message embeds the worker's captured output, so a
- * regex would read the dead worker's own words as a quota failure. Such a death
- * is never a quota problem and must never fail over to another worker — the
- * replacement would run a task the user has already cancelled.
- */
-class WorkerKilledError extends Error {}
-
-function streamSection(label: string, text: string): string {
-  if (!text) {
-    return `--- ${label} was empty ---`;
+function dispatchTask(args: DispatchArgs, requestId: string | number | null): Promise<string> {
+  // Opt-in ownership/survival: hand the whole run to a standalone supervisor and
+  // relay its result. Everything about blocking and the return string is unchanged
+  // (contract §3) — only the host process differs.
+  if (args.detach === true) {
+    return dispatchDetached(args, requestId);
   }
-  return text.length > TIMEOUT_TAIL_CHARS
-    ? `--- last ${TIMEOUT_TAIL_CHARS} chars of ${label} ---\n${text.slice(-TIMEOUT_TAIL_CHARS)}`
-    : `--- ${label} (${text.length} chars) ---\n${text}`;
-}
-
-/**
- * The leading prose is deliberately longer than 300 characters and carries no
- * captured output: recordFailure() slices lastError to 300 chars for the tree
- * view and dashboard, and that slice has to be the human-readable part.
- */
-function timeoutMessage(minutes: number, stdout: string, stderr: string): string {
-  const header =
-    `Worker timed out after ${minutes} minutes and was terminated. ` +
-    'Whatever it had not yet written to disk is gone, but it may already have written files to ' +
-    'the workspace, so inspect the working tree before re-dispatching. If the task legitimately ' +
-    'needs longer, re-dispatch it with a larger timeout_minutes. Captured before the kill: ' +
-    `${stdout.length} chars of stdout, ${stderr.length} chars of stderr.`;
-  if (!stdout && !stderr) {
-    return `${header}\n\nThe worker wrote nothing to stdout or stderr before it was terminated.`;
-  }
-  return `${header}\n\n${streamSection('stdout', stdout)}\n${streamSection('stderr', stderr)}`;
-}
-
-/** '<label> <percent>% (resets <when>)' for a quota-exhausted window — error text and list_workers. */
-function formatExhaustedWindow(w: UsageWindow): string {
-  return `${w.label} ${Math.round(w.percent)}% (resets ${formatRelativeReset(w.resetsAt)})`;
-}
-
-/**
- * Overage ("extra usage") billing is ON for this account: exhausting a plan
- * window BILLS money against a monthly cap instead of blocking work (see the
- * ExtraUsage doc comment in usage.ts). Defensive — the usage cache is an
- * untrusted JSON file, so anything that is not a proper non-array object with
- * `enabled === true` reads as OFF. On a money surface we never assume billing.
- */
-function overageEnabled(usage: AccountUsage | undefined): boolean {
-  const eu = usage?.extraUsage;
-  return typeof eu === 'object' && eu !== null && !Array.isArray(eu) && eu.enabled === true;
-}
-
-/**
- * Wrap a value in POSIX single quotes so it survives the shell verbatim. Config
- * dirs routinely contain spaces ("/Users/x/Library/Application Support/…"), which
- * an unquoted assignment would split into a command. Inside single quotes nothing
- * is special except the closing quote itself, so the only escape needed is the
- * standard '\'' idiom: close, emit a literal quote, reopen.
- */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-/** Caveat appended ONCE per message that prints a reloginCommand — the syntax is POSIX-only. */
-const RELOGIN_SHELL_CAVEAT = 'POSIX shell; on Windows set the env var first';
-
-/** Shell command that re-authenticates one account — the recovery step for an expired login. */
-function reloginCommand(configDir: string): string {
-  return `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} claude auth login`;
-}
-
-/**
- * Refusal text for a worker whose subscription OAuth session has expired. Unlike
- * quota exhaustion there is no billing escape hatch and no reset to wait for: the
- * dispatch would die on "Failed to authenticate", so the only recovery is a
- * re-login. Both recovery routes are spelled out because the reader is an
- * orchestrating session that cannot see the VS Code UI.
- *
- * "retry" is a real instruction, not a platitude: the next dispatch re-probes this
- * account's login live (see liveRecheckExpiredLogins), so a completed re-login is
- * picked up immediately rather than waiting for a usage refresh.
- */
-function expiredLoginRefusal(name: string, configDir: string): string {
-  return (
-    `Worker "${name}" login is expired/logged out; a dispatch would fail to authenticate. ` +
-    'Re-login this account first (VSCode: "Re-login Account" on the worker, or shell: ' +
-    `${reloginCommand(configDir)} — ${RELOGIN_SHELL_CAVEAT}) and retry.`
-  );
-}
-
-/**
- * The cached expired-login verdict is the ONLY thing blocking this pick, and a live
- * auth probe could clear it. Thrown instead of a bare Error so dispatchTask can
- * re-probe the named accounts and retry the selection once — without it, a cached
- * "logged out" reading would survive a successful re-login and refuse the very
- * retry the refusal text asks for, forever (the cache is read once per dispatch and
- * only the list_workers path refreshes it).
- *
- * `candidates` are exactly the workers whose ONLY disqualifier is that verdict, so
- * flipping it is guaranteed to change the outcome. `message` is the refusal to
- * raise if the re-probe confirms the logout, unchanged from the pre-existing text.
- */
-class ExpiredLoginBlock extends Error {
-  constructor(
-    message: string,
-    readonly candidates: WorkerProfile[],
-    readonly kind: 'named' | 'auto',
-  ) {
-    super(message);
-    this.name = 'ExpiredLoginBlock';
-  }
-}
-
-/** Outcome of one round of live auth re-probes. */
-interface LiveRecheckResult {
-  /** At least one probed account is logged back IN — the selection is worth retrying. */
-  recovered: boolean;
-  /** Sentence(s) to append to the refusal when nothing recovered. '' when there is nothing to add. */
-  note: string;
-}
-
-/**
- * Persist a refreshed `auth` reading for one account. Mirrors usage.ts's own
- * writeUsageCache: re-read the disk cache, merge, then tmp+rename so a concurrent
- * reader never sees a torn file. `fetchedAt` is deliberately NOT bumped — this is
- * an auth reading, not a usage reading, and faking usage freshness would suppress
- * the next real refresh. A consequence of leaving it: if another process wrote a
- * strictly newer reading for this account since we loaded the cache, mergeUsageCaches
- * keeps theirs — correct, since that reading carries its own fresher auth.
- *
- * Best effort. The in-memory update is what unblocks THIS dispatch; persisting only
- * saves the NEXT one a probe.
- */
-function persistAuthReading(configDir: string, entry: AccountUsage): void {
-  try {
-    ensureDirs();
-    const merged = mergeUsageCaches(readUsageCache(), { [configDir]: entry });
-    const tmp = `${USAGE_CACHE_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2));
-    fs.renameSync(tmp, USAGE_CACHE_FILE);
-  } catch {
-    // disk full / read-only / racing writer — the dispatch proceeds on the in-memory verdict
-  }
-}
-
-/**
- * Per-probe timeout for the live re-check, deliberately tighter than the full
- * AUTH_PROBE_TIMEOUT_MS: this probe runs INSIDE a dispatch the caller is waiting on,
- * so it is budgeted like the refresh path's own server budget (5s) rather than like a
- * background refresh. A hung claude binary costs 5s here, not 10s.
- */
-const LIVE_RECHECK_PROBE_TIMEOUT_MS = 5_000;
-
-/**
- * Most distinct config dirs live-probed per DISPATCH (probedDirs is per-dispatch and
- * only grows when a probe actually runs, so it doubles as the budget counter).
- *
- * Worst-case added latency before a refusal: 3 dirs × 5s = 15s — well clear of the
- * ~60s MCP client timeout that an uncapped 10s-per-logged-out-account walk could
- * approach (5 accounts × 10s = 50s, which presented as a hung tool call). Dirs beyond
- * the cap keep their cached verdict and are refused as before; the refusal says so.
- */
-const LIVE_RECHECK_MAX_DIRS = 3;
-
-/**
- * Re-probe the login of every candidate account whose cached verdict says expired,
- * and fold a positive result back into `cache` so isLoginExpired() flips.
- *
- * Only `auth` is replaced; `available` stays false until the next usage refresh
- * re-reads plan limits. That is exactly what isLoginExpired needs (available!==true
- * AND auth.loggedIn===false), and it keeps this function out of the quota semantics.
- *
- * Probes run sequentially, at most one per DISTINCT config dir (workers may share a
- * dir) and at most once per dir per dispatch — `probedDirs` carries that across the
- * failover attempts of one dispatchTask call, so the added latency is bounded by the
- * number of logged-out accounts, not by the number of attempts.
- *
- * That bound alone still scaled with the account count, so it is capped absolutely at
- * LIVE_RECHECK_MAX_DIRS probes per dispatch. Truncation is reported back so the
- * refusal can admit which accounts were judged from cache rather than re-checked —
- * the alternative, silently implying every logout was re-confirmed, would send the
- * caller off to re-login an account that may already be fine.
- *
- * An undefined probe result (CLI hung, missing, unparseable) is NOT evidence of
- * anything: the cached verdict stands, and the caller says so rather than implying
- * the logout was re-confirmed.
- */
-async function liveRecheckExpiredLogins(
-  candidates: WorkerProfile[],
-  kind: 'named' | 'auto',
-  cache: UsageCache,
-  probedDirs: Set<string>,
-): Promise<LiveRecheckResult> {
-  const byDir = new Map<string, string[]>();
-  for (const w of candidates) {
-    const names = byDir.get(w.configDir);
-    if (names === undefined) {
-      byDir.set(w.configDir, [w.name]);
-    } else {
-      names.push(w.name);
-    }
-  }
-  let recovered = false;
-  const confirmed: string[] = [];
-  const unknown: string[] = [];
-  let truncated = false;
-  for (const [configDir, names] of byDir) {
-    // Already probed this dispatch: skipped at zero latency, so it consumes no budget.
-    if (probedDirs.has(configDir)) {
-      continue;
-    }
-    // Budget check, auto path only. The named path probes exactly one dir (the worker
-    // the caller asked for), which is always within budget and must never be the probe
-    // the cap drops — refusing a named worker on a cached verdict we chose not to
-    // re-check is precisely the false-blocked failure this whole path exists to avoid.
-    if (kind === 'auto' && probedDirs.size >= LIVE_RECHECK_MAX_DIRS) {
-      truncated = true;
-      break;
-    }
-    probedDirs.add(configDir);
-    const auth = await fetchAuthStatus(
-      configDir,
-      Math.min(AUTH_PROBE_TIMEOUT_MS, LIVE_RECHECK_PROBE_TIMEOUT_MS),
-    );
-    if (auth === undefined) {
-      unknown.push(...names);
-      continue;
-    }
-    applyAuthReading(cache, configDir, auth);
-    if (auth.loggedIn) {
-      recovered = true;
-    } else {
-      confirmed.push(...names);
-    }
-  }
-  return {
-    recovered,
-    note: recheckNote(kind, confirmed, unknown, truncated ? probedDirs.size : 0),
-  };
-}
-
-/** Fold a fresh auth reading into the in-memory cache entry, and persist it. */
-function applyAuthReading(cache: UsageCache, configDir: string, auth: AuthStatus): void {
-  const updated: AccountUsage = { ...cache[configDir], auth };
-  cache[configDir] = updated;
-  persistAuthReading(configDir, updated);
-}
-
-/**
- * What to add to a refusal after a re-probe failed to clear it. Says only what was
- * actually observed: a confirmed logout, a probe that never answered, and an account
- * never probed at all because the latency cap ran out are three different facts, and
- * claiming a stronger one would send the caller off to re-login an account that may
- * already be fine.
- *
- * `probedCount` is 0 unless LIVE_RECHECK_MAX_DIRS actually truncated the walk; when it
- * did, it is how many accounts were live-probed before the budget ran out.
- */
-function recheckNote(
-  kind: 'named' | 'auto',
-  confirmed: string[],
-  unknown: string[],
-  probedCount: number,
-): string {
-  if (kind === 'named') {
-    // The named path probes its single dir unconditionally, so it never truncates.
-    // Confirmed: the pre-existing refusal already says everything true and useful.
-    return unknown.length > 0
-      ? ' (The live re-check of this login could not run — the auth probe did not answer — so this ' +
-          'verdict comes from the cached reading.)'
-      : '';
-  }
-  const parts: string[] = [];
-  if (confirmed.length > 0) {
-    parts.push(`A live re-check confirmed the expired login(s): ${confirmed.join(', ')}.`);
-  }
-  if (unknown.length > 0) {
-    parts.push(
-      `The live re-check could not run for ${unknown.join(', ')} — the auth probe did not answer.`,
-    );
-  }
-  if (probedCount > 0) {
-    parts.push(
-      `Live re-check was limited to ${probedCount} account(s) this call; the remaining logged-out ` +
-        'account(s) were judged from cache — re-login them and retry, or call list_workers to refresh.',
-    );
-  }
-  return parts.length > 0 ? ` ${parts.join(' ')}` : '';
-}
-
-/**
- * Pick a worker for a dispatch: not already attempted, not on cooldown, not
- * logged out, and not live-quota-exhausted for the model this dispatch would
- * actually run.
- *
- * `requestedModel` is the caller-validated `args.model` (undefined => each worker
- * runs its own default), so the candidate model is `requestedModel ?? worker.model`.
- * `cache` is the usage cache read ONCE by the caller — pickWorker never spawns.
- *
- * A worker is EXHAUSTED for a candidate model when exhaustedWindows() reports a
- * window that APPLIES to that model: session/weekly_all always apply; the
- * Fable-only weekly_scoped window applies ONLY to a frontier candidate — a
- * saturated Fable window must never block an opus/sonnet dispatch.
- *
- * Returns the chosen worker plus `billableOverage` — true when the chosen worker
- * IS exhausted for the candidate model but has overage billing enabled, so the
- * dispatch is allowed and will BILL money rather than be blocked. An exhausted
- * worker WITHOUT overage is refused (explicit path) or skipped (auto path) as
- * before; overage-enabled workers are used only as a fallback when no
- * non-exhausted worker is available.
- *
- * `overageAllowed` is the operator's billing guard, resolved ONCE per dispatch by
- * the caller from registry.overageWorkerDispatch === 'allow'. When it is false,
- * `billableOverage: true` is unreachable from every branch below: the explicit
- * path refuses an exhausted overage worker instead of billing it, and the tier-2
- * fallback pool is never consulted at all. Nothing else about selection changes,
- * so the free paths keep their exact previous behavior.
- *
- * A LOGGED-OUT worker (isLoginExpired) is handled one step earlier and more
- * bluntly than exhaustion: it is dropped from the eligible pool outright and
- * refused when named. Overage cannot rescue it and no window reset will fix it —
- * the dispatch would fail to authenticate no matter which model it asks for.
- *
- * That verdict comes from a cache this function never refreshes, so it is raised as
- * an ExpiredLoginBlock rather than a plain Error whenever a live re-probe could
- * still change the answer. The caller re-probes and calls pickWorker again; only
- * the second verdict is final. See ExpiredLoginBlock for why that matters.
- */
-function pickWorker(
-  workers: WorkerProfile[],
-  preferred: string | undefined,
-  attempted: Set<string>,
-  requestedModel: string | undefined,
-  cache: UsageCache,
-  overageAllowed: boolean,
-): { worker: WorkerProfile; billableOverage: boolean } {
-  const exhaustedFor = (w: WorkerProfile): UsageWindow[] => {
-    const candidate = requestedModel ?? w.model;
-    return exhaustedWindows(cache[w.configDir], Date.now()).filter(
-      (win) =>
-        win.kind === 'session' ||
-        win.kind === 'weekly_all' ||
-        (win.kind === 'weekly_scoped' && isFrontierTier(candidate)),
-    );
-  };
-
-  if (preferred) {
-    const found = workers.find((w) => w.name === preferred);
-    // An unknown name is interface misuse, not a hint to auto-assign: fail loudly
-    // rather than silently substitute a different account than the caller named.
-    if (!found) {
-      throw new Error(
-        `Unknown worker "${preferred}". Registered workers: ${workers.map((w) => w.name).join(', ')}.`,
-      );
-    }
-    if (attempted.has(found.name)) {
-      throw new Error(`Worker "${preferred}" already failed this task.`);
-    }
-    // Checked before exhaustion: a logged-out account cannot authenticate at all,
-    // so quota headroom (or overage billing) on it is irrelevant.
-    if (isLoginExpired(cache[found.configDir])) {
-      throw new ExpiredLoginBlock(expiredLoginRefusal(found.name, found.configDir), [found], 'named');
-    }
-    const exhausted = exhaustedFor(found);
-    if (exhausted.length > 0) {
-      // Exhausted + overage ON → ALLOW, but the dispatch spends real money — and
-      // only when the operator's billing guard permits it. Guard blocking turns
-      // that billable run into its own refusal, distinct from the no-overage one
-      // below: the account COULD run, the operator has forbidden the spend.
-      // Exhausted + overage off/unknown → keep the refusal (guaranteed quota failure).
-      if (overageEnabled(cache[found.configDir])) {
-        if (overageAllowed) {
-          return { worker: found, billableOverage: true };
-        }
-        throw new Error(
-          `Worker "${found.name}" is quota-exhausted and dispatching to it would bill overage ` +
-            '(extra usage), which is blocked by the operator ' +
-            '("claudeCodeOrchestrator.overageWorkerDispatch"). Wait for the reset, pick another ' +
-            'worker, or enable overage dispatch to accept the cost.',
-        );
-      }
-      const candidate = requestedModel ?? found.model;
-      throw new Error(
-        `Worker "${found.name}" is quota-exhausted for ${candidate} per live plan usage: ` +
-          `${exhausted.map(formatExhaustedWindow).join(' · ')}. Refused this dispatch to avoid a ` +
-          'guaranteed quota failure (this account has no overage billing enabled to bill past the window). ' +
-          'Either dispatch to a different worker, wait for the window above to reset, or — if you believe ' +
-          'this usage reading is stale — ask the operator to run "Claude Code Orchestrator: Refresh Account ' +
-          'Usage" in VS Code.',
-      );
-    }
-    // Cooldown is deliberately NOT checked here: an explicitly named worker runs
-    // even while cooling down. The asymmetry is intentional — cooldown is a
-    // blanket 30-min penalty inferred from ONE observed error, whereas the
-    // live-exhausted refusal above is current positive evidence from plan usage.
-    return { worker: found, billableOverage: false };
-  }
-  const stats = readStats();
-  const now = Date.now();
-  // Logged out === undispatchable: excluded here (not at the tier filters) so it
-  // composes with cooldown and stays out of the overage fallback pool too.
-  const loggedOut = workers.filter((w) => isLoginExpired(cache[w.configDir]));
-  const eligible = workers.filter(
-    (w) =>
-      !attempted.has(w.name) &&
-      (stats[w.name]?.cooldownUntil ?? 0) <= now &&
-      !isLoginExpired(cache[w.configDir]),
-  );
-  if (eligible.length === 0) {
-    const cooling = workers
-      .filter((w) => (stats[w.name]?.cooldownUntil ?? 0) > now)
-      .map((w) => `${w.name} (until ${new Date(stats[w.name]!.cooldownUntil!).toLocaleTimeString()})`);
-    const reasons: string[] = [];
-    if (cooling.length > 0) {
-      reasons.push(`cooling down after quota errors — ${cooling.join(', ')}`);
-    }
-    if (loggedOut.length > 0) {
-      reasons.push(`login expired/logged out — ${loggedOut.map((w) => w.name).join(', ')}`);
-    }
-    // Every worker was already attempted for this task and nothing else applies:
-    // there is genuinely nothing to say beyond the bare fact.
-    if (reasons.length === 0) {
-      throw new Error('No eligible worker available.');
-    }
-    // Naming a logged-out worker explicitly is refused too, so its ONLY recovery
-    // is the re-login command — never leave the caller without it.
-    const relogin =
-      loggedOut.length > 0
-        ? ' Re-login the logged-out account(s) first (VSCode: "Re-login Account" on the worker, or ' +
-          // Workers may share a config dir — one account, one re-login command.
-          `shell: ${[...new Set(loggedOut.map((w) => reloginCommand(w.configDir)))].join(', ')} — ` +
-          `${RELOGIN_SHELL_CAVEAT}).`
-        : '';
-    const cooldownAdvice =
-      cooling.length > 0
-        ? ' Wait for the cooldown, or retry with an explicit "worker" — an explicitly named worker ' +
-          'runs even while cooling down.'
-        : '';
-    const message =
-      `No eligible worker: ${reasons.join('; ')}.${relogin}${cooldownAdvice} ` +
-      'Add another worker account if this keeps blocking dispatches.';
-    // Workers whose ONLY disqualifier is the cached expired-login verdict: not
-    // attempted, not cooling down, just logged out. Flipping that verdict is the
-    // one thing that could make this selection succeed, so it is worth a live
-    // probe. Anything else here (all attempted, all cooling down) no probe can fix.
-    const recoverable = workers.filter(
-      (w) =>
-        !attempted.has(w.name) &&
-        (stats[w.name]?.cooldownUntil ?? 0) <= now &&
-        isLoginExpired(cache[w.configDir]),
-    );
-    if (recoverable.length > 0) {
-      throw new ExpiredLoginBlock(message, recoverable, 'auto');
-    }
-    throw new Error(message);
-  }
-  // Preferred worker (usually the main session's own account) wins when it isn't
-  // busier than the least-busy alternative — favored, never flooded. Applied to
-  // whichever pool we are choosing from.
-  const selectFrom = (pool: WorkerProfile[]): WorkerProfile => {
-    const starred = pool.find((w) => w.preferred);
-    if (starred) {
-      const others = pool.filter((w) => !w.preferred);
-      if (others.length === 0) {
-        return starred;
-      }
-      const running = runningCounts();
-      const minOther = Math.min(...others.map((w) => running[w.name] ?? 0));
-      if ((running[starred.name] ?? 0) <= minOther) {
-        return starred;
-      }
-      const worker = others[rrIndex % others.length];
-      rrIndex++;
-      return worker;
-    }
-    const worker = pool[rrIndex % pool.length];
-    rrIndex++;
-    return worker;
-  };
-  // Tier 1: workers NOT exhausted for the candidate model — the normal case.
-  const pool0 = eligible.filter((w) => exhaustedFor(w).length === 0);
-  if (pool0.length > 0) {
-    return { worker: selectFrom(pool0), billableOverage: false };
-  }
-  // Tier 2: every eligible worker is exhausted, but some have overage billing
-  // enabled — those still run, spending money instead of being blocked. Using
-  // them only here (after pool0 is empty) honors the user's overage opt-in
-  // without ever preferring a billable dispatch when a free one exists.
-  const poolB = eligible.filter(
-    (w) => exhaustedFor(w).length > 0 && overageEnabled(cache[w.configDir]),
-  );
-  // The operator's billing guard gates the WHOLE tier: when it blocks, poolB is
-  // never selected from, so an empty pool0 falls straight through to the tier-3
-  // refusal and no auto-assignment can ever spend extra credit.
-  if (overageAllowed && poolB.length > 0) {
-    return { worker: selectFrom(poolB), billableOverage: true };
-  }
-  // Tier 3: no worker can be dispatched for free. Two distinct causes, and the
-  // caller needs to know which: either nothing here can bill past the window at
-  // all, or something could and the operator has forbidden it — the latter is a
-  // one-setting fix, so it names the setting instead of only offering a wait.
-  // Both refusals name every exhausted window and its reset: a refusal that says
-  // "wait for the reset" without saying WHEN is not actionable.
-  const detail = eligible
-    .map((w) => `${w.name}: ${exhaustedFor(w).map(formatExhaustedWindow).join(' · ')}`)
-    .join('; ');
-  if (!overageAllowed && poolB.length > 0) {
-    throw new Error(
-      `All eligible workers are quota-exhausted per live plan usage — ${detail}. ` +
-        `${poolB.length} of them have overage billing enabled, but overage dispatch is blocked ` +
-        'by the operator ("claudeCodeOrchestrator.overageWorkerDispatch") — no extra credit will ' +
-        'be spent. Wait for the earliest reset above, or enable overage dispatch to bill past the ' +
-        'window.',
-    );
-  }
-  throw new Error(
-    `All eligible workers are quota-exhausted per live plan usage, and none has overage billing ` +
-      `enabled to bill past the window — ${detail}. Refused to dispatch to avoid a guaranteed quota ` +
-      'failure. Naming one of these workers explicitly is ALSO refused while it is exhausted without ' +
-      'overage. Wait for the earliest reset above, or — if you believe the usage reading is stale — ask ' +
-      'the operator to run "Claude Code Orchestrator: Refresh Account Usage" in VS Code.',
-  );
-}
-
-/**
- * pickWorker, plus the one thing pickWorker cannot do: refresh a stale login verdict.
- *
- * The cache is read once per dispatch and only the list_workers path ever refreshes
- * it, so without this a worker that was logged out when the reading was taken stays
- * undispatchable no matter how many times the operator re-logs in and retries — the
- * exact false-blocked failure the design forbids. Here a cached "expired" verdict
- * costs one live auth probe before it is believed, and the selection is retried once
- * with whatever recovered.
- *
- * Cost is bounded: probes happen ONLY when the cached verdict is the sole blocker,
- * at most once per config dir per dispatch (probedDirs), at most LIVE_RECHECK_MAX_DIRS
- * dirs per dispatch at LIVE_RECHECK_PROBE_TIMEOUT_MS each (3 × 5s = 15s worst case,
- * whatever the account count), and the retry never re-probes — so a second
- * ExpiredLoginBlock ends the dispatch instead of looping. The healthy path adds
- * nothing at all: no cached-expired worker, no probe.
- */
-async function pickWorkerLive(
-  workers: WorkerProfile[],
-  preferred: string | undefined,
-  attempted: Set<string>,
-  requestedModel: string | undefined,
-  cache: UsageCache,
-  overageAllowed: boolean,
-  probedDirs: Set<string>,
-): Promise<{ worker: WorkerProfile; billableOverage: boolean }> {
-  try {
-    return pickWorker(workers, preferred, attempted, requestedModel, cache, overageAllowed);
-  } catch (err) {
-    if (!(err instanceof ExpiredLoginBlock)) {
-      throw err;
-    }
-    const recheck = await liveRecheckExpiredLogins(err.candidates, err.kind, cache, probedDirs);
-    if (!recheck.recovered) {
-      throw new Error(err.message + recheck.note);
-    }
-    try {
-      return pickWorker(workers, preferred, attempted, requestedModel, cache, overageAllowed);
-    } catch (retryErr) {
-      // Still blocked on a login: the accounts that recovered were not enough (they
-      // may be exhausted, or other blockers remain). Carry the probe findings so the
-      // caller is not told to re-login an account we just proved is fine.
-      throw retryErr instanceof ExpiredLoginBlock
-        ? new Error(retryErr.message + recheck.note)
-        : retryErr;
-    }
-  }
-}
-
-function recordSuccess(name: string, run: RunResult): void {
-  const stats = readStats();
-  const s = stats[name] ?? emptyStats();
-  s.tasks++;
-  s.inputTokens += run.inputTokens;
-  s.outputTokens += run.outputTokens;
-  s.costUsd += run.costUsd;
-  s.lastUsedAt = Date.now();
-  s.lastError = undefined;
-  stats[name] = s;
-  writeStats(stats);
-}
-
-function recordFailure(name: string, message: string, quota: boolean, cooldownMinutes: number): void {
-  const stats = readStats();
-  const s = stats[name] ?? emptyStats();
-  s.errors++;
-  s.lastUsedAt = Date.now();
-  s.lastError = message.slice(0, 300);
-  if (quota) {
-    s.cooldownUntil = Date.now() + cooldownMinutes * 60_000;
-  }
-  stats[name] = s;
-  writeStats(stats);
-}
-
-/**
- * Run one worker session as a `claude -p` child.
- *
- * The command comes from resolveProbeCommand() rather than registry.claudePath:
- * this server is spawned by the CLI and routinely runs without the login-shell
- * PATH, so a bare `claude` in the registry — or an absolute path whose binary
- * moved — kills EVERY dispatch with ENOENT until some editor happens to re-sync
- * the registry. Resolving at spawn time makes dispatch independent of when the
- * last successful settings sync ran, exactly as the usage probes already are;
- * without it a self-healed usage panel would sit next to a dispatch path that
- * still fails, which is the harder failure to diagnose.
- */
-function runClaude(
-  registry: Registry,
-  configDir: string,
-  model: string,
-  prompt: string,
-  timeoutMinutes: number,
-  systemPrompt?: string,
-  onSpawn?: (child: ChildProcess) => void,
-): Promise<RunResult> {
-  return new Promise((resolve, reject) => {
-    let args = ['-p', '--output-format', 'json', '--model', model, '--permission-mode', registry.permissionMode];
-    // Every worker gets the base engineering prompt; task-specific guidance
-    // from the orchestrator (if any) is appended after it.
-    const combinedSystemPrompt = [WORKER_BASE_PROMPT, systemPrompt].filter(Boolean).join('\n\n---\n\n');
-    args.push('--append-system-prompt', combinedSystemPrompt);
-    const useShell = process.platform === 'win32';
-    if (useShell) {
-      args = args.map((a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a));
-    }
-    // detached: on POSIX the child leads its own process group (pgid === pid), so
-    // signalTree() can take down the worker's own dispatch server and anything it
-    // delegated to. stdio stays implicit ('pipe' × 3): detached does not change it,
-    // and naming it here would drop the ChildProcessWithoutNullStreams overload.
-    // Deliberately NOT unref()'d — the 'close' event is how a run completes.
-    // POSIX only: on Windows `detached` gives the child its own console and lets
-    // it OUTLIVE this process — the opposite of what we want. There the tree is
-    // taken down with `taskkill /T` instead, and no pgid is recorded.
-    const claudePath = resolveProbeCommand();
-    const child = spawn(claudePath, args, {
-      cwd: process.cwd(),
-      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
-      shell: useShell,
-      detached: process.platform !== 'win32',
-    });
-    onSpawn?.(child);
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    // Exit status captured by the 'exit' handler. The drain and reap timers
-    // settle after 'exit' has fired (or, for reap, may fire before it), so they
-    // rely on this rather than the 'close' event's code — 'close' may never come.
-    let exitCode: number | null = null;
-    // The signal that killed the child, from the same 'exit' event as exitCode.
-    // 'exit' always precedes 'close', so it is populated on both settle paths.
-    let exitSignal: NodeJS.Signals | null = null;
-    // All timers are cleared by finish(); declared before it so the closure can
-    // reach them. clearTimeout(undefined) is a legal no-op, so unarmed ones are
-    // safe to clear.
-    let timer: NodeJS.Timeout | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
-    let reapTimer: NodeJS.Timeout | undefined;
-    let drainTimer: NodeJS.Timeout | undefined;
-
-    // Single settle gate. Every resolve()/reject() in this Promise passes
-    // through finish, so the Promise settles exactly once: the first caller
-    // wins and every later one (a drain timer firing after 'close', a reap
-    // timer firing after 'exit', etc.) is a guarded no-op. This is the guard
-    // that makes double-settle impossible.
-    let settled = false;
-    const finish = (fn: () => void): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      clearTimeout(killTimer);
-      clearTimeout(reapTimer);
-      clearTimeout(drainTimer);
-      fn();
-    };
-
-    interface CliResult {
-      result?: string;
-      is_error?: boolean;
-      subtype?: string;
-      total_cost_usd?: number;
-      usage?: { input_tokens?: number; output_tokens?: number };
-    }
-
-    // The one place resolution/rejection is built, shared verbatim by the
-    // 'close' handler and the drain/reap timers so the two paths can never
-    // diverge. `forced` is true when 'close' did NOT fire (drain- or reap-timer
-    // path): the stdio streams are still open, so we destroy them and unref the
-    // child, otherwise a grandchild-held pipe keeps the Node event loop — and
-    // thus the MCP server — alive after we have already settled.
-    const settle = (code: number | null, forced: boolean): void => {
-      finish(() => {
-        if (forced) {
-          child.stdout?.destroy();
-          child.stderr?.destroy();
-          child.stdin?.destroy();
-          child.unref();
-        }
-        if (timedOut) {
-          // Before the exit-code check: a SIGKILLed child reports code null,
-          // so a killed worker must produce the timeout message, not
-          // "exited with code null".
-          reject(new WorkerTimeoutError(timeoutMessage(timeoutMinutes, stdout, stderr)));
-          return;
-        }
-        let parsed: CliResult | undefined;
-        try {
-          parsed = JSON.parse(stdout) as CliResult;
-        } catch {
-          // non-JSON output — handled below
-        }
-        const usage = {
-          inputTokens: parsed?.usage?.input_tokens ?? 0,
-          outputTokens: parsed?.usage?.output_tokens ?? 0,
-          costUsd: parsed?.total_cost_usd ?? 0,
-        };
-        if (code !== 0) {
-          // Only SIGTERM/SIGKILL: those are the signals a cancel or an OS kill
-          // sends. A SIGSEGV/SIGABRT death is a genuine worker fault and must
-          // keep failing over and recording as before. The timedOut branch
-          // above already claimed the kills this server sent itself.
-          if (exitSignal === 'SIGTERM' || exitSignal === 'SIGKILL') {
-            reject(
-              new WorkerKilledError(
-                `Worker was terminated externally (SIGTERM/SIGKILL) — most likely cancelled from the ` +
-                  `editor UI or killed by the OS — after ${stdout.length}/${stderr.length} chars of ` +
-                  `output. Not a worker fault; not retried.\n\n` +
-                  `${streamSection('stdout', stdout)}\n${streamSection('stderr', stderr)}`,
-              ),
-            );
-            return;
-          }
-          reject(new Error(`Worker exited with code ${code}: ${(stderr || stdout).slice(0, 2000)}`));
-          return;
-        }
-        if (parsed?.is_error) {
-          reject(new Error(`Worker error (${parsed.subtype ?? 'unknown'}): ${parsed.result ?? ''}`.slice(0, 2000)));
-          return;
-        }
-        resolve({ text: parsed?.result ?? stdout.trim(), ...usage });
-      });
-    };
-
-    // The timeout never settles the Promise directly: it kills the child and
-    // lets 'close' / 'exit' build the rejection so the stdout accumulated up to
-    // the kill reaches the error message. Timeout path bound: fire at N min →
-    // SIGTERM → (10 s KILL_GRACE) SIGKILL → (5 s REAP_GRACE) forced settle, so
-    // a timed-out dispatch returns at most 15 s after its deadline.
-    timer = setTimeout(
-      () => {
-        timedOut = true;
-        // Whole tree, not the direct child: a worker runs its own dispatch
-        // server and may have sub-workers, and signalling the parent alone
-        // leaves them orphaned and burning quota — unreachable afterwards,
-        // because signalTree() short-circuits once the child itself has exited.
-        signalTree(child, 'SIGTERM');
-        // A tree that ignores or is slow to handle SIGTERM would otherwise
-        // survive as orphans while this server has moved on.
-        killTimer = setTimeout(() => {
-          signalTree(child, 'SIGKILL');
-          // Last-resort guarantee: if neither 'close' nor 'exit' settles us
-          // (e.g. the child is wedged uninterruptibly), force the timeout
-          // rejection so the dispatch always returns.
-          reapTimer = setTimeout(() => settle(exitCode, true), REAP_GRACE_MS);
-        }, TIMEOUT_KILL_GRACE_MS);
-      },
-      // clamped upstream, so always inside setTimeout's 32-bit delay range
-      timeoutMinutes * 60_000,
-    );
-
-    child.stdout.on('data', (d) => (stdout += d));
-    child.stderr.on('data', (d) => (stderr += d));
-    child.on('error', (err) => {
-      finish(() => reject(new Error(`Failed to start "${claudePath}": ${err.message}`)));
-    });
-    // 'exit' fires when the process itself dies, regardless of who still holds
-    // its stdio pipes. It is the event that actually tells us the worker is
-    // gone. 'close' is preferred (below) because it guarantees stdout is
-    // complete, but a grandchild that inherited the stdout pipe can hold it
-    // open forever, so 'close' may never arrive. Arm a short drain: if 'close'
-    // beats it, finish's guard makes this a no-op; if not, we settle with
-    // whatever stdout accumulated.
-    child.on('exit', (code, signal) => {
-      exitCode = code;
-      exitSignal = signal;
-      drainTimer = setTimeout(() => settle(exitCode, true), DRAIN_GRACE_MS);
-    });
-    // Preferred settle path: every stdio stream has reached EOF, so stdout is
-    // complete and the normal (non-timeout) JSON parse sees the whole result.
-    child.on('close', (code) => settle(code, false));
-    // Prompt goes over stdin to avoid shell-quoting issues.
-    child.stdin.write(prompt);
-    child.stdin.end();
+  return runDispatchTask(args, {
+    shouldAbort: () => isAborted(requestId),
+    onTrack: (base) => trackTask(requestId, base),
+    onSpawn: (taskId, child) => registerChild(taskId, child),
+    onSettle: (taskId) => {
+      taskBases.delete(taskId);
+    },
   });
 }
 
-async function dispatchTask(args: DispatchArgs, requestId: string | number | null): Promise<string> {
-  const registry = readRegistry();
-  if (registry.workers.length === 0) {
-    throw new Error(
-      'No worker accounts registered. In VS Code, run "Claude Code Orchestrator: Add Worker Account".',
-    );
-  }
-  const title = args.title?.trim() || 'untitled task';
-  const prompt = args.prompt?.trim();
-  if (!prompt) {
-    throw new Error('dispatch_task requires a non-empty "prompt".');
-  }
+/** Grace added to the worker-timeout ceiling for the supervisor to write result.json. */
+const RESULT_WAIT_GRACE_MS = 30_000;
+/**
+ * Per-attempt kill+reap grace a supervisor's worker timer can burn BEYOND the wall clock
+ * before it settles (mirrors task-runner's TIMEOUT_KILL_GRACE_MS 10s + REAP_GRACE_MS 5s).
+ * Folded into the detach wait ceiling below so a multi-attempt failover run — whose true
+ * worst case is maxAttempts × (timeout + this) — is never cut off before the supervisor
+ * finishes, which was the F3 spurious-timeout relay divergence from the default path.
+ */
+const ATTEMPT_KILL_REAP_GRACE_MS = 15_000;
 
-  const timeoutMinutes = clampTimeoutMinutes(args.timeout_minutes ?? registry.workerTimeoutMinutes);
+/** The subset of tasks/<id>.result.json the server reads to relay (contract §5.4). */
+interface ResultJson {
+  status: 'done' | 'error';
+  text: string;
+  error?: string;
+}
 
+/**
+ * Detached dispatch. The server picks the task id, writes a task spec, spawns the
+ * supervisor (out/mcp/run-task.js) as its own detached, unref'd process — and,
+ * crucially, does NOT register it in childrenByTask / taskBases / tasksByRequest.
+ * That single omission is the whole shutdown-exclusion mechanism: shutdown() and
+ * cancelRequest() only ever touch those maps, so neither signals the supervisor nor
+ * writes a terminal event for it (contract §5.3 — the supervisor is sole author).
+ *
+ * The server then waits for tasks/<id>.result.json, bounded by the same worker-
+ * timeout ceiling as the default path plus a write grace, and relays the identical
+ * inline string (done) or throws the identical error (parity with the default
+ * failure). If the session dies while waiting, process exit abandons the wait; the
+ * supervisor is a separate process group and completes regardless.
+ */
+function dispatchDetached(args: DispatchArgs, requestId: string | number | null): Promise<string> {
   ensureDirs();
+  const registry = readRegistry();
   const id = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const outputFile = path.join(TASKS_DIR, `${id}.md`);
-  const attempted = new Set<string>();
-  // Explicit worker → single attempt; otherwise fail over across workers on quota errors.
-  const maxAttempts = args.worker ? 1 : registry.workers.length;
-  let lastError: Error | undefined;
-  // Whitespace-collapsed prompt head carried on every TaskEvent so surfaces can
-  // show WHAT a task is running without opening its output file.
-  const promptPreview = prompt.replace(/\s+/g, ' ').trim().slice(0, 300);
-  // Task-specific system prompt (if any), and its reusable output-file section.
-  const systemPrompt = args.system_prompt?.trim();
-  const systemPromptSection = systemPrompt ? `\n\n## Task system prompt\n\n${systemPrompt}` : '';
-  // Caller-validated model request (else each worker runs its own default) and a
-  // single usage-cache read, both passed into every pickWorker attempt.
-  const requestedModel =
-    args.model && (WORKER_MODELS as readonly string[]).includes(args.model) ? args.model : undefined;
-  const usageCache = readUsageCache();
-  // Operator billing guard, resolved once for the whole dispatch (including every
-  // failover attempt) so a mid-dispatch settings change cannot make one attempt
-  // billable and the next not. Defensive like the frontier guard: anything that is
-  // not the literal 'allow' reads as blocked — on a money surface, an unreadable
-  // or unexpected value must never be taken as consent to spend.
-  const overageAllowed = registry.overageWorkerDispatch === 'allow';
-  // Config dirs whose login was already re-probed live for THIS dispatch. Workers
-  // can share a dir, and a dispatch can run pickWorker once per failover attempt —
-  // neither may turn into a second probe of the same account.
-  const probedDirs = new Set<string>();
+  const cwd = process.cwd();
+  const specPath = path.join(TASKS_DIR, `${id}.spec.json`);
+  const resultPath = path.join(TASKS_DIR, `${id}.result.json`);
+  fs.writeFileSync(specPath, JSON.stringify({ id, cwd, args }));
 
-  try {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (isAborted(requestId)) {
-        break;
-      }
-      let worker: WorkerProfile;
-      let billableOverage: boolean;
-      try {
-        const picked = await pickWorkerLive(
-          registry.workers,
-          args.worker,
-          attempted,
-          requestedModel,
-          usageCache,
-          overageAllowed,
-          probedDirs,
-        );
-        worker = picked.worker;
-        billableOverage = picked.billableOverage;
-      } catch (err) {
-        lastError = lastError ?? (err as Error);
-        break;
-      }
-      // Selection can now await live auth probes, so a cancellation can land after
-      // the loop-top check and before this task is trackable. Re-check here: past
-      // this point the child is spawned and cancelRequest could no longer reach it.
-      if (isAborted(requestId)) {
-        break;
-      }
-      attempted.add(worker.name);
-      const model = requestedModel ?? worker.model;
-      // Billing guard: frontier models may bill per use rather than draw from
-      // the subscription quota. The same model would be blocked on every
-      // worker, so this aborts instead of failing over.
-      if (isFrontierTier(model) && registry.frontierWorkerDispatch !== 'allow') {
-        throw new Error(
-          `Dispatch to ${model} is blocked: the operator has disabled frontier worker dispatches ` +
-            '(billing guard — this model may bill per use instead of drawing from the subscription ' +
-            'quota). Re-dispatch this task with model claude-opus-4-8 and ultrathink: true; do NOT ' +
-            'retry with the frontier model. The operator can re-enable it via the ' +
-            '"claudeCodeOrchestrator.frontierWorkerDispatch" setting in VS Code.',
-        );
-      }
-      const base = { id, title, worker: worker.name, model, outputFile, cwd: process.cwd(), promptPreview };
-      appendTaskEvent({ ...base, ts: Date.now(), status: 'running' });
-      // Claim the id before spawning: a cancellation landing in the window
-      // between here and the spawn must still mark this task cancelled.
-      trackTask(requestId, base);
-      // Make the task inspectable WHILE RUNNING: write the output file now with a
-      // RUNNING header plus the prompt, so a reader can see what a live worker was
-      // handed before any result exists. A write failure must not fail the dispatch.
-      try {
-        fs.writeFileSync(
-          outputFile,
-          `# ${title}\n\n- status: RUNNING (started ${new Date().toISOString()})\n- worker: ${worker.name}\n- model: ${model}${args.ultrathink ? '\n- ultrathink: true' : ''}${billableOverage ? '\n- overage: billing past plan window' : ''}\n\n---\n\n## Prompt\n\n${prompt}${systemPromptSection}\n`,
-        );
-      } catch {
-        // best effort — the task still runs and the DONE/FAILED writer overwrites this
-      }
-
-      // The harness scans the user message for thinking keywords; for a
-      // headless worker the dispatched prompt IS the user message, so
-      // appending the keyword mechanically raises its reasoning budget.
-      const workerPrompt = args.ultrathink ? `${prompt}\n\nultrathink` : prompt;
-
-      try {
-        const run = await runClaude(
-          registry,
-          worker.configDir,
-          model,
-          workerPrompt,
-          timeoutMinutes,
-          systemPrompt || undefined,
-          (child) => {
-            registerChild(id, child);
-            try {
-              // A second 'running' event, carrying the pid: readers take the
-              // latest event per task id, so this supersedes the one above and
-              // makes the worker killable from outside this process. It is
-              // spawned detached, so on POSIX its pid is also its group id and
-              // an outside killer can take the whole tree. Windows has no POSIX
-              // group: leave pgid unset so the extension falls back to taskkill /T.
-              appendTaskEvent({
-                ...base,
-                ts: Date.now(),
-                status: 'running',
-                pid: child.pid,
-                pgid: process.platform === 'win32' ? undefined : child.pid,
-              });
-            } catch {
-              // the child is registered and killable — a log write must not fail the run
-            }
-          },
-        );
-        recordSuccess(worker.name, run);
-        fs.writeFileSync(
-          outputFile,
-          `# ${title}\n\n- worker: ${worker.name}\n- model: ${model}${args.ultrathink ? '\n- ultrathink: true' : ''}${billableOverage ? '\n- overage: billing past plan window' : ''}\n- tokens: ${run.inputTokens} in / ${run.outputTokens} out` +
-            (run.costUsd ? ` (~$${run.costUsd.toFixed(4)})` : '') +
-            `\n\n---\n\n## Prompt\n\n${prompt}${systemPromptSection}\n\n## Result\n\n${run.text}\n`,
-        );
-        appendTaskEvent({
-          ...base,
-          ts: Date.now(),
-          status: 'done',
-          inputTokens: run.inputTokens,
-          outputTokens: run.outputTokens,
-          costUsd: run.costUsd,
-        });
-        // When the dispatch went to an exhausted-but-overage-enabled worker, warn
-        // loudly (before the [worker: …] line) that it spent real money.
-        const overageWarning = billableOverage
-          ? `⚠ ${worker.name} is past a plan window; overage billing applies — this dispatch bills real money against the account's monthly cap.\n`
-          : '';
-        return `${overageWarning}[worker: ${worker.name}, model: ${model}]\n\n${run.text}`;
-      } catch (err) {
-        if (isAborted(requestId)) {
-          // We killed this child ourselves. A cancellation is not a quota error
-          // and not a worker failure: no recordFailure (it would inflate the
-          // error count and could cool the worker down), and no failover. The
-          // terminal CANCELLED note in the output file is appended by
-          // cancelRequest/shutdown (the terminal-event sites), not here, so it is
-          // written exactly once even though both paths can fire for this task.
-          break;
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        // A timeout and an external kill are never quota errors, whatever their
-        // embedded partial output says. Both fall through to the break below:
-        // no cooldown, and no replacement worker for a task nobody still wants.
-        const quota =
-          !(err instanceof WorkerTimeoutError) && !(err instanceof WorkerKilledError) && isQuotaError(message);
-        recordFailure(worker.name, message, quota, registry.cooldownMinutes);
-        lastError = err as Error;
-        if (!quota) {
-          // Real failures (bad CLI, login expired, crash) don't fail over — surface them.
-          break;
-        }
-        appendTaskEvent({
-          ...base,
-          ts: Date.now(),
-          status: 'running',
-          error: `quota error on ${worker.name} — failing over`,
-        });
-      }
+  // Track the id so an explicit client cancel (notifications/cancelled) can reach it
+  // via cancelDetachTask. Kept ONLY here — never in the maps shutdown() sweeps — so
+  // the supervisor stays excluded from shutdown (R3). Cleaned up when the wait settles.
+  if (requestId !== null) {
+    let ids = detachTasksByRequest.get(requestId);
+    if (ids === undefined) {
+      ids = new Set<string>();
+      detachTasksByRequest.set(requestId, ids);
     }
-
-    if (isAborted(requestId)) {
-      // cancelRequest already killed the child and appended the terminal event.
-      // No output file, no failure record — the caller gets no response either.
-      throw new Error(CANCELLED_ERROR);
-    }
-
-    const message = lastError?.message ?? 'unknown error';
-    const singleWorkerHint =
-      registry.workers.length === 1 &&
-      !(lastError instanceof WorkerTimeoutError) &&
-      !(lastError instanceof WorkerKilledError) &&
-      isQuotaError(message)
-        ? ' Only one worker account is registered, so there is nothing to fail over to — wait for its limit to reset or add another worker account.'
-        : '';
-    fs.writeFileSync(
-      outputFile,
-      `# ${title}\n\nFAILED: ${message}\n\n## Prompt\n\n${prompt}${systemPromptSection}\n`,
-    );
-    appendTaskEvent({
-      id,
-      title,
-      worker: [...attempted].join(',') || (args.worker ?? '-'),
-      model: args.model ?? '-',
-      outputFile,
-      cwd: process.cwd(),
-      promptPreview,
-      ts: Date.now(),
-      status: 'error',
-      error: message,
-    });
-    throw new Error(message + singleWorkerHint);
-  } finally {
-    taskBases.delete(id);
+    ids.add(id);
   }
+  const untrack = (): void => {
+    if (requestId === null) {
+      return;
+    }
+    const ids = detachTasksByRequest.get(requestId);
+    if (ids !== undefined) {
+      ids.delete(id);
+      if (ids.size === 0) {
+        detachTasksByRequest.delete(requestId);
+      }
+    }
+  };
+
+  // __dirname is the bundle's own dir (out/mcp) — run-task.js is emitted beside
+  // server.js and installed beside it. Same node binary, so the supervisor is
+  // version-locked to this server.
+  const runTaskJs = path.join(__dirname, 'run-task.js');
+  const child = spawn(process.execPath, [runTaskJs, specPath], {
+    cwd,
+    env: process.env,
+    detached: true,
+    stdio: 'ignore',
+  });
+  // Let this process exit without waiting on the supervisor: survival is the point.
+  child.unref();
+
+  // Ceiling sized to the supervisor's TRUE worst case, not one attempt: an unnamed
+  // dispatch fails over across every worker, each attempt getting its own full timer,
+  // so the wall clock can be maxAttempts × (timeout + kill/reap grace) + a write grace.
+  // The single-attempt ceiling used before made a legitimately-slow failover relay a
+  // spurious "did not produce a result" while the default path would have returned the
+  // real result (the F3 §3 parity break). The liveness-aware wait below normally settles
+  // long before this — the moment result.json lands or the supervisor exits — so this is
+  // only a last-resort backstop for a supervisor that is alive but never writes.
+  const maxAttempts = args.worker ? 1 : Math.max(1, registry.workers.length);
+  const perAttemptMs =
+    clampTimeoutMinutes(args.timeout_minutes ?? registry.workerTimeoutMinutes) * 60_000 +
+    ATTEMPT_KILL_REAP_GRACE_MS;
+  const timeoutMs = maxAttempts * perAttemptMs + RESULT_WAIT_GRACE_MS;
+
+  return new Promise<string>((resolve, reject) => {
+    let done = false;
+    // A spawn failure (e.g. the run-task bundle is missing) would otherwise hang the
+    // wait to its ceiling — surface it immediately instead, and unlink the spec the
+    // supervisor (which never ran) would have cleaned up, so the verbatim prompt does
+    // not linger on disk (F6).
+    child.on('error', (err) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      try {
+        fs.unlinkSync(specPath);
+      } catch {
+        // best effort — the id is unique, so a leftover spec is litter, not a hazard
+      }
+      reject(new Error(`Failed to launch the detached task supervisor: ${err.message}`));
+    });
+    waitForResultFile(resultPath, timeoutMs, child).then(
+      (result) => {
+        if (done) {
+          return;
+        }
+        done = true;
+        if (result.status === 'error') {
+          reject(new Error(result.error ?? result.text));
+        } else {
+          resolve(result.text);
+        }
+      },
+      (err) => {
+        if (done) {
+          return;
+        }
+        done = true;
+        reject(err);
+      },
+    );
+  }).finally(untrack);
+}
+
+/** Grace after the supervisor exits to let its just-renamed result.json become visible. */
+const EXIT_READ_GRACE_MS = 150;
+
+/**
+ * Resolve when tasks/<id>.result.json exists and parses, settle early when the supervisor
+ * process exits, else reject at the ceiling. fs.watch on TASKS_DIR is the fast path; a
+ * 200ms poll is the fallback for platforms or filesystems where directory watch events are
+ * unreliable. The final name only ever appears via atomic rename, so a successful read is
+ * never torn (the JSON.parse guard is belt-and-suspenders).
+ *
+ * `supervisor`, when supplied, makes the wait LIVENESS-AWARE (contract F3): the supervisor
+ * writes result.json (atomic rename) BEFORE it exits, so its 'exit' means the result either
+ * exists now or never will. On exit we read once more after a short grace; still absent →
+ * it crashed / was killed before writing (R6) → reject immediately rather than waiting out
+ * the whole ceiling. This is what lets a long, legitimate multi-attempt failover run relay
+ * inline: while the supervisor is alive and working, no fixed single-attempt clock fires.
+ * Never leaves a timer, watcher, or exit listener armed after it settles.
+ */
+function waitForResultFile(
+  resultPath: string,
+  timeoutMs: number,
+  supervisor?: ChildProcess,
+): Promise<ResultJson> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let watcher: fs.FSWatcher | undefined;
+    let pollTimer: ReturnType<typeof setInterval> | undefined;
+    let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
+    let exitGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      settled = true;
+      try {
+        watcher?.close();
+      } catch {
+        // already closed
+      }
+      if (pollTimer !== undefined) {
+        clearInterval(pollTimer);
+      }
+      if (ceilingTimer !== undefined) {
+        clearTimeout(ceilingTimer);
+      }
+      if (exitGraceTimer !== undefined) {
+        clearTimeout(exitGraceTimer);
+      }
+      if (supervisor !== undefined) {
+        supervisor.removeListener('exit', onExit);
+      }
+    };
+    const tryRead = (): void => {
+      if (settled) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as ResultJson;
+        cleanup();
+        resolve(parsed);
+      } catch {
+        // Not written yet (ENOENT), or — never expected under atomic rename — a torn
+        // read: either way wait for the next watch event / poll tick. cleanup/resolve
+        // do not throw, so this only ever swallows the read/parse.
+      }
+    };
+    function onExit(): void {
+      if (settled) {
+        return;
+      }
+      // The supervisor renames result.json into place before exiting; if exit and that
+      // rename race, one more read after a short grace catches it. Still absent → the
+      // supervisor died before writing.
+      exitGraceTimer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        tryRead();
+        if (settled) {
+          return;
+        }
+        cleanup();
+        reject(
+          new Error(
+            'The detached task supervisor exited without recording a result — it likely crashed or ' +
+              'was killed. Check the task list for its reconciled status (a reaper records its final state).',
+          ),
+        );
+      }, EXIT_READ_GRACE_MS);
+    }
+    try {
+      watcher = fs.watch(TASKS_DIR, (_event, filename) => {
+        if (filename === path.basename(resultPath)) {
+          tryRead();
+        }
+      });
+    } catch {
+      // directory watch unsupported here — the poll below still finds the file
+    }
+    pollTimer = setInterval(tryRead, 200);
+    if (supervisor !== undefined) {
+      supervisor.on('exit', onExit);
+    }
+    ceilingTimer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      cleanup();
+      // R6: the supervisor is alive but never produced a result within even the failover
+      // worst case. Surface a timeout error — the same shape of failure a default dispatch
+      // would surface, so the caller is not left waiting forever.
+      reject(
+        new Error(
+          'Detached task did not produce a result within the worker-timeout window. It may still ' +
+            'be running in the background — check the task list for its recorded result.',
+        ),
+      );
+    }, timeoutMs);
+    // The file can already exist (a very fast supervisor) before either watcher or
+    // poll is armed.
+    tryRead();
+  });
 }
 
 async function dispatchTasksParallel(args: BatchArgs, requestId: string | number | null): Promise<string> {
@@ -1412,6 +665,107 @@ async function dispatchTasksParallel(args: BatchArgs, requestId: string | number
     `${tasks.length} task(s) dispatched in parallel, ${tasks.length - failed} succeeded, ${failed} failed.\n\n` +
     parts.join('\n\n')
   );
+}
+
+/** One task's status record in a dispatch_status payload. */
+interface StatusRecord {
+  id: string;
+  found: boolean;
+  status: 'running' | 'done' | 'error' | 'not_found';
+  title?: string;
+  worker?: string;
+  model?: string;
+  ts?: number;
+  error?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  /** The terminal result text (from result.json, else the output file) — set when terminal. */
+  result?: string;
+}
+
+/** Read a task's output-file body, or undefined if it cannot be read. */
+function readOutputBody(outputFile: string | undefined): string | undefined {
+  if (typeof outputFile !== 'string' || outputFile === '') {
+    return undefined;
+  }
+  try {
+    return fs.readFileSync(outputFile, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * dispatch_status — retrieval of one or more dispatched tasks by id (contract §6).
+ * Reads the latest tasks.jsonl event per id and, when the task is terminal, attaches its
+ * result text (preferring the exact tasks/<id>.result.json string a detach task recorded,
+ * falling back to the tasks/<id>.md body). Returns a JSON object `{ tasks: [...] }` the
+ * orchestrator can parse.
+ *
+ * Spawns nothing, but is NOT purely read-only: it first runs a BOUNDED reaper reconcile
+ * over the requested ids (contract F2 / R8). The reaper is otherwise only wired to VS Code
+ * extension startup, so in a headless/CLI deployment — exactly the "session was interrupted,
+ * retrieve later" case this tool serves — a crashed supervisor's task would sit `running`
+ * forever. Reconciling just the ids being asked about heals that here, writing nothing the
+ * reaper would not have written and touching no unrelated task.
+ */
+function dispatchStatus(args: { id?: unknown; ids?: unknown }): string {
+  const ids: string[] = [];
+  if (typeof args.id === 'string' && args.id.trim()) {
+    ids.push(args.id.trim());
+  }
+  if (Array.isArray(args.ids)) {
+    for (const x of args.ids) {
+      if (typeof x === 'string' && x.trim()) {
+        ids.push(x.trim());
+      }
+    }
+  }
+  if (ids.length === 0) {
+    throw new Error('dispatch_status requires "id" (a task id string) or "ids" (an array of task id strings).');
+  }
+  const unique = [...new Set(ids)];
+  // Headless reconcile of just these ids before reading their status, so a dead
+  // supervisor's ledger is healed even with no VS Code host (F2). Never throws.
+  try {
+    reapDeadTasks(unique);
+  } catch {
+    // reconcile is best-effort — a failed sweep must not fail the status read
+  }
+  const latest = latestEventsByIds(unique);
+  const tasks: StatusRecord[] = unique.map((id) => {
+    const ev = latest.get(id);
+    if (ev === undefined) {
+      return { id, found: false, status: 'not_found' };
+    }
+    const rec: StatusRecord = {
+      id,
+      found: true,
+      status: ev.status,
+      title: ev.title,
+      worker: ev.worker,
+      model: ev.model,
+      ts: ev.ts,
+    };
+    if (ev.status === 'error') {
+      rec.error = ev.error;
+    }
+    if (ev.status === 'done') {
+      rec.inputTokens = ev.inputTokens ?? 0;
+      rec.outputTokens = ev.outputTokens ?? 0;
+      rec.costUsd = ev.costUsd ?? 0;
+    }
+    // Terminal → attach the result body. Prefer the exact result.json text (what a
+    // detach task recorded and the server would have relayed); fall back to the
+    // output file for a default task, which has no result.json.
+    if (ev.status !== 'running') {
+      const rj = readResultJson(id);
+      rec.result = typeof rj?.text === 'string' ? rj.text : readOutputBody(ev.outputFile);
+    }
+    return rec;
+  });
+  return JSON.stringify({ tasks }, null, 2);
 }
 
 /**
@@ -1614,6 +968,526 @@ async function listWorkers(): Promise<string> {
   );
 }
 
+/* ------------------------------------------------------------------------- *
+ * Mesh Mode (experimental, v1.4.0) — mesh_* tools wired over the gateway (P9),
+ * the `claude --bg` worker pool (P10) and the cross-account bridge (P11). The
+ * frozen contract lives in ../mesh/contract; the three subsystems are built by
+ * sibling tasks in ../mesh/{gateway,pool,bridge}. See docs/session-messaging-spike.md
+ * for why each mechanism behaves as it does.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Lazily-initialized mesh runtime for THIS server process — one mesh per workspace,
+ * held behind the owner lock in the mesh state file. `gateway` being set is the
+ * initialized flag: it is assigned only after a fully successful ensureMesh(), so a
+ * partial failure (e.g. gateway start) leaves the runtime uninitialized and the next
+ * mesh tool call retries from scratch. `ownerLocked`/`state` let shutdown release the
+ * lock (rewrite ownerPid 0) so a next session can take over instantly.
+ */
+interface MeshRuntime {
+  gateway?: IGatewayManager;
+  pool?: IWorkerPool;
+  bridge?: IBridge;
+  state?: MeshState;
+  ownerLocked: boolean;
+  /** Path of the atomic claim marker (M1) we created; used by stopMesh to release it. */
+  lockFile?: string;
+}
+const mesh: MeshRuntime = { ownerLocked: false };
+/** Single in-flight init latch: concurrent first callers await the same ensureMesh(). */
+let meshInit: Promise<void> | undefined;
+
+/**
+ * The main (orchestrator) account's config dir — the account this server runs under,
+ * and the gateway's and pool's default account. The test override comes first so the
+ * suite can point the whole mesh at a scratch dir; otherwise the CLAUDE_CONFIG_DIR the
+ * server inherited, else ~/.claude (the CLI default).
+ */
+function meshMainConfigDir(): string {
+  return (
+    process.env.CLAUDE_CODE_ORCHESTRATOR_TEST_CONFIG_DIR ||
+    process.env.CLAUDE_CONFIG_DIR ||
+    path.join(os.homedir(), '.claude')
+  );
+}
+
+/** Parse the mesh state file, or undefined if absent/unreadable/malformed. Read-only. */
+function readMeshState(file: string): MeshState | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as MeshState;
+    if (typeof parsed !== 'object' || parsed === null || typeof parsed.ownerPid !== 'number') {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Write the mesh state file atomically (tmp+rename, same pattern as run-task.ts's
+ * result writes) so the extension UI — a concurrent reader in another process — never
+ * observes a torn file. The state dir (ROOT_DIR/mesh) may not exist yet.
+ */
+function writeMeshState(file: string, state: MeshState): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+function dedupe(dirs: string[]): string[] {
+  return [...new Set(dirs)];
+}
+
+/**
+ * The cross-process claim lock for a workspace mesh (adversarial finding M1): a dedicated
+ * marker file next to the state file, keyed to the same workspace hash. Distinct from the
+ * state file so acquiring the claim never races the state-file writes the extension UI reads.
+ */
+function meshLockFile(cwd: string): string {
+  return `${meshStateFile(cwd)}.lock`;
+}
+
+interface MeshLockRecord {
+  ownerPid: number;
+  /** Owner's process start marker — a sanity token against a recycled pid (M2). */
+  startedAt: number;
+}
+
+/** Parse the lock marker's owner record, or undefined if absent/unreadable/malformed. Read-only. */
+function readMeshLock(lockFile: string): MeshLockRecord | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as MeshLockRecord;
+    if (typeof parsed !== 'object' || parsed === null || typeof parsed.ownerPid !== 'number') {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Atomically claim the workspace mesh owner lock (adversarial finding M1). Uses the classic
+ * write-tmp-then-hardlink idiom: writeFileSync fills a per-pid temp with our full record, then
+ * fs.linkSync(tmp, lockFile) publishes it — link is atomic and fails with EEXIST if the marker
+ * already exists, so of two servers starting together exactly one wins the claim and the caller's
+ * state-file read-modify-write runs in a true cross-process critical section. Linking from an
+ * already-written temp means the visible marker is never empty, so a racing taker never observes a
+ * half-written lock. A marker left by a dead/released owner is stale: its recorded pid is not alive,
+ * so we break it (unlink) and retry the link once. A marker held by a LIVE foreign pid ⇒ mesh_busy.
+ *
+ * Residual pid-reuse risk (adversarial finding M2): if a dead owner's pid was recycled by an
+ * unrelated live process, isPidAlive() reports it alive and we would refuse a takeover that should
+ * succeed. Node has no portable API to read another pid's real start time, so the recorded startedAt
+ * is only a presence sanity token, not a full guard — this narrow window is documented rather than
+ * closed. stopMesh writes ownerPid 0 AND drops this marker on clean shutdown, so the common path
+ * (graceful restart) is reuse-proof; the window is confined to an owner that died without shutdown.
+ */
+function acquireMeshLock(lockFile: string): void {
+  const record = JSON.stringify({ ownerPid: process.pid, startedAt: Date.now() });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const tmp = `${lockFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, record);
+    try {
+      fs.linkSync(tmp, lockFile); // atomic publish; EEXIST if already held
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
+      }
+      const holder = readMeshLock(lockFile);
+      if (holder && holder.ownerPid === process.pid) {
+        return; // already ours (a retry after a later init step failed) — nothing to reclaim
+      }
+      if (holder && isPidAlive(holder.ownerPid)) {
+        throw new Error(
+          meshError(
+            'mesh_busy',
+            `another orchestrator session owns the mesh for this workspace (pid ${holder.ownerPid}).`,
+          ),
+        );
+      }
+      // Stale marker (owner dead / released / unreadable): break it and retry once.
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {
+        // already removed by a racing taker — the retry's linkSync decides the winner
+      }
+    } finally {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        // tmp already consumed by linkSync, or never created
+      }
+    }
+  }
+  throw new Error(
+    meshError('mesh_busy', 'could not claim the mesh owner lock for this workspace (contended startup).'),
+  );
+}
+
+/** Release the claim marker, but only if it still records OUR pid (never remove a peer's lock). */
+function releaseMeshLock(lockFile: string): void {
+  try {
+    const holder = readMeshLock(lockFile);
+    if (holder && holder.ownerPid === process.pid) {
+      fs.unlinkSync(lockFile);
+    }
+  } catch {
+    // best effort — a marker left behind is broken by the staleness check on next start
+  }
+}
+
+/**
+ * Initialize the mesh runtime on the FIRST mesh tool call, guarded by a single
+ * in-flight promise so concurrent first callers await the same init. The registry is
+ * re-read on every call UNTIL initialized; after init, toggling meshMode off only
+ * takes effect on the next server start (there is no live teardown path).
+ */
+async function ensureMesh(): Promise<void> {
+  // M5: re-check the master switch on EVERY mesh tool call, even after init. The
+  // initialized short-circuit below otherwise pins meshMode to its value at first init,
+  // so an operator toggling meshMode off mid-session would leave mesh_send/spawn/receive
+  // running while only mesh_status reported OFF. Gate here so a toggle-off refuses new
+  // tool actions immediately. NOTE: this is a GATE only — it does not tear down the
+  // already-running gateway/bridge/workers; a full mid-session teardown on toggle-off is
+  // future work. mesh_status keeps its own meshMode check and does not call ensureMesh
+  // while off, so it still renders the static OFF text without hitting this throw.
+  if (readRegistry().meshMode !== 'on') {
+    throw new Error(
+      meshError('mesh_off', 'enable claudeCodeOrchestrator.meshMode (experimental) in the extension settings.'),
+    );
+  }
+  if (mesh.gateway) {
+    return;
+  }
+  if (!meshInit) {
+    // A failed init clears the latch and rethrows, so the next call retries (a
+    // transient mesh_busy, or a gateway that failed to reach READY, is recoverable).
+    meshInit = doEnsureMesh().catch((err) => {
+      meshInit = undefined;
+      throw err;
+    });
+  }
+  return meshInit;
+}
+
+/** The ordered init steps (a–f of the task contract). Assigns to `mesh` only on full success. */
+async function doEnsureMesh(): Promise<void> {
+  // a. master switch
+  const registry = readRegistry();
+  if (registry.meshMode !== 'on') {
+    throw new Error(
+      meshError('mesh_off', 'enable claudeCodeOrchestrator.meshMode (experimental) in the extension settings.'),
+    );
+  }
+  // b. platform (unix sockets only — mesh is a same-machine feature)
+  if (!meshPlatformSupported()) {
+    throw new Error(
+      meshError('unsupported_platform', `mesh mode needs macOS or Linux; this platform is ${process.platform}.`),
+    );
+  }
+  const cwd = process.cwd();
+  const mainConfigDir = meshMainConfigDir();
+  // Resolve the claude executable exactly as dispatch does at spawn time (usage.ts's
+  // resolveProbeCommand), so the mesh is independent of when the registry was last synced.
+  const claudePath = resolveProbeCommand();
+
+  // c. owner lock: one mesh per workspace, claimed ATOMICALLY (adversarial finding M1).
+  // The old read-liveness-then-write was a cross-process TOCTOU: two servers starting
+  // together could both pass the liveness test and both init. The protocol is now:
+  //   1. Fast reject — a live foreign owner already recorded ⇒ mesh_busy, no lock churn.
+  //   2. acquireMeshLock — atomic hardlink claim of a dedicated marker, so the read-modify-
+  //      write of the state file below runs in a true cross-process critical section; a
+  //      stale marker from a dead/released owner is broken and re-taken inside there.
+  //   3. Write our claim (ownerPid = us), then RE-READ and confirm ownerPid === our pid
+  //      before proceeding — a defensive backstop that also fails us out if the marker was
+  //      wrongly broken. A dead owner's worker ledger is preserved so takeover re-adopts.
+  const stateFile = meshStateFile(cwd);
+  const lockFile = meshLockFile(cwd);
+  const existing = readMeshState(stateFile);
+  // M2: a live foreign ownerPid blocks only when the record carries a start marker
+  // (startedAt present and positive). isPidAlive cannot distinguish the original owner from
+  // an unrelated process that recycled its pid, so startedAt is a sanity token, not a full
+  // pid-reuse guard; the residual window is documented on acquireMeshLock and is narrow —
+  // stopMesh writes ownerPid 0 and drops the marker on clean shutdown, so the common path
+  // (graceful restart) never reaches it.
+  if (
+    existing &&
+    existing.ownerPid !== process.pid &&
+    typeof existing.startedAt === 'number' &&
+    existing.startedAt > 0 &&
+    isPidAlive(existing.ownerPid)
+  ) {
+    throw new Error(
+      meshError(
+        'mesh_busy',
+        `another orchestrator session owns the mesh for this workspace (pid ${existing.ownerPid}).`,
+      ),
+    );
+  }
+  acquireMeshLock(lockFile);
+  // Re-read the ledger UNDER the lock so a concurrent takeover cannot cost us a worker record.
+  const ledger = readMeshState(stateFile);
+  const state: MeshState = {
+    ownerPid: process.pid,
+    cwd,
+    gatewayName: meshGatewayName(cwd),
+    startedAt: Date.now(),
+    workers: ledger?.workers ?? [],
+  };
+  writeMeshState(stateFile, state);
+  const confirmed = readMeshState(stateFile);
+  if (!confirmed || confirmed.ownerPid !== process.pid) {
+    releaseMeshLock(lockFile);
+    throw new Error(
+      meshError(
+        'mesh_busy',
+        `lost the mesh owner-lock race for this workspace (owner pid ${confirmed?.ownerPid ?? 'unknown'}).`,
+      ),
+    );
+  }
+  mesh.ownerLocked = true;
+  mesh.lockFile = lockFile;
+  mesh.state = state;
+
+  // d. worker pool + one adopt() to re-claim any workers a previous owner left running.
+  const pool = new WorkerPool({ claudePath, cwd: process.cwd(), mainConfigDir });
+  pool.adopt();
+
+  // e. gateway — must reach READY. A start failure propagates its capability_failed and
+  // leaves the mesh uninitialized (nothing assigned below), so the next call retries.
+  const gateway = new GatewayManager({
+    claudePath,
+    cwd,
+    model: registry.meshGatewayModel,
+    configDir: mainConfigDir,
+  });
+  await gateway.start();
+
+  // f. cross-account bridge (experimental²) — only when double-opted-in.
+  let bridge: IBridge | undefined;
+  if (registry.meshCrossAccountBridge === 'on') {
+    const participants = dedupe([mainConfigDir, ...registry.workers.map((w) => w.configDir)]);
+    bridge = new Bridge({ participants });
+    bridge.start();
+  }
+
+  // Assign last: `mesh.gateway` set is exactly what "initialized" means.
+  mesh.pool = pool;
+  mesh.gateway = gateway;
+  mesh.bridge = bridge;
+}
+
+/** Clamp an optional numeric tool arg to [min, max] (rounded), falling back to a default. */
+function clampMeshNumber(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/**
+ * mesh_status — the mesh diagnostic. NEVER throws mesh_off: with meshMode off it returns
+ * a static explanation and does NOT initialize. With meshMode on it triggers ensureMesh
+ * so the report reflects live reality; if init fails (busy, unsupported, gateway down)
+ * the failure is folded into the readable text rather than surfaced as a tool error,
+ * because a status tool must report a broken mesh, not error on it.
+ */
+async function meshStatus(): Promise<string> {
+  const registry = readRegistry();
+  const platform = meshPlatformSupported()
+    ? `platform: supported (${process.platform})`
+    : `platform: UNSUPPORTED (${process.platform}) — mesh needs macOS or Linux`;
+  if (registry.meshMode !== 'on') {
+    return [
+      'Mesh mode: OFF (experimental).',
+      'Enable "claudeCodeOrchestrator.meshMode" in the extension settings to arm the session mesh.',
+      platform,
+      'The mesh is not initialized while mesh mode is off.',
+    ].join('\n');
+  }
+  let initError: string | undefined;
+  try {
+    await ensureMesh();
+  } catch (err) {
+    initError = err instanceof Error ? err.message : String(err);
+  }
+  const lines: string[] = ['Mesh mode: ON (experimental).', platform];
+  // Owner lock read straight from disk, so it shows even when init failed (e.g. busy).
+  const state = readMeshState(meshStateFile(process.cwd()));
+  if (state) {
+    if (state.ownerPid === process.pid) {
+      lines.push(`owner lock: held by THIS session (pid ${process.pid})`);
+    } else if (isPidAlive(state.ownerPid)) {
+      lines.push(`owner lock: held by another session (pid ${state.ownerPid})`);
+    } else {
+      lines.push(`owner lock: stale (pid ${state.ownerPid} not running) — takeable`);
+    }
+  } else {
+    lines.push('owner lock: none recorded');
+  }
+  if (initError) {
+    lines.push(`mesh not fully initialized: ${initError}`);
+  }
+  lines.push(mesh.gateway ? `gateway: ${mesh.gateway.name} (${mesh.gateway.state})` : 'gateway: not initialized');
+  if (registry.meshCrossAccountBridge !== 'on') {
+    lines.push('bridge: off');
+  } else if (mesh.bridge) {
+    const s = mesh.bridge.status();
+    lines.push(
+      `bridge: ${s.enabled ? 'on' : 'off'} — ${s.participants} participant(s), ${s.mirrors} mirror(s)` +
+        (s.degraded ? ` (degraded: ${s.degraded})` : ''),
+    );
+  } else {
+    lines.push('bridge: enabled but not initialized');
+  }
+  const workers = mesh.pool?.list() ?? [];
+  if (workers.length === 0) {
+    lines.push('workers: none');
+  } else {
+    lines.push(`workers (${workers.length}):`);
+    for (const w of workers) {
+      const health = w.alive ? 'alive' : 'dead';
+      const reg = w.registryStatus ? `/${w.registryStatus}` : '';
+      const exhausted = w.accountExhausted ? ' ⚠account-exhausted' : '';
+      lines.push(
+        `  - ${w.name} [${w.account}] ${w.model} — ${health}${reg}${exhausted}\n      attach: ${w.attachCommand}`,
+      );
+    }
+  }
+  return lines.join('\n');
+}
+
+/** mesh_spawn_workers — spawn one or more `claude --bg` mesh workers (quota-aware placement). */
+async function meshSpawnWorkers(args: unknown): Promise<string> {
+  await ensureMesh();
+  const workers = (args as { workers?: unknown } | null)?.workers;
+  if (!Array.isArray(workers) || workers.length === 0) {
+    throw new Error(meshError('invalid_input', '"workers" must be a non-empty array of { role, brief }.'));
+  }
+  const results = await mesh.pool!.spawn(workers as WorkerSpawnSpec[]);
+  const lines = results.map((r) =>
+    r.ok
+      ? `ok: ${r.name} — account ${r.account}, job ${r.jobId}, model ${r.model}` +
+        (r.note ? ` (note: ${r.note})` : '')
+      : `fail: ${r.error}`,
+  );
+  const ok = results.filter((r) => r.ok).length;
+  return [
+    `Spawned ${ok}/${results.length} mesh worker(s).`,
+    ...lines,
+    'Workers reply over the mesh — poll mesh_receive for their STATUS / RESULT / QUESTION lines.',
+  ].join('\n');
+}
+
+/** mesh_send — relay a live message to a peer through the gateway; reports actual delivery state. */
+async function meshSend(args: unknown): Promise<string> {
+  await ensureMesh();
+  const a = (args ?? {}) as { to?: unknown; message?: unknown; summary?: unknown };
+  const invalid = validateSendInput(a.to, a.message, a.summary);
+  if (invalid) {
+    throw new Error(meshError('invalid_input', invalid));
+  }
+  // validateSendInput proved these are the right types. The upstream SendMessage tool
+  // REQUIRES a summary for plain-text messages ("RELAY JSON missing required summary
+  // field" otherwise — scenario-B probe H5), so an omitted summary is defaulted to the
+  // message's first line rather than surfacing that transport error to the caller.
+  const message = a.message as string;
+  const summary =
+    (a.summary as string | undefined) ?? message.split('\n', 1)[0].slice(0, 60);
+  const result = await mesh.gateway!.send({
+    to: a.to as string,
+    summary,
+    message,
+  });
+  // A delivered:false RESULT is a normal outcome carrying the upstream transport error.
+  // gateway_down / relay_timeout are REJECTIONS from send() — they propagate to the tool
+  // catch as `mesh error [code]: …` instead of reaching here.
+  return result.delivered
+    ? `delivered to ${a.to} (msg_id ${result.msgId ?? 'unknown'})`
+    : `NOT delivered: ${result.error ?? 'unknown transport error'}`;
+}
+
+/** mesh_receive — long-poll the gateway inbox; renders each message as worker-supplied DATA. */
+async function meshReceive(args: unknown): Promise<string> {
+  await ensureMesh();
+  const a = (args ?? {}) as { max_wait_seconds?: unknown; max_messages?: unknown };
+  const waitS = clampMeshNumber(a.max_wait_seconds, 0, RECEIVE_WAIT_MAX_S, RECEIVE_WAIT_DEFAULT_S);
+  const maxMessages = clampMeshNumber(a.max_messages, 1, RECEIVE_MESSAGES_MAX, RECEIVE_MESSAGES_DEFAULT);
+  const messages = await mesh.gateway!.receive(waitS * 1000, maxMessages);
+  if (messages.length === 0) {
+    const alive = (mesh.pool?.list() ?? []).filter((w) => w.alive).length;
+    return `no mesh messages (waited ${waitS}s). ${alive} workers alive.`;
+  }
+  const blocks = messages.map(renderInboundMessage).join('\n\n');
+  return `${messages.length} mesh message(s):\n\n${blocks}`;
+}
+
+/** mesh_stop_worker — run `claude stop` for one worker under its account (force falls back to SIGKILL). */
+async function meshStopWorker(args: unknown): Promise<string> {
+  await ensureMesh();
+  const a = (args ?? {}) as { name?: unknown; force?: unknown };
+  if (typeof a.name !== 'string' || a.name.trim() === '') {
+    throw new Error(meshError('invalid_input', '"name" must be a worker name from mesh_status.'));
+  }
+  const target = a.name.trim();
+  const result = await mesh.pool!.stop(target, { force: a.force === true });
+  if (result.ok) {
+    return `stopped ${target}.`;
+  }
+  // pool.stop reports its own mesh-formatted error (e.g. unknown_worker); surface it
+  // verbatim when it already carries the wire format, else wrap it as unknown_worker.
+  throw new Error(
+    result.error && /^mesh error \[/.test(result.error)
+      ? result.error
+      : meshError('unknown_worker', result.error ?? `could not stop worker "${target}".`),
+  );
+}
+
+/**
+ * Stop the mesh subsystems on server shutdown, WITHOUT touching the `--bg` workers —
+ * they survive by design (owned by the CLI's background service, not this process).
+ * Stops the bridge (prunes the registry mirrors it wrote) and the gateway (kills the
+ * relay child; it was never registered in childrenByTask because it is not a task, so
+ * shutdown's worker sweep never reaches it), then releases the owner lock by rewriting
+ * ownerPid 0 so the next session takes over instantly. Re-reads the state file first so
+ * the pool's latest worker ledger is preserved, and only releases a lock we still hold.
+ * Never throws (called from shutdown, itself called from signal handlers).
+ */
+function stopMesh(): void {
+  try {
+    mesh.bridge?.stop();
+  } catch {
+    // best effort — exiting regardless
+  }
+  try {
+    // stop() delivers the kill signal synchronously before its promise settles, so
+    // voiding it still tears the relay child down before this process exits.
+    void mesh.gateway?.stop();
+  } catch {
+    // best effort — exiting regardless
+  }
+  if (mesh.ownerLocked) {
+    try {
+      const file = meshStateFile(process.cwd());
+      const current = readMeshState(file) ?? mesh.state;
+      if (current && current.ownerPid === process.pid) {
+        writeMeshState(file, { ...current, ownerPid: 0 });
+      }
+    } catch {
+      // best effort — a lock left with our pid is broken by liveness once we exit anyway
+    }
+    // Drop the atomic claim marker (M1) so the next session takes over without a stale-lock
+    // break. releaseMeshLock only removes a marker that still records our pid.
+    if (mesh.lockFile) {
+      releaseMeshLock(mesh.lockFile);
+    }
+  }
+}
+
 const TASK_PROPERTIES = {
   title: { type: 'string', description: 'Short label for the task list UI.' },
   prompt: {
@@ -1662,6 +1536,14 @@ const TASK_PROPERTIES = {
       'workerTimeoutMinutes setting (45). Raise it for long implementation or adversarial-review ' +
       'dispatches; a worker killed by this limit loses whatever it had not yet written to disk.',
   },
+  detach: {
+    type: 'boolean',
+    description:
+      'Opt in to survival: a background supervisor owns this task, records its result, and keeps ' +
+      'running even if this session ends mid-dispatch. Blocking and the returned result are ' +
+      'unchanged — while this session stays alive you get the identical inline result. Leave unset ' +
+      'for the default, where a task is cancelled if the session ends before it finishes.',
+  },
 };
 
 const TOOLS = [
@@ -1705,6 +1587,25 @@ const TOOLS = [
     },
   },
   {
+    name: 'dispatch_status',
+    description:
+      'Inspect or retrieve the result of a dispatched task by id — including a background (detach) ' +
+      'task whose session was interrupted. Read-only: it reports the latest status (running, done, ' +
+      'or error) and, for a finished task, its full result text. Pass a single "id", or "ids" for ' +
+      'several at once.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'A single dispatched-task id to inspect.' },
+        ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Several dispatched-task ids to inspect in one call.',
+        },
+      },
+    },
+  },
+  {
     name: 'orchestrator_briefing',
     description:
       'REQUIRED once per session, BEFORE the first dispatch: register which model this ' +
@@ -1734,6 +1635,9 @@ const TOOLS = [
       'fan-outs to pick models/workers deliberately and avoid accounts near a limit.',
     inputSchema: { type: 'object', properties: {} },
   },
+  // Experimental Mesh Mode tools (v1.4.0): the frozen schemas from the mesh contract,
+  // spread in verbatim so the extension and server can never disagree on their shape.
+  ...MESH_TOOLS,
 ];
 
 type JsonRpcId = string | number | null;
@@ -1828,6 +1732,8 @@ async function handleRequest(msg: {
           text = await dispatchTask(args, reqId);
         } else if (name === 'dispatch_tasks') {
           text = await dispatchTasksParallel(args, reqId);
+        } else if (name === 'dispatch_status') {
+          text = dispatchStatus(args as { id?: unknown; ids?: unknown });
         } else if (name === 'orchestrator_briefing') {
           const model = ((args as { model?: string }).model ?? '').trim();
           if (!model) {
@@ -1837,6 +1743,16 @@ async function handleRequest(msg: {
           text = orchestratorBriefing(model);
         } else if (name === 'list_workers') {
           text = await listWorkers();
+        } else if (name === 'mesh_status') {
+          text = await meshStatus();
+        } else if (name === 'mesh_spawn_workers') {
+          text = await meshSpawnWorkers(args);
+        } else if (name === 'mesh_send') {
+          text = await meshSend(args);
+        } else if (name === 'mesh_receive') {
+          text = await meshReceive(args);
+        } else if (name === 'mesh_stop_worker') {
+          text = await meshStopWorker(args);
         } else {
           sendError(id, -32602, `Unknown tool: ${name}`);
           return;
@@ -1859,6 +1775,7 @@ async function handleRequest(msg: {
           inFlightRequests.delete(reqId);
           abortedRequests.delete(reqId);
           tasksByRequest.delete(reqId);
+          detachTasksByRequest.delete(reqId);
         }
         maybeExit();
       }

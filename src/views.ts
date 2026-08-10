@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { WorkerManager } from './workerManager';
 import {
   readStats,
@@ -17,8 +19,18 @@ import {
   getCachedUsage,
   isElevated,
   isLoginExpired,
+  listAccounts,
   USAGE_CACHE_FILE,
 } from './usage';
+import {
+  MESH_STATE_DIR,
+  MeshState,
+  MeshWorkerRecord,
+  meshStateFile,
+  parseSessionEntry,
+  SessionEntry,
+  sessionsDir,
+} from './mesh/contract';
 
 interface WorkerStatRow {
   kind: 'stat';
@@ -30,10 +42,117 @@ interface WorkerStatRow {
   command?: vscode.Command;
 }
 
-export type WorkerNode = WorkerProfile | WorkerStatRow;
+/** Collapsible parent of the mesh-worker rows (experimental Mesh Mode). */
+interface MeshGroupRow {
+  kind: 'meshGroup';
+}
+
+/** One mesh worker: the union of its state-file record and its live session entry. */
+interface MeshWorkerRow {
+  kind: 'meshWorker';
+  name: string;
+  account: string;
+  configDir: string;
+  jobId?: string;
+  model?: string;
+  role?: string;
+  alive: boolean;
+  /** Live status from the session registry, when the worker has a live entry. */
+  status?: string;
+}
+
+export type WorkerNode = WorkerProfile | WorkerStatRow | MeshGroupRow | MeshWorkerRow;
 
 function isStatRow(node: WorkerNode): node is WorkerStatRow {
   return (node as WorkerStatRow).kind === 'stat';
+}
+
+function isMeshGroup(node: WorkerNode): node is MeshGroupRow {
+  return (node as MeshGroupRow).kind === 'meshGroup';
+}
+
+function isMeshWorker(node: WorkerNode): node is MeshWorkerRow {
+  return (node as MeshWorkerRow).kind === 'meshWorker';
+}
+
+/** Mesh worker names are `cco-w-<hash>-<account>-<seq>` — the discovery filter for session entries. */
+const MESH_WORKER_NAME_PREFIX = 'cco-w-';
+
+function meshModeEnabled(): boolean {
+  return vscode.workspace
+    .getConfiguration('claudeCodeOrchestrator')
+    .get<boolean>('meshMode', false);
+}
+
+/** kill(pid,0) liveness probe — matches the mesh contract's alive check. */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every mesh worker record across all workspaces' state files in MESH_STATE_DIR.
+ * The dir may be absent and any file may be corrupt (it is written by a separate
+ * process); both are tolerated by returning what could be read.
+ */
+function readAllMeshWorkerRecords(): MeshWorkerRecord[] {
+  let files: string[];
+  try {
+    files = fs.readdirSync(MESH_STATE_DIR);
+  } catch {
+    return [];
+  }
+  const out: MeshWorkerRecord[] = [];
+  for (const file of files) {
+    if (!file.endsWith('.json')) {
+      continue;
+    }
+    try {
+      const raw = JSON.parse(
+        fs.readFileSync(path.join(MESH_STATE_DIR, file), 'utf8'),
+      ) as Partial<MeshState>;
+      if (Array.isArray(raw.workers)) {
+        for (const w of raw.workers) {
+          if (w && typeof w.name === 'string') {
+            out.push(w);
+          }
+        }
+      }
+    } catch {
+      // corrupt/partial state file — skip it, show what we can
+    }
+  }
+  return out;
+}
+
+/** Live mesh-worker session entries in one account's sessions/ dir (missing dir → none). */
+function liveMeshEntries(configDir: string): SessionEntry[] {
+  const dir = sessionsDir(configDir);
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: SessionEntry[] = [];
+  for (const file of files) {
+    if (!file.endsWith('.json')) {
+      continue;
+    }
+    try {
+      const entry = parseSessionEntry(JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')));
+      if (entry && typeof entry.name === 'string' && entry.name.startsWith(MESH_WORKER_NAME_PREFIX)) {
+        out.push(entry);
+      }
+    } catch {
+      // unreadable/corrupt entry — skip
+    }
+  }
+  return out;
 }
 
 function fmtTokens(n: number): string {
@@ -235,6 +354,9 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
   private readonly onStatsChange = (): void => this._onDidChangeTreeData.fire();
   private readonly onTasksChange = (): void => this._onDidChangeTreeData.fire();
   private readonly onUsageChange = (): void => this._onDidChangeTreeData.fire();
+  private readonly onMeshChange = (): void => this._onDidChangeTreeData.fire();
+  /** This workspace's mesh state file — watched so spawn/stop refreshes the tree. */
+  private readonly meshStatePath: string | undefined;
 
   constructor(private readonly workers: WorkerManager) {
     workers.onDidChange(() => this._onDidChangeTreeData.fire());
@@ -243,12 +365,22 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     fs.watchFile(TASKS_LOG_FILE, { interval: 2000 }, this.onTasksChange);
     // Live plan usage is written by a background refresher — watch its cache too.
     fs.watchFile(USAGE_CACHE_FILE, { interval: 2000 }, this.onUsageChange);
+    // The mesh state file is written by the MCP server as workers spawn/stop.
+    // watchFile tolerates a not-yet-existing path and fires when it appears.
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (cwd) {
+      this.meshStatePath = meshStateFile(cwd);
+      fs.watchFile(this.meshStatePath, { interval: 2000 }, this.onMeshChange);
+    }
   }
 
   dispose(): void {
     fs.unwatchFile(STATS_FILE, this.onStatsChange);
     fs.unwatchFile(TASKS_LOG_FILE, this.onTasksChange);
     fs.unwatchFile(USAGE_CACHE_FILE, this.onUsageChange);
+    if (this.meshStatePath) {
+      fs.unwatchFile(this.meshStatePath, this.onMeshChange);
+    }
   }
 
   refresh(): void {
@@ -264,6 +396,40 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       item.tooltip = node.tooltip;
       item.command = node.command;
       item.contextValue = 'workerStat';
+      return item;
+    }
+    if (isMeshGroup(node)) {
+      const item = new vscode.TreeItem(
+        vscode.l10n.t('Mesh workers'),
+        vscode.TreeItemCollapsibleState.Collapsed,
+      );
+      item.id = 'meshGroup';
+      item.iconPath = new vscode.ThemeIcon('broadcast');
+      item.contextValue = 'meshGroup';
+      return item;
+    }
+    if (isMeshWorker(node)) {
+      const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
+      item.id = `mesh:${node.name}`;
+      const statusText = node.alive
+        ? node.status ?? vscode.l10n.t('alive')
+        : vscode.l10n.t('stopped');
+      item.description =
+        `${node.account} · ${statusText}` +
+        (node.model && node.model !== '-' ? ` · ${node.model}` : '');
+      item.iconPath = new vscode.ThemeIcon(node.alive ? 'pulse' : 'circle-slash');
+      item.contextValue = 'meshWorker';
+      const lines: string[] = [];
+      if (node.role) {
+        lines.push(vscode.l10n.t('Role: {0}', node.role));
+      }
+      lines.push(
+        vscode.l10n.t(
+          'Attach in a terminal: {0}',
+          `CLAUDE_CONFIG_DIR=${node.configDir} claude attach ${node.jobId ?? '—'}`,
+        ),
+      );
+      item.tooltip = lines.join('\n');
       return item;
     }
     const stats = readStats()[node.name];
@@ -303,12 +469,88 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
 
   getChildren(node?: WorkerNode): WorkerNode[] {
     if (!node) {
-      return this.workers.list();
+      const roots: WorkerNode[] = [...this.workers.list()];
+      // The mesh group is present only in Mesh Mode; absent entirely otherwise.
+      if (meshModeEnabled()) {
+        roots.push({ kind: 'meshGroup' });
+      }
+      return roots;
     }
-    if (isStatRow(node)) {
+    if (isMeshGroup(node)) {
+      return this.meshWorkerRows();
+    }
+    if (isStatRow(node) || isMeshWorker(node)) {
       return [];
     }
     return this.statRows(node);
+  }
+
+  /**
+   * Rows under the mesh group: the union of state-file records and live session
+   * entries across every known account. Records seed the list; a live session
+   * entry (matched by name) wins for liveness/status and fills a missing job id.
+   * Live-only workers (adopted, or from a since-crashed server) still appear,
+   * attributed to the account whose sessions/ dir held them.
+   */
+  private meshWorkerRows(): MeshWorkerRow[] {
+    const byName = new Map<string, MeshWorkerRow>();
+    for (const rec of readAllMeshWorkerRecords()) {
+      byName.set(rec.name, {
+        kind: 'meshWorker',
+        name: rec.name,
+        account: rec.account,
+        configDir: rec.configDir,
+        jobId: rec.jobId,
+        model: rec.model,
+        role: rec.role,
+        alive: typeof rec.pid === 'number' ? isPidAlive(rec.pid) : false,
+      });
+    }
+
+    // Accounts to scan: every account the view already knows (main + workers),
+    // plus ~/.claude in case the main account's CLAUDE_CONFIG_DIR points elsewhere.
+    const dirToAccount = new Map<string, string>();
+    for (const account of listAccounts()) {
+      if (!dirToAccount.has(account.configDir)) {
+        dirToAccount.set(account.configDir, account.name);
+      }
+    }
+    const homeClaude = path.join(os.homedir(), '.claude');
+    if (!dirToAccount.has(homeClaude)) {
+      dirToAccount.set(homeClaude, 'main');
+    }
+
+    for (const [configDir, account] of dirToAccount) {
+      for (const entry of liveMeshEntries(configDir)) {
+        const name = entry.name;
+        if (!name) {
+          continue;
+        }
+        const alive = typeof entry.pid === 'number' && isPidAlive(entry.pid);
+        const existing = byName.get(name);
+        if (existing) {
+          existing.alive = alive; // the live entry is authoritative for status
+          if (typeof entry.status === 'string') {
+            existing.status = entry.status;
+          }
+          if (!existing.jobId && typeof entry.jobId === 'string') {
+            existing.jobId = entry.jobId;
+          }
+        } else {
+          byName.set(name, {
+            kind: 'meshWorker',
+            name,
+            account,
+            configDir,
+            jobId: typeof entry.jobId === 'string' ? entry.jobId : undefined,
+            alive,
+            status: typeof entry.status === 'string' ? entry.status : undefined,
+          });
+        }
+      }
+    }
+
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   private statRows(worker: WorkerProfile): WorkerStatRow[] {
