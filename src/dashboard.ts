@@ -171,6 +171,9 @@ const SETTING_KEYS = [
   'quotaCooldownMinutes',
   'frontierWorkerDispatch',
   'overageWorkerDispatch',
+  'meshMode',
+  'meshCrossAccountBridge',
+  'meshGatewayModel',
 ] as const;
 const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks', 'openAssetManager'] as const;
 
@@ -280,6 +283,9 @@ export function openDashboard(): void {
         overageWorkerDispatch: cfg.get('overageWorkerDispatch', 'block'),
         overageEffective: reg ? reg.overageWorkerDispatch : cfg.get('overageWorkerDispatch', 'block'),
         overageSetBy: reg ? (reg.overageGuardSetBy ?? null) : null,
+        meshMode: cfg.get('meshMode', false),
+        meshCrossAccountBridge: cfg.get('meshCrossAccountBridge', false),
+        meshGatewayModel: cfg.get('meshGatewayModel', 'haiku'),
       },
     });
   };
@@ -370,6 +376,11 @@ export interface DashboardStrings {
   frontierLabel: string;
   frontierBlock: string;
   frontierAllow: string;
+  meshTitle: string;
+  meshModeLabel: string;
+  meshBridgeLabel: string;
+  meshGatewayModelLabel: string;
+  meshNote: string;
   btnInstallMcp: string;
   btnAddPolicy: string;
   btnAddWorker: string;
@@ -441,6 +452,11 @@ export function dashboardStrings(): DashboardStrings {
     frontierLabel: vscode.l10n.t('frontier model dispatch (claude-fable-5 only — its own quota / per-use billing)'),
     frontierBlock: vscode.l10n.t('block (billing guard)'),
     frontierAllow: vscode.l10n.t('allow'),
+    meshTitle: vscode.l10n.t('Mesh Mode (experimental)'),
+    meshModeLabel: vscode.l10n.t('Enable Mesh Mode — live background-worker mesh (mesh_* tools)'),
+    meshBridgeLabel: vscode.l10n.t('Cross-account bridge (experimental²) — reach mesh workers on other accounts'),
+    meshGatewayModelLabel: vscode.l10n.t('gateway model'),
+    meshNote: vscode.l10n.t('Requires Claude Code ≥ 2.1.224 on macOS/Linux. Off by default; toggling here takes effect on the next Claude session in this workspace.'),
     btnInstallMcp: vscode.l10n.t('Register MCP here'),
     btnAddPolicy: vscode.l10n.t('Add policy to CLAUDE.md'),
     btnAddWorker: vscode.l10n.t('Add worker'),
@@ -632,6 +648,18 @@ export function dashboardHtml(s: DashboardStrings): string {
         <option value="block">block (billing guard)</option><option value="allow">allow</option>
       </select>
       <div id="s-overage-note" style="font-size:0.8em;margin-top:4px"></div>
+      <h3 style="margin:16px 0 6px;font-size:1em">${escHtml(s.meshTitle)}</h3>
+      <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
+        <input type="checkbox" id="s-mesh" style="width:auto"> ${escHtml(s.meshModeLabel)}
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-weight:normal;margin-top:6px">
+        <input type="checkbox" id="s-mesh-bridge" style="width:auto"> ${escHtml(s.meshBridgeLabel)}
+      </label>
+      <label for="s-mesh-model" style="margin-top:6px">${escHtml(s.meshGatewayModelLabel)}</label>
+      <select id="s-mesh-model">
+        <option value="haiku">haiku</option><option value="sonnet">sonnet</option>
+      </select>
+      <div class="muted" style="font-size:0.8em;margin-top:4px">${escHtml(s.meshNote)}</div>
       <div class="actions">
         <button data-cmd="installMcp">${escHtml(s.btnInstallMcp)}</button>
         <button data-cmd="addDispatchPolicy">${escHtml(s.btnAddPolicy)}</button>
@@ -683,6 +711,18 @@ export function dashboardHtml(s: DashboardStrings): string {
   bindSetting('s-cool', 'quotaCooldownMinutes', (v) => Math.max(1, Number(v) || 30), 'input', 700);
   bindSetting('s-frontier', 'frontierWorkerDispatch', (v) => v, 'change', 0);
   bindSetting('s-overage', 'overageWorkerDispatch', (v) => v, 'change', 0);
+  // Checkbox settings post the boolean checked state (the value property is a static "on").
+  function bindCheckbox(id, key) {
+    const el = document.getElementById(id);
+    el.addEventListener('change', () => {
+      editing = id;
+      vscode.postMessage({ type: 'setSetting', key, value: el.checked });
+      editing = null; flashSaved();
+    });
+  }
+  bindCheckbox('s-mesh', 'meshMode');
+  bindCheckbox('s-mesh-bridge', 'meshCrossAccountBridge');
+  bindSetting('s-mesh-model', 'meshGatewayModel', (v) => v, 'change', 0);
   for (const b of document.querySelectorAll('button[data-cmd]')) {
     b.addEventListener('click', () => vscode.postMessage({ type: 'runCommand', id: b.dataset.cmd }));
   }
@@ -915,6 +955,9 @@ export function dashboardHtml(s: DashboardStrings): string {
     } else {
       oNote.innerHTML = '<span class="muted">In effect: ' + esc(oEff) + '</span>';
     }
+    if (editing !== 's-mesh') document.getElementById('s-mesh').checked = !!data.settings.meshMode;
+    if (editing !== 's-mesh-bridge') document.getElementById('s-mesh-bridge').checked = !!data.settings.meshCrossAccountBridge;
+    if (editing !== 's-mesh-model') document.getElementById('s-mesh-model').value = data.settings.meshGatewayModel;
   }
 </script>
 </body>

@@ -210,5 +210,10 @@
   "{0} — pack ↔ installed": "{0} — 팩 ↔ 설치본",
   "{0} — {1} done, {2} error": "{0} — 완료 {1}, 오류 {2}",
   "{0} — {1} in / {2} out": "{0} — 입력 {1} / 출력 {2}",
-  "⏸ until {0}": "⏸ {0}까지"
+  "⏸ until {0}": "⏸ {0}까지",
+  "Mesh Mode (experimental)": "메시 모드 (실험적)",
+  "Enable Mesh Mode — live background-worker mesh (mesh_* tools)": "메시 모드 활성화 — 실시간 백그라운드 워커 메시 (mesh_* 도구)",
+  "Cross-account bridge (experimental²) — reach mesh workers on other accounts": "계정 간 브리지 (실험적²) — 다른 계정의 메시 워커에 접근",
+  "gateway model": "게이트웨이 모델",
+  "Requires Claude Code ≥ 2.1.224 on macOS/Linux. Off by default; toggling here takes effect on the next Claude session in this workspace.": "macOS/Linux에서 Claude Code 2.1.224 이상 필요. 기본값 꺼짐. 여기서 토글하면 이 워크스페이스의 다음 Claude 세션부터 적용됩니다."
 }

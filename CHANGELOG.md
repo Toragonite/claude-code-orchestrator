@@ -4,6 +4,15 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-08-10
+
+### Added
+- **Mesh Mode toggles in the Orchestrator Dashboard.** Enabling the experimental
+  Mesh Mode no longer requires digging through VS Code Settings — the dashboard's
+  Settings card now has checkboxes for `meshMode` and the cross-account bridge, plus
+  a gateway-model selector. They write the same settings and take effect on the next
+  Claude session in the workspace.
+
 ## [1.4.0] — 2026-08-10
 
 ### Added
