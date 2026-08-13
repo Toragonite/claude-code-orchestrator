@@ -3,9 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { configDirForName, dirHasLogin, openReloginTerminal, WorkerManager } from './workerManager';
-import { TasksProvider, WorkersProvider } from './views';
+import { cancelTaskMeshAware, TasksProvider, WorkersProvider } from './views';
 import {
-  cancelRunningTask,
   clearTaskLog,
   LEGACY_ROOT_DIR,
   reapDeadTasks,
@@ -21,6 +20,12 @@ import {
   MESH_GATEWAY_MODELS,
   MESH_SETTING_FIELDS,
 } from './mesh/contract';
+import {
+  meshTaskAliveCheck,
+  reapOrphanedMeshWorkers,
+  setWorkerKeepAlive,
+  sweepStaleIoArtifacts,
+} from './mesh/reaper';
 import { hasPolicy, upsertPolicy } from './prompts';
 import { openDashboard } from './dashboard';
 import {
@@ -314,29 +319,68 @@ async function migrateLegacySettings(): Promise<void> {
   }
 }
 
+/** Defaults and bounds of the two teardown settings, mirrored from package.json. */
+const IDLE_TIMEOUT_DEFAULT_MIN = 15;
+const IDLE_TIMEOUT_MAX_MIN = 1440;
+const MAX_LIVE_WORKERS_DEFAULT = 8;
+const MAX_LIVE_WORKERS_MIN = 1;
+const MAX_LIVE_WORKERS_MAX = 64;
+
+/**
+ * Sanitize the idle auto-stop window at the level of VALUE semantics: 0 is a
+ * meaningful value (auto-stop disabled), not an error, so only a non-finite or
+ * negative setting falls back to the default. Fractions round; the ceiling is a
+ * day. A hand-edited settings.json can carry anything, and the MCP server must
+ * never receive a number that would stop workers instantly.
+ */
+function clampIdleTimeoutMinutes(value: unknown): number {
+  const raw = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(raw) || raw < 0) {
+    return IDLE_TIMEOUT_DEFAULT_MIN;
+  }
+  return Math.min(IDLE_TIMEOUT_MAX_MIN, Math.round(raw));
+}
+
+/** Live-worker cap: non-finite falls back to the default, everything else clamps to 1..64. */
+function clampMaxLiveWorkers(value: unknown): number {
+  const raw = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(raw)) {
+    return MAX_LIVE_WORKERS_DEFAULT;
+  }
+  return Math.min(MAX_LIVE_WORKERS_MAX, Math.max(MAX_LIVE_WORKERS_MIN, Math.round(raw)));
+}
+
 /**
  * Push the experimental Mesh Mode settings into the shared registry, under the
  * field names the MCP server reads (MESH_SETTING_FIELDS — frozen in the mesh
- * contract). Booleans map to the 'on'/'off' toggle the server expects; the
- * gateway model is validated against the allowed set and falls back to the
- * default. Mirrors WorkerManager.syncSettings' plain synced-setting pattern, but
- * lives here because it writes contract-named fields the WorkerManager does not
- * own. updateRegistry runs the read-modify-write under the registry lock, so it
- * composes safely with the WorkerManager's own writes.
+ * contract). The master switch maps to the 'on'/'off' toggle the server expects;
+ * the gateway model is validated against the allowed set and falls back to the
+ * default; the two teardown numbers (idle auto-stop window, live-worker cap) are
+ * clamped here as well as on the read side, so the server can never see a value
+ * outside the range package.json declares. Mirrors WorkerManager.syncSettings'
+ * plain synced-setting pattern, but lives here because it writes contract-named
+ * fields the WorkerManager does not own. updateRegistry runs the read-modify-write
+ * under the registry lock, so it composes safely with the WorkerManager's own writes.
  */
 function syncMeshSettings(): void {
   const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
   const meshMode = cfg.get<boolean>('meshMode', false);
-  const bridge = cfg.get<boolean>('meshCrossAccountBridge', false);
   const gatewayModel = cfg.get<string>('meshGatewayModel', MESH_GATEWAY_MODEL_DEFAULT);
   const validModel = (MESH_GATEWAY_MODELS as readonly string[]).includes(gatewayModel)
     ? gatewayModel
     : MESH_GATEWAY_MODEL_DEFAULT;
+  const idleTimeout = clampIdleTimeoutMinutes(
+    cfg.get<number>('meshWorkerIdleTimeoutMin', IDLE_TIMEOUT_DEFAULT_MIN),
+  );
+  const maxLive = clampMaxLiveWorkers(
+    cfg.get<number>('meshMaxLiveWorkers', MAX_LIVE_WORKERS_DEFAULT),
+  );
   updateRegistry((registry) => {
-    const fields = registry as unknown as Record<string, string>;
+    const fields = registry as unknown as Record<string, string | number>;
     fields[MESH_SETTING_FIELDS.mode] = meshMode ? 'on' : 'off';
-    fields[MESH_SETTING_FIELDS.bridge] = bridge ? 'on' : 'off';
     fields[MESH_SETTING_FIELDS.gatewayModel] = validModel;
+    fields[MESH_SETTING_FIELDS.idleTimeout] = idleTimeout;
+    fields[MESH_SETTING_FIELDS.maxLive] = maxLive;
   });
 }
 
@@ -347,12 +391,16 @@ function quoteClaudePath(command: string): string {
 
 /**
  * The tree node a mesh-worker command was invoked on. VS Code passes the tree
- * ELEMENT (a MeshWorkerRow, `{ name, jobId, configDir }`); no other caller exists.
+ * ELEMENT (a MeshWorkerRow, `{ name, jobId, configDir, cwd }`); no other caller
+ * exists. `cwd` is the workspace whose mesh state file holds the record — the
+ * keep-alive write addresses that workspace, which is not necessarily this editor's.
  */
 function meshNodeInfo(
   node: unknown,
-): { name: string; jobId?: string; configDir?: string } | undefined {
-  const rec = node as { name?: unknown; jobId?: unknown; configDir?: unknown } | undefined;
+): { name: string; jobId?: string; configDir?: string; cwd?: string } | undefined {
+  const rec = node as
+    | { name?: unknown; jobId?: unknown; configDir?: unknown; cwd?: unknown }
+    | undefined;
   if (!rec || typeof rec.name !== 'string') {
     return undefined;
   }
@@ -360,6 +408,7 @@ function meshNodeInfo(
     name: rec.name,
     jobId: typeof rec.jobId === 'string' ? rec.jobId : undefined,
     configDir: typeof rec.configDir === 'string' ? rec.configDir : undefined,
+    cwd: typeof rec.cwd === 'string' ? rec.cwd : undefined,
   };
 }
 
@@ -378,6 +427,35 @@ function runMeshWorkerCommand(node: unknown, verb: 'attach' | 'logs' | 'stop'): 
       vscode.l10n.t('This mesh worker has no job id yet — it may not have finished starting.'),
     );
     return;
+  }
+  if (verb === 'attach') {
+    // Mark the record keep-alive BEFORE the terminal opens (contract P7.4): the
+    // server's idle sweep cannot observe that a human is attached, so a session the
+    // user just joined would otherwise be a legal reap target the moment its idle
+    // age passes meshWorkerIdleTimeoutMin. The write goes through the standalone
+    // ledger helper, not the pool — the pool instance lives in the MCP server
+    // process, which this extension host cannot reach.
+    const cwd = info.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    let marked: { ok: boolean; error?: string };
+    try {
+      marked = cwd
+        ? setWorkerKeepAlive(cwd, info.name, true)
+        : { ok: false, error: 'no workspace folder is open' };
+    } catch (err) {
+      // A ledger write is filesystem work; opening the terminal must not depend on it.
+      marked = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (!marked.ok) {
+      // Never block the attach on this — the user asked for a terminal, and the
+      // failure only means the idle backstop still applies.
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t(
+          'Could not mark "{0}" keep-alive ({1}). Idle auto-stop may still stop it while you are attached — set it from the session with mesh_keep_worker.',
+          info.name,
+          marked.error ?? 'unknown error',
+        ),
+      );
+    }
   }
   const claudePath = vscode.workspace
     .getConfiguration('claudeCodeOrchestrator')
@@ -442,8 +520,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // A crashed or killed orchestrator session leaves its dispatches stuck at
   // 'running'. Reclaim them on startup — best-effort, never blocks activation.
+  // The mesh-aware liveness callback keeps ATTACHABLE (`claude --bg`) tasks out of
+  // the sweep: their events carry no pid at all (contract P4.10), so the pid checks
+  // alone would read every live one as orphaned.
   try {
-    const reaped = reapDeadTasks();
+    const reaped = reapDeadTasks(undefined, meshTaskAliveCheck());
     if (reaped > 0) {
       tasksProvider.refresh();
       vscode.window.showInformationMessage(
@@ -453,6 +534,43 @@ export function activate(context: vscode.ExtensionContext): void {
   } catch {
     // stale task rows are cosmetic; activation must still succeed
   }
+
+  // The same crash leaves the MCP server's attachable workers running with no owner
+  // process. Sweep every workspace's mesh ledger: a record whose owner is gone and
+  // whose session is still alive is stopped, the rest are only marked. Deliberately
+  // not awaited — the sweep spawns `claude stop` per orphan and must never delay
+  // activation — and every failure is swallowed, sync throw and rejection alike.
+  try {
+    void reapOrphanedMeshWorkers({ claudePath: readRegistry().claudePath })
+      .then((report) => {
+        if (report.stopped.length > 0) {
+          vscode.window.showInformationMessage(
+            vscode.l10n.t(
+              'Stopped {0} attachable worker(s) left running by a previous session.',
+              report.stopped.length,
+            ),
+          );
+        }
+      })
+      .catch(() => {
+        // orphan reaping is a backstop; a failure must never break activation
+      });
+  } catch {
+    // same: a sweep that cannot even start must not stop the extension loading
+  }
+
+  // The per-task io directories (task file + result file) are cleaned up when a
+  // dispatch settles, so only a killed server leaves them behind — and that server
+  // may never run in this workspace again, which would strand the litter forever.
+  // Run the same stale-artifact sweep from the extension host, over every workspace.
+  // Deferred into a microtask so activation returns first, and wrapped so a
+  // synchronous throw inside the sweep arrives as a rejection this catch absorbs:
+  // collecting litter is a backstop and must never be able to break activation.
+  void Promise.resolve()
+    .then(() => sweepStaleIoArtifacts({}))
+    .catch(() => {
+      // an unreadable io root is nothing to report — the next activation retries
+    });
 
   const tasksView = vscode.window.createTreeView('claudeCodeOrchestrator.tasks', {
     treeDataProvider: tasksProvider,
@@ -803,7 +921,10 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
-        const cancelled = await cancelRunningTask(id, 'cancelled by user');
+        // Mesh-aware: an attachable (`claude --bg`) task is stopped by job id, a
+        // one-shot worker by signal. cancelTaskMeshAware picks the path and writes
+        // the same terminal event either way.
+        const cancelled = await cancelTaskMeshAware(id, 'cancelled by user');
         tasksProvider.refresh();
         vscode.window.showInformationMessage(
           cancelled
@@ -833,7 +954,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       // allSettled: one worker refusing to die must not strand the others.
       const results = await Promise.allSettled(
-        running.map((t) => cancelRunningTask(t.id, 'cancelled by user')),
+        running.map((t) => cancelTaskMeshAware(t.id, 'cancelled by user')),
       );
       tasksProvider.refresh();
       const cancelled = results.filter((r) => r.status === 'fulfilled' && r.value).length;

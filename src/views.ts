@@ -2,8 +2,14 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFile } from 'child_process';
 import { WorkerManager } from './workerManager';
 import {
+  appendOutputNote,
+  appendTaskEvent,
+  cancelRunningTask,
+  latestEventById,
+  readRegistry,
   readStats,
   readTaskEvents,
   STATS_FILE,
@@ -31,6 +37,8 @@ import {
   SessionEntry,
   sessionsDir,
 } from './mesh/contract';
+import { removeWorkerJob } from './mesh/pool';
+import { markWorkerStopped } from './mesh/reaper';
 
 interface WorkerStatRow {
   kind: 'stat';
@@ -42,7 +50,7 @@ interface WorkerStatRow {
   command?: vscode.Command;
 }
 
-/** Collapsible parent of the mesh-worker rows (experimental Mesh Mode). */
+/** Collapsible parent of the attachable-worker rows (experimental Mesh Mode). */
 interface MeshGroupRow {
   kind: 'meshGroup';
 }
@@ -56,6 +64,17 @@ interface MeshWorkerRow {
   jobId?: string;
   model?: string;
   role?: string;
+  /** Dispatch task this worker was spawned for (role 'dispatch' records). */
+  taskId?: string;
+  /** Orchestrator-set idle-stop suppressor, as recorded in the ledger. */
+  keepAlive?: boolean;
+  /**
+   * Workspace the owning state file belongs to. The keep-alive write addresses a
+   * record through ITS workspace, which is not necessarily the editor's (the tree
+   * reads every workspace's state file). Absent on live-only rows, which have no
+   * ledger record to address.
+   */
+  cwd?: string;
   alive: boolean;
   /** Live status from the session registry, when the worker has a live entry. */
   status?: string;
@@ -94,19 +113,24 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+/** A ledger record plus the workspace whose state file holds it. */
+type LedgerRecord = MeshWorkerRecord & { stateCwd?: string };
+
 /**
  * Every mesh worker record across all workspaces' state files in MESH_STATE_DIR.
  * The dir may be absent and any file may be corrupt (it is written by a separate
- * process); both are tolerated by returning what could be read.
+ * process); both are tolerated by returning what could be read. Each record carries
+ * its state file's `cwd` so callers that must WRITE the ledger (the keep-alive mark)
+ * address the owning workspace rather than assuming the editor's.
  */
-function readAllMeshWorkerRecords(): MeshWorkerRecord[] {
+function readAllMeshWorkerRecords(): LedgerRecord[] {
   let files: string[];
   try {
     files = fs.readdirSync(MESH_STATE_DIR);
   } catch {
     return [];
   }
-  const out: MeshWorkerRecord[] = [];
+  const out: LedgerRecord[] = [];
   for (const file of files) {
     if (!file.endsWith('.json')) {
       continue;
@@ -115,10 +139,11 @@ function readAllMeshWorkerRecords(): MeshWorkerRecord[] {
       const raw = JSON.parse(
         fs.readFileSync(path.join(MESH_STATE_DIR, file), 'utf8'),
       ) as Partial<MeshState>;
+      const stateCwd = typeof raw.cwd === 'string' ? raw.cwd : undefined;
       if (Array.isArray(raw.workers)) {
         for (const w of raw.workers) {
           if (w && typeof w.name === 'string') {
-            out.push(w);
+            out.push({ ...w, stateCwd });
           }
         }
       }
@@ -127,6 +152,230 @@ function readAllMeshWorkerRecords(): MeshWorkerRecord[] {
     }
   }
   return out;
+}
+
+/** The ledger record for one worker name, or undefined when no state file holds it. */
+function findMeshWorkerRecord(name: string): LedgerRecord | undefined {
+  return readAllMeshWorkerRecords().find((rec) => rec.name === name);
+}
+
+/** How long `claude stop <jobId>` may run before the cancel gives up on it. */
+const MESH_STOP_TIMEOUT_MS = 15_000;
+
+/**
+ * Run `claude stop <jobId>` for one attachable worker under its own account
+ * (CLAUDE_CONFIG_DIR). Resolves to an error string when the stop could not be
+ * performed, or undefined on success — it never throws, because the caller must
+ * record the cancellation either way.
+ */
+function stopMeshWorkerJob(jobId: string, configDir: string | undefined): Promise<string | undefined> {
+  // registry.claudePath is the RESOLVED absolute path (the extension host writes it
+  // through resolveClaudePathPreserving on every settings sync); a bare "claude"
+  // would often be ENOENT here, since the host may not carry the login-shell PATH.
+  const claudePath = readRegistry().claudePath || 'claude';
+  return new Promise((resolve) => {
+    execFile(
+      claudePath,
+      ['stop', jobId],
+      {
+        env: configDir ? { ...process.env, CLAUDE_CONFIG_DIR: configDir } : process.env,
+        timeout: MESH_STOP_TIMEOUT_MS,
+      },
+      (err) => resolve(err ? (err.message || String(err)) : undefined),
+    );
+  });
+}
+
+/**
+ * Directory to spawn a `claude` teardown command in. The ledger's own workspace is
+ * the right one — `claude rm` addresses a background job under the checkout that
+ * owns its worktree — but a state file can name a folder that has since been moved
+ * or deleted, and spawning into a missing cwd is an ENOENT nobody downstream can
+ * fix. Fall back to the editor's workspace, then to this process's own directory.
+ */
+function meshSpawnCwd(preferred: string | undefined): string {
+  for (const dir of [preferred, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath]) {
+    if (!dir) {
+      continue;
+    }
+    try {
+      if (fs.statSync(dir).isDirectory()) {
+        return dir;
+      }
+    } catch {
+      // gone or unreadable — try the next candidate
+    }
+  }
+  return process.cwd();
+}
+
+/**
+ * The two finishers a stop owes the rest of the system, run after a UI cancel has
+ * actually stopped an attachable worker (contract §8.9 F3d).
+ *
+ * `claude stop` only kills the session. Without these writes the ledger record still
+ * looks live, so the MCP server's idle sweep re-runs `claude stop` against a dead job
+ * every 60 seconds forever, and the task's worktree lingers even when it is clean —
+ * exactly the state the adversarial review found. `markWorkerStopped` converges the
+ * sweep; `removeWorkerJob` is the same teardown finisher the server-side stop and the
+ * orphan reaper run, never a force removal and never a `git worktree remove` by path:
+ * a worktree holding uncommitted work is KEPT by the platform, which is a SUCCESS
+ * path here (nothing unmerged is ever destroyed) and is surfaced, not retried.
+ *
+ * Strictly best-effort and total: the cancellation is recorded by the caller either
+ * way, so every failure here only adds a line to the task's output note. Returns the
+ * text to append (empty when there is nothing worth telling the user).
+ */
+async function finishCancelledMeshWorker(record: LedgerRecord): Promise<string> {
+  const notes: string[] = [];
+  // stoppedAt FIRST: it is the write that stops the 60s retry loop, and the `claude
+  // rm` below may burn its full timeout before it returns anything at all.
+  if (record.stateCwd) {
+    try {
+      const marked = markWorkerStopped(record.stateCwd, record.name);
+      if (!marked.ok) {
+        notes.push(
+          `Could not mark "${record.name}" stopped in the mesh ledger (${marked.error ?? 'unknown error'}) — ` +
+            'the session-end and orphan reapers remain the backstop.',
+        );
+      }
+    } catch (err) {
+      // A ledger write is filesystem work in a separate process's data directory.
+      notes.push(
+        `Could not mark "${record.name}" stopped in the mesh ledger (${
+          err instanceof Error ? err.message : String(err)
+        }) — the session-end and orphan reapers remain the backstop.`,
+      );
+    }
+  } else {
+    // A state file whose `cwd` field is missing or not a string (hand-edited, or a
+    // torn write): the record cannot be addressed without knowing its workspace.
+    notes.push(
+      `Could not mark "${record.name}" stopped in the mesh ledger: its record names no workspace.`,
+    );
+  }
+  try {
+    const removal = await removeWorkerJob({
+      claudePath: readRegistry().claudePath || 'claude',
+      cwd: meshSpawnCwd(record.stateCwd),
+      configDir: record.configDir,
+      jobId: record.jobId,
+    });
+    if (removal.kept) {
+      // Truthful, never forced. A "kept" verdict moments after a stop can also be the
+      // wind-down race (cleanup register C6) — the activation sweep reaps the
+      // stragglers later, and `claude rm` refuses a genuinely dirty worktree anyway.
+      notes.push(
+        `Its worktree ${record.worktree ?? '(path not recorded)'} was KEPT — it holds uncommitted ` +
+          'changes. Inspect and merge it before removing it; nothing was discarded.',
+      );
+    } else if (removal.error !== undefined) {
+      notes.push(
+        `Finishing the teardown (claude rm ${record.jobId}) failed: ${removal.error}` +
+          (typeof record.worktree === 'string'
+            ? `. Its worktree ${record.worktree} may still exist — inspect it before removing it.`
+            : '.'),
+      );
+    } else if (removal.removed && typeof record.worktree === 'string') {
+      notes.push(`Its worktree ${record.worktree} was clean and has been removed.`);
+    }
+  } catch (err) {
+    // removeWorkerJob is documented never to reject; this is belt and braces, because
+    // a throw here would turn a completed cancel into a failed one for the user.
+    notes.push(
+      `Finishing the teardown (claude rm ${record.jobId}) failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  return notes.length > 0 ? `${notes.join('\n')}\n` : '';
+}
+
+/**
+ * Cancel a dispatched task from the UI, mesh-aware. A `--bg` (attachable) task
+ * carries `meshWorker` on its events and NEVER a pid (contract P4.10), so the
+ * signal path in cancelRunningTask can only ever no-op on it: the worker is a
+ * detached background session addressed by job id. This routes such a task to
+ * `claude stop <jobId>` (looked up in the mesh ledger, run under the worker's own
+ * account), finishes the ledger + worktree bookkeeping a server-side stop would have
+ * done (finishCancelledMeshWorker), and then writes the same terminal event + output
+ * note cancelRunningTask writes. Every other task takes the unchanged signal path.
+ *
+ * Returns false when the task is absent or no longer running — identical to
+ * cancelRunningTask, so a second call is idempotent. It also returns TRUE without writing
+ * an event when another surface authored this task's terminal event while the stop was in
+ * flight (S2c, at the end of this function): the cancel still happened.
+ */
+export async function cancelTaskMeshAware(id: string, reason: string): Promise<boolean> {
+  const latest = latestEventById(id);
+  const workerName = typeof latest?.meshWorker === 'string' ? latest.meshWorker : undefined;
+  if (!latest || latest.status !== 'running' || !workerName) {
+    return cancelRunningTask(id, reason);
+  }
+  const record = findMeshWorkerRecord(workerName);
+  let stopNote: string;
+  if (!record || typeof record.jobId !== 'string' || record.jobId === '') {
+    // The ledger no longer names this worker (stale row, or a state file removed
+    // under us): the task row is still ours to close, the process is not ours to
+    // address. The session-end and orphan reapers remain the backstop.
+    stopNote = `\nCould not stop the attachable worker "${workerName}": no job id in the mesh ledger.\n`;
+  } else {
+    const error = await stopMeshWorkerJob(record.jobId, record.configDir);
+    if (error) {
+      // A failed stop leaves the session's fate unknown, so neither finisher runs:
+      // stamping stoppedAt on a possibly-live worker would hide it from the idle
+      // sweep and the orphan reaper — the two things that would still catch it.
+      stopNote = `\nStopping the attachable worker "${workerName}" failed: ${error}\n`;
+    } else {
+      stopNote =
+        `\nStopped the attachable worker "${workerName}" (claude stop ${record.jobId}).\n` +
+        (await finishCancelledMeshWorker(record));
+    }
+  }
+  // S2c — re-read the task's latest event IMMEDIATELY before appending ours. `latest` was
+  // read at the top of this function, before the `claude stop` await, and that await takes
+  // SECONDS: inside it the MCP server's timeout/death path can decide this worker is gone,
+  // run its own parity guard (which sees a task still marked `running`, because we have not
+  // appended yet) and author the terminal event itself. A second one from here is exactly
+  // the parity break that guard exists to prevent — two terminal events for one task, and a
+  // recordFailure charged to a healthy account for what is really a user cancel. The two
+  // guards are mirror images: one closes each sequential ordering. What remains is a
+  // genuinely simultaneous double-read, whose only consequence is a cosmetic second event
+  // (every reader takes the latest event per id), never a wrong status and never a failure
+  // record — the recordFailure lives on the server's side of the race and is guarded there.
+  //
+  // The ledger convergence above (markWorkerStopped) and the rm finisher deliberately run
+  // BEFORE this check and regardless of who wins it: both are idempotent, and the stopped
+  // mark is what stops the idle sweep re-running `claude stop` against a dead job forever.
+  let current: TaskEvent | undefined;
+  try {
+    current = latestEventById(id);
+  } catch {
+    // An unreadable task log reads as "nobody else closed it" — the same side of the trade
+    // the server's guard takes. Suppressing a REAL cancel record because a read blipped
+    // would lose the only evidence the task ended at all.
+    current = undefined;
+  }
+  if (current !== undefined && current.status !== 'running') {
+    // Somebody else already closed this task. Skip the terminal event and the CANCELLED
+    // header (both would claim a cancellation the recorded terminal event contradicts), but
+    // return TRUE: the cancel happened — the worker was stopped and its ledger record
+    // converged — and the task is closed either way. `false` means "there was nothing
+    // running to cancel", which is a different thing to tell the user.
+    //
+    // The teardown line still goes out, without that header. It is the only place a KEPT
+    // worktree — one holding uncommitted worker changes that nothing will ever remove for
+    // the user — is reported, and losing it because the server won a race would mean
+    // silently dropping the one fact the user must act on.
+    appendOutputNote(latest.outputFile, `\n${stopNote}`);
+    return true;
+  }
+  appendTaskEvent({ ...latest, ts: Date.now(), status: 'error', error: reason });
+  appendOutputNote(
+    latest.outputFile,
+    `\n\n---\n\nCANCELLED: ${reason} (${new Date().toISOString()})\n${stopNote}`,
+  );
+  return true;
 }
 
 /** Live mesh-worker session entries in one account's sessions/ dir (missing dir → none). */
@@ -153,6 +402,15 @@ function liveMeshEntries(configDir: string): SessionEntry[] {
     }
   }
   return out;
+}
+
+/**
+ * Dispatch task ids are `t<base36 time><4 random>` — long enough to crowd a tree
+ * row out of its label. Keep the leading, time-ordered part: it is what a reader
+ * matches against the Dispatched Tasks view, and the full id is in the tooltip.
+ */
+function shortTaskId(id: string): string {
+  return id.length <= 10 ? id : `${id.slice(0, 9)}…`;
 }
 
 function fmtTokens(n: number): string {
@@ -400,7 +658,7 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     }
     if (isMeshGroup(node)) {
       const item = new vscode.TreeItem(
-        vscode.l10n.t('Mesh workers'),
+        vscode.l10n.t('Attachable workers'),
         vscode.TreeItemCollapsibleState.Collapsed,
       );
       item.id = 'meshGroup';
@@ -414,14 +672,31 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       const statusText = node.alive
         ? node.status ?? vscode.l10n.t('alive')
         : vscode.l10n.t('stopped');
+      // Under attachable dispatch every worker belongs to ONE dispatch task, so the
+      // row leads with what it is working on (role + short task id) before its
+      // liveness — the account and model are secondary.
+      const work = node.role
+        ? node.taskId
+          ? `${node.role} ${shortTaskId(node.taskId)}`
+          : node.role
+        : undefined;
       item.description =
-        `${node.account} · ${statusText}` +
+        [work, node.account, statusText].filter((part) => Boolean(part)).join(' · ') +
+        (node.keepAlive === true ? ` · ${vscode.l10n.t('keep-alive')}` : '') +
         (node.model && node.model !== '-' ? ` · ${node.model}` : '');
       item.iconPath = new vscode.ThemeIcon(node.alive ? 'pulse' : 'circle-slash');
       item.contextValue = 'meshWorker';
       const lines: string[] = [];
       if (node.role) {
         lines.push(vscode.l10n.t('Role: {0}', node.role));
+      }
+      if (node.taskId) {
+        lines.push(vscode.l10n.t('Dispatch task: {0}', node.taskId));
+      }
+      if (node.keepAlive === true) {
+        lines.push(
+          vscode.l10n.t('Keep-alive is set — idle auto-stop will not stop this worker.'),
+        );
       }
       lines.push(
         vscode.l10n.t(
@@ -503,6 +778,9 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
         jobId: rec.jobId,
         model: rec.model,
         role: rec.role,
+        taskId: typeof rec.taskId === 'string' ? rec.taskId : undefined,
+        keepAlive: rec.keepAlive === true,
+        cwd: rec.stateCwd,
         alive: typeof rec.pid === 'number' ? isPidAlive(rec.pid) : false,
       });
     }

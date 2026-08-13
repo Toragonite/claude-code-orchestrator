@@ -87,13 +87,21 @@ export interface Registry {
    */
   meshMode: 'on' | 'off';
   /**
-   * Experimental² cross-account registry-mirror bridge (spike P11). Meaningful ONLY
-   * when meshMode is 'on': it mirrors live session-registry entries between accounts so
-   * mesh workers under different CLAUDE_CONFIG_DIRs can discover each other. A double
-   * opt-in because the mirrored file format is undocumented and version-fragile. Default
-   * 'off'; any value other than the literal 'on' reads as 'off'.
+   * Minutes an attachable worker may sit idle — no in-flight dispatch, no messages, no
+   * keep-alive mark — before the server stops it. 0 DISABLES the sweep and is a valid,
+   * deliberate value, not an error: the backstop is optional, the cap is not. Default 15,
+   * capped at 1440 (a day); a negative or non-numeric value reads as the default rather
+   * than as "off", because "-5 minutes" expresses no intention we can honor.
    */
-  meshCrossAccountBridge: 'on' | 'off';
+  meshWorkerIdleTimeoutMin: number;
+  /**
+   * Hard ceiling on simultaneously live attachable workers. A dispatch past the cap is
+   * REFUSED, never queued: queueing a batch larger than the cap deadlocks, since the
+   * workers that would free the slots are the ones still waiting. Default 8, clamped to
+   * 1..64 (0 is clamped up, not treated as "unlimited" — an unlimited cap is the failure
+   * mode this setting exists to prevent).
+   */
+  meshMaxLiveWorkers: number;
   /**
    * Model alias the mesh gateway relay runs under (the gateway does trivial relay turns
    * only, so a small model is the right default). The default duplicates the contract
@@ -154,6 +162,13 @@ export interface TaskEvent {
    * worker between attempts. Absent on default (in-process) tasks.
    */
   supervisorPid?: number;
+  /**
+   * Name of the attachable `claude --bg` worker running this task (Mesh Mode). Such a
+   * worker is NOT our child process, so these events deliberately carry no pid/pgid —
+   * every signal-based path (cancel, reap, isOurWorker) must no-op on them, and liveness
+   * is answered from the mesh ledger instead (see reapDeadTasks' isAliveExternally).
+   */
+  meshWorker?: string;
 }
 
 /** Pre-rename data directory — migrated to ROOT_DIR on first load. */
@@ -247,6 +262,59 @@ export function clampTimeoutMinutes(value: unknown): number {
   return Math.min(TIMEOUT_MINUTES_MAX, Math.max(TIMEOUT_MINUTES_MIN, Math.round(raw)));
 }
 
+/**
+ * Bounds and defaults of the two attachable-worker lifecycle settings. package.json's
+ * setting declarations mirror these numbers, and the extension clamps with the same
+ * helpers before writing, so the UI, the registry file and the server cannot drift.
+ */
+export const MESH_IDLE_TIMEOUT_DEFAULT = 15;
+export const MESH_IDLE_TIMEOUT_MAX = 1440;
+export const MESH_MAX_LIVE_DEFAULT = 8;
+export const MESH_MAX_LIVE_MIN = 1;
+export const MESH_MAX_LIVE_MAX = 64;
+
+/**
+ * Numeric reading of a hand-editable setting. A numeric STRING is accepted (the registry
+ * file is edited by hand and by other tools, where "15" is an ordinary way to write 15);
+ * anything else reads as NaN and each caller decides what its own absent/invalid case is.
+ */
+function numericSetting(value: unknown): number {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    return Number(value);
+  }
+  return NaN;
+}
+
+/**
+ * Idle auto-stop window in minutes. ZERO IS A VALUE, NOT AN ERROR — it means "never
+ * auto-stop", which is a legitimate choice for someone who manages workers by hand. A
+ * negative or unreadable value expresses no honorable intention and reads as the default,
+ * because silently turning the backstop off is the one outcome a typo must not produce.
+ */
+export function sanitizeMeshIdleTimeout(value: unknown): number {
+  const raw = numericSetting(value);
+  if (!Number.isFinite(raw) || raw < 0) {
+    return MESH_IDLE_TIMEOUT_DEFAULT;
+  }
+  return Math.min(MESH_IDLE_TIMEOUT_MAX, Math.round(raw));
+}
+
+/**
+ * Live-worker ceiling. Clamped rather than defaulted at the edges: 0 or a negative number
+ * means "as few as possible", which is 1 — never "no limit", the exact failure this cap
+ * exists to prevent. Only an unreadable value falls back to the default.
+ */
+export function sanitizeMeshMaxLive(value: unknown): number {
+  const raw = numericSetting(value);
+  if (!Number.isFinite(raw)) {
+    return MESH_MAX_LIVE_DEFAULT;
+  }
+  return Math.min(MESH_MAX_LIVE_MAX, Math.max(MESH_MAX_LIVE_MIN, Math.round(raw)));
+}
+
 const DEFAULTS: Registry = {
   workers: [],
   permissionMode: 'acceptEdits',
@@ -256,7 +324,8 @@ const DEFAULTS: Registry = {
   frontierWorkerDispatch: 'block',
   overageWorkerDispatch: 'block',
   meshMode: 'off',
-  meshCrossAccountBridge: 'off',
+  meshWorkerIdleTimeoutMin: MESH_IDLE_TIMEOUT_DEFAULT,
+  meshMaxLiveWorkers: MESH_MAX_LIVE_DEFAULT,
   // Duplicates the contract's MESH_GATEWAY_MODEL_DEFAULT literal — registry.ts must not
   // import src/mesh/contract.ts (that module imports ROOT_DIR/WorkerModel from here, so
   // importing it back would cycle).
@@ -279,10 +348,14 @@ export function readRegistry(): Registry {
       // null, misspelled — must read as the safe 'block': money is only ever spent
       // past a plan window when an editor explicitly opted in.
       overageWorkerDispatch: raw.overageWorkerDispatch === 'allow' ? 'allow' : 'block',
-      // Experimental mesh switches are opt-in and the file is hand-editable: anything
+      // The experimental mesh switch is opt-in and the file is hand-editable: anything
       // that is not exactly 'on' — absent, null, misspelled — reads as the safe 'off'.
       meshMode: raw.meshMode === 'on' ? 'on' : 'off',
-      meshCrossAccountBridge: raw.meshCrossAccountBridge === 'on' ? 'on' : 'off',
+      // Worker-lifecycle numbers are sanitized by VALUE, not by presence: an absent field
+      // and a garbage one both land on the default, while a meaningful 0 (idle sweep off)
+      // survives untouched. See the two helpers for why the edges differ.
+      meshWorkerIdleTimeoutMin: sanitizeMeshIdleTimeout(raw.meshWorkerIdleTimeoutMin),
+      meshMaxLiveWorkers: sanitizeMeshMaxLive(raw.meshMaxLiveWorkers),
       // Free-form gateway model alias; a non-string or empty value coerces to the
       // default (contract MESH_GATEWAY_MODEL_DEFAULT, duplicated here as 'haiku').
       meshGatewayModel:
@@ -1180,8 +1253,21 @@ function parseUsageFromOutput(outputFile: string | undefined): {
  * MCP server runs opportunistically from dispatch_status so a crashed supervisor's ledger
  * is healed even in a headless/CLI deployment with no VS Code extension host (contract F2 /
  * R8). Omitted (the extension's startup sweep) reconciles every running task, as before.
+ *
+ * `isAliveExternally`, when given, adds a THIRD way for a task to count as alive: a task
+ * whose worker is not a process of ours at all. An attachable (`--bg`) dispatch task
+ * records no pid, so both pid checks above see nothing and every such task in flight would
+ * be orphaned the moment this sweep ran. Callers pass a mesh-aware callback
+ * (mesh/reaper.meshTaskAliveCheck) that answers from the mesh ledger; registry.ts stays
+ * free of any mesh import. Omitted, the behavior is byte-identical to before this hook
+ * existed. A callback that throws is treated as "cannot prove it alive" — the task then
+ * reconciles exactly as it would have with no callback at all, since a reconcile only ever
+ * records a terminal event and never signals anything.
  */
-export function reapDeadTasks(onlyIds?: Iterable<string>): number {
+export function reapDeadTasks(
+  onlyIds?: Iterable<string>,
+  isAliveExternally?: (t: TaskEvent) => boolean,
+): number {
   const wanted = onlyIds ? new Set(onlyIds) : undefined;
   let reaped = 0;
   for (const task of runningTasks()) {
@@ -1192,7 +1278,15 @@ export function reapDeadTasks(onlyIds?: Iterable<string>): number {
     const workerAlive = typeof pid === 'number' && isPidAlive(pid) && isOurWorker(pid);
     const sup = task.supervisorPid;
     const supervisorAlive = typeof sup === 'number' && isPidAlive(sup) && isOurSupervisor(sup, task.id);
-    if (workerAlive || supervisorAlive) {
+    let externallyAlive = false;
+    if (!workerAlive && !supervisorAlive && isAliveExternally !== undefined) {
+      try {
+        externallyAlive = isAliveExternally(task) === true;
+      } catch {
+        externallyAlive = false;
+      }
+    }
+    if (workerAlive || supervisorAlive || externallyAlive) {
       continue;
     }
     try {

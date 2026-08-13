@@ -1,22 +1,32 @@
 # Mesh Mode (experimental)
 
-Dispatch fans work out and reads the result files back. **Mesh Mode** adds a
-live two-way channel on top: persistent `claude --bg` workers that stay alive
-between messages, so your main session can hold a real back-and-forth with them
-instead of waiting for a task to finish.
+Mesh Mode does not add a second workflow — it changes what a dispatch is. With it
+on, each dispatched worker becomes a persistent `claude --bg` session you can
+attach a terminal to, working in **its own git worktree**. Same `dispatch_task` /
+`dispatch_tasks`, same results, timeouts, cancellation and failover.
 
-It rides Claude Code's own cross-session messaging — so it needs
-**Claude Code >= 2.1.224** on **macOS or Linux**. Orchestration stays
-file-based; the mesh only adds the live coordination layer alongside dispatch.
+Needs **Claude Code >= 2.1.224** on **macOS or Linux**. Off by default; with it
+off, dispatch is unchanged.
 
-Turn it on with the **`claudeCodeOrchestrator.meshMode`** setting. That enables
-the five `mesh_*` tools — spawn a worker, list the mesh, send it a message, read
-its replies, and stop it.
+Try it:
 
-Tips:
+1. Turn on **`claudeCodeOrchestrator.meshMode`** (or use the dashboard's Settings
+   card), then restart the Claude Code session in this workspace.
+2. Dispatch a task as usual. In a git workspace the result names a worktree
+   (`.claude/worktrees/cco-<taskId>`) and its branch — verify there, merge what
+   passes, then remove the worktree and stop the worker.
+3. While it works, ask your session to poll `mesh_receive` for progress notes and
+   questions, and to steer the worker with `mesh_send_worker`.
+4. Attach to a worker from the **Attachable workers** group in the Worker Accounts
+   view to watch it in a terminal.
 
-- The **cross-account bridge** (`claudeCodeOrchestrator.meshCrossAccountBridge`)
-  is a separate experimental² opt-in that lets mesh workers on different
-  accounts reach one another. Leave it off unless you need it.
-- Restart the Claude Code session after enabling so it picks up the `mesh_*`
-  tools, then ask it to spin up a background worker and talk to it live.
+Good to know:
+
+- Workers stay alive after their dispatch returns. Idle auto-stop
+  (`meshWorkerIdleTimeoutMin`, 15 min) and the live-worker cap
+  (`meshMaxLiveWorkers`, 8 — dispatches past it are refused, not queued) are
+  backstops, not a substitute for stopping workers you are done with.
+- A worktree with uncommitted changes is never removed for you; `mesh_status`
+  keeps listing it.
+- If the mesh cannot start, the dispatch runs as a one-shot worker and its result
+  says so.

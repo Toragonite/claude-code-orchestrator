@@ -45,15 +45,100 @@ export function isFrontierTier(model: string): boolean {
  * deciding, stopping early, unverified claims). Deliberately model-name-free.
  */
 /**
- * Appended to the operating brief when Mesh Mode is ON for the workspace. Without it the
- * orchestrator has no doctrine for the mesh_* tools and — following a dispatch-only policy
- * — never reaches for them. Gated so it appears ONLY when meshMode is enabled.
+ * Appended to the operating brief when Mesh Mode is ON for the workspace. Mesh mode no
+ * longer adds a separate work path — it makes DISPATCH workers persistent, attachable and
+ * CONVERSATIONAL — so the doctrine has two jobs: teach the orchestrator to use the live
+ * channel by default (rev 4 / A13, on the user's explicit direction that awareness must be
+ * default rather than optional), and pin teardown ownership of both the workers and their
+ * worktrees. Gated so it appears ONLY when meshMode is enabled.
+ *
+ * The text below is the contract's §8.7 replacement block plus the rev-5 review fixes
+ * (§8.9): F11b makes the worktree claims CONDITIONAL — a doctrine that promises a
+ * worktree in a workspace that cannot have one teaches the orchestrator to hunt for a
+ * line that will never appear, and to believe in an isolation the platform is not
+ * providing; F6 adds the merge discipline a fan-out needs (ownership-checked diffs, a
+ * verification gate on the integrated tree); F4's orchestrator half states what a settled
+ * worker will and will not do with a late message. The only edits a JavaScript template
+ * literal forces are the escaped backticks.
  */
 export const MESH_DOCTRINE = `
 
-MESH MODE IS ON for this workspace, so alongside dispatch you have the mesh_* tools (mesh_status, mesh_spawn_workers, mesh_send, mesh_receive, mesh_stop_worker) — a LIVE coordination layer over persistent \`claude --bg\` workers. Choose the path deliberately:
-- DEFAULT to dispatch (dispatch_tasks/dispatch_task) for independent, one-shot, parallel work where you only need the finished result. It stays the durable, quota-precise path (structured results, timeouts, cancellation, failover).
-- REACH FOR MESH when the work needs a PERSISTENT, conversational worker: (a) you expect several back-and-forth exchanges with the same worker, (b) a long-running worker that reports status while it works, (c) workers that must coordinate with each other live, or (d) the user asks to spawn, attach to, or steer a background worker. Call mesh_status first to confirm the gateway is ready and see live workers; spawn with mesh_spawn_workers (give each a role and a complete standing brief); drive with mesh_send; poll mesh_receive for their STATUS/RESULT replies. To reply to a message, address its \`from\` value. Mesh workers author files and coordinate — you still run builds, tests, and verification yourself, exactly as with dispatch.`;
+MESH MODE IS ON for this workspace: dispatch is ATTACHABLE and CONVERSATIONAL.
+Every dispatched worker runs as a persistent background session (\`claude --bg\`);
+the dispatch tools, results, timeouts, cancellation and failover semantics are
+unchanged. There is no separate mesh work path — dispatch_tasks/dispatch_task IS
+the mesh path.
+WHERE A WORKER'S EDITS LAND is not always the same, so read the result instead
+of assuming: in a GIT workspace each worker gets its own git worktree and branch,
+named in its dispatch result and in mesh_status, and its edits never touch the
+shared checkout; in a NON-GIT workspace there is no worktree and no branch — the
+worker edits the working tree directly, in place; and when the mesh is
+unavailable the dispatch falls back to a one-shot worker (its result says so),
+which also edits the tree directly. A result with no worktree line IS the
+direct-edit case — never treat it as a detail to go hunting for.
+USE THE LIVE CHANNEL PROACTIVELY — it is a primary benefit of attachable
+dispatch, not an optional extra:
+- A live worker is a conversational resource, not a fire-and-forget job. The
+  moment you learn something a running worker needs — a contract correction, a
+  discovered constraint, a wrong path it should abandon — send it
+  mesh_send_worker steering immediately; do not wait for it to finish wrong.
+- Poll mesh_receive between your own steps. Workers stream STATUS as they work
+  and ask questions as \`STATUS <id> QUESTION: …\` lines — answer promptly with
+  mesh_send_worker; an unanswered worker guesses.
+- Steering is best-effort and lands at the worker's next turn boundary; the
+  durable RESULT always arrives via the result file. Never park a contract
+  change only in a message — files are the record, messages are the steering.
+- Steering applies to a worker that is STILL WORKING. Once its dispatch has
+  settled, a worker is idle by protocol: it will REPLY to a message but will
+  not touch a file again unless your message says RESUME explicitly. So finish
+  the integration first — verify and merge (or discard) its work, then follow
+  up. If you do want more from that same worker, say RESUME in the message and
+  expect a \`STATUS <taskId> resumed-by-steer\` line back, which is your notice
+  that its tree changed after you read it. Never assume a settled worker
+  quietly applied a late correction.
+Worker lifecycle — you own it:
+- A dispatch is NOT integrated until you have verified what the worker produced
+  and merged it wherever a merge applies. In a git workspace that is the
+  worktree and branch the dispatch returned: verify THERE (diff, build, test),
+  merge what passes, then remove the worktree (git worktree remove / claude rm)
+  and stop the worker (mesh_stop_worker). Where there is no worktree the edits
+  are already in your working tree: verify them in place — there is nothing to
+  merge and nothing to remove, and two such workers can collide in the same
+  file, so keep their ownership lists disjoint. A worker does NOT vanish when
+  its dispatch returns — default to stopping each one as soon as its work is
+  integrated and no follow-up is expected; a persistent worker is a held
+  resource.
+- MERGE DISCIPLINE, binding on every fan-out: before you merge a branch, DIFF
+  it and confirm that every file it touches is inside that task's file-ownership
+  list. A touched file outside the list is a FINDING — investigate it and
+  re-dispatch; never merge it because it looks harmless. Overlapping edits from
+  two workers are how a fan-out corrupts itself, and the ownership list is the
+  only place that collision is visible before it lands.
+- After the FINAL merge, re-run the full verification gate — build, tests, and
+  your contract-violating probes — on the INTEGRATED tree, before you report
+  anything. Per-branch green is not integration green: every worker verified a
+  tree that did not contain its siblings' changes.
+- Keep one alive only for a reason: live steering in progress, a task worth
+  watching, or the user asked to attach. Mark it FIRST (mesh_keep_worker —
+  BEFORE handing the user its attach command), then surface the attach command.
+- Before finishing a task thread (and in your final report): stop every worker
+  you no longer need, remove merged worktrees, and list anything deliberately
+  left running or unmerged — with why + attach command / worktree path. Never
+  accumulate live workers or dirty worktrees silently.
+- The extension enforces hard backstops beneath you: orphan reaping when the
+  session ends, idle auto-stop after meshWorkerIdleTimeoutMin, a
+  meshMaxLiveWorkers cap that REFUSES dispatches past it, and clean-worktree
+  removal on teardown (dirty worktrees are always kept and surfaced). Backstops
+  are not your plan — manage teardown yourself.
+Deltas to plan around: worker edits land in the task's own worktree when the
+workspace is a git repository, and directly in the working tree when it is not
+(or when a dispatch fell back to a one-shot worker); results come back through
+a result file plus a short wake ping; live messages are steering, not storage;
+a worker that has already reported stays idle until a message says RESUME;
+workers cannot run un-approved
+shell commands (read-only safe commands may auto-run) and cannot sub-dispatch;
+detach:true tasks still run as one-shot workers; if the mesh is unavailable a
+dispatch falls back to a one-shot worker and says so in its result.`;
 
 export function orchestratorBriefing(model: string, meshOn = false): string {
   const mesh = meshOn ? MESH_DOCTRINE : '';

@@ -172,8 +172,9 @@ const SETTING_KEYS = [
   'frontierWorkerDispatch',
   'overageWorkerDispatch',
   'meshMode',
-  'meshCrossAccountBridge',
   'meshGatewayModel',
+  'meshWorkerIdleTimeoutMin',
+  'meshMaxLiveWorkers',
 ] as const;
 const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks', 'openAssetManager'] as const;
 
@@ -284,8 +285,9 @@ export function openDashboard(): void {
         overageEffective: reg ? reg.overageWorkerDispatch : cfg.get('overageWorkerDispatch', 'block'),
         overageSetBy: reg ? (reg.overageGuardSetBy ?? null) : null,
         meshMode: cfg.get('meshMode', false),
-        meshCrossAccountBridge: cfg.get('meshCrossAccountBridge', false),
         meshGatewayModel: cfg.get('meshGatewayModel', 'haiku'),
+        meshWorkerIdleTimeoutMin: cfg.get('meshWorkerIdleTimeoutMin', 15),
+        meshMaxLiveWorkers: cfg.get('meshMaxLiveWorkers', 8),
       },
     });
   };
@@ -378,8 +380,9 @@ export interface DashboardStrings {
   frontierAllow: string;
   meshTitle: string;
   meshModeLabel: string;
-  meshBridgeLabel: string;
   meshGatewayModelLabel: string;
+  meshIdleLabel: string;
+  meshMaxLiveLabel: string;
   meshNote: string;
   btnInstallMcp: string;
   btnAddPolicy: string;
@@ -452,11 +455,12 @@ export function dashboardStrings(): DashboardStrings {
     frontierLabel: vscode.l10n.t('frontier model dispatch (claude-fable-5 only — its own quota / per-use billing)'),
     frontierBlock: vscode.l10n.t('block (billing guard)'),
     frontierAllow: vscode.l10n.t('allow'),
-    meshTitle: vscode.l10n.t('Mesh Mode (experimental)'),
-    meshModeLabel: vscode.l10n.t('Enable Mesh Mode — live background-worker mesh (mesh_* tools)'),
-    meshBridgeLabel: vscode.l10n.t('Cross-account bridge (experimental²) — reach mesh workers on other accounts'),
+    meshTitle: vscode.l10n.t('Mesh Mode — attachable dispatch (experimental)'),
+    meshModeLabel: vscode.l10n.t('Enable Mesh Mode — dispatched workers become attachable background sessions'),
     meshGatewayModelLabel: vscode.l10n.t('gateway model'),
-    meshNote: vscode.l10n.t('Requires Claude Code ≥ 2.1.224 on macOS/Linux. Off by default; toggling here takes effect on the next Claude session in this workspace.'),
+    meshIdleLabel: vscode.l10n.t('idle auto-stop (minutes, 0 = off)'),
+    meshMaxLiveLabel: vscode.l10n.t('max live attachable workers'),
+    meshNote: vscode.l10n.t('With Mesh Mode on, every dispatched worker runs as a persistent `claude --bg` session you can attach to in a terminal instead of a one-shot; dispatch tools, results, timeouts, cancellation and failover are unchanged, and detached tasks stay one-shot. Teardown backstops: orphan reaping on session end, idle auto-stop, and the live-worker cap (dispatches past it are refused, not queued). Requires Claude Code ≥ 2.1.224 on macOS/Linux. Off by default; toggling here takes effect on the next Claude session in this workspace.'),
     btnInstallMcp: vscode.l10n.t('Register MCP here'),
     btnAddPolicy: vscode.l10n.t('Add policy to CLAUDE.md'),
     btnAddWorker: vscode.l10n.t('Add worker'),
@@ -652,13 +656,14 @@ export function dashboardHtml(s: DashboardStrings): string {
       <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
         <input type="checkbox" id="s-mesh" style="width:auto"> ${escHtml(s.meshModeLabel)}
       </label>
-      <label style="display:flex;align-items:center;gap:8px;font-weight:normal;margin-top:6px">
-        <input type="checkbox" id="s-mesh-bridge" style="width:auto"> ${escHtml(s.meshBridgeLabel)}
-      </label>
       <label for="s-mesh-model" style="margin-top:6px">${escHtml(s.meshGatewayModelLabel)}</label>
       <select id="s-mesh-model">
         <option value="haiku">haiku</option><option value="sonnet">sonnet</option>
       </select>
+      <label for="s-mesh-idle">${escHtml(s.meshIdleLabel)}</label>
+      <input id="s-mesh-idle" type="number" min="0" max="1440">
+      <label for="s-mesh-cap">${escHtml(s.meshMaxLiveLabel)}</label>
+      <input id="s-mesh-cap" type="number" min="1" max="64">
       <div class="muted" style="font-size:0.8em;margin-top:4px">${escHtml(s.meshNote)}</div>
       <div class="actions">
         <button data-cmd="installMcp">${escHtml(s.btnInstallMcp)}</button>
@@ -721,8 +726,18 @@ export function dashboardHtml(s: DashboardStrings): string {
     });
   }
   bindCheckbox('s-mesh', 'meshMode');
-  bindCheckbox('s-mesh-bridge', 'meshCrossAccountBridge');
   bindSetting('s-mesh-model', 'meshGatewayModel', (v) => v, 'change', 0);
+  // Teardown numbers are clamped here as well as on the extension side. 0 is a
+  // VALUE for the idle window (auto-stop off) and must be TYPED: an emptied box is
+  // absent, not zero, so it falls back to the default instead of silently disabling
+  // the backstop. The cap has no meaningful zero and floors at 1.
+  const clampNumber = (raw, min, max, fallback) => {
+    if (String(raw).trim() === '') return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+  };
+  bindSetting('s-mesh-idle', 'meshWorkerIdleTimeoutMin', (v) => clampNumber(v, 0, 1440, 15), 'input', 700);
+  bindSetting('s-mesh-cap', 'meshMaxLiveWorkers', (v) => clampNumber(v, 1, 64, 8), 'input', 700);
   for (const b of document.querySelectorAll('button[data-cmd]')) {
     b.addEventListener('click', () => vscode.postMessage({ type: 'runCommand', id: b.dataset.cmd }));
   }
@@ -956,8 +971,9 @@ export function dashboardHtml(s: DashboardStrings): string {
       oNote.innerHTML = '<span class="muted">In effect: ' + esc(oEff) + '</span>';
     }
     if (editing !== 's-mesh') document.getElementById('s-mesh').checked = !!data.settings.meshMode;
-    if (editing !== 's-mesh-bridge') document.getElementById('s-mesh-bridge').checked = !!data.settings.meshCrossAccountBridge;
     if (editing !== 's-mesh-model') document.getElementById('s-mesh-model').value = data.settings.meshGatewayModel;
+    if (editing !== 's-mesh-idle') document.getElementById('s-mesh-idle').value = data.settings.meshWorkerIdleTimeoutMin;
+    if (editing !== 's-mesh-cap') document.getElementById('s-mesh-cap').value = data.settings.meshMaxLiveWorkers;
   }
 </script>
 </body>

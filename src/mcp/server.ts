@@ -43,9 +43,22 @@ import {
   runDispatchTask,
   TaskBase,
 } from './task-runner';
+import {
+  bgFeedStatus,
+  bgIdleActivityAt,
+  bgLastUnmatched,
+  bgPendingTitle,
+  bgReceiveFeed,
+  bgSendToWorker,
+  bgUnmatchedCount,
+  bgWorkersByTask,
+  runBgDispatchTask,
+  startBgLoops,
+} from './bg-runner';
 import { GatewayManager } from '../mesh/gateway';
-import { WorkerPool } from '../mesh/pool';
+import { mutateMeshOwnerFields, WorkerPool, type MeshOwnerFields } from '../mesh/pool';
 import { Bridge } from '../mesh/bridge';
+import { fireAndForgetStopOwned, meshTaskAliveCheck, reapOrphanedMeshWorkers } from '../mesh/reaper';
 import {
   IBridge,
   IGatewayManager,
@@ -62,7 +75,6 @@ import {
   RECEIVE_WAIT_MAX_S,
   renderInboundMessage,
   validateSendInput,
-  WorkerSpawnSpec,
 } from '../mesh/contract';
 
 /**
@@ -86,6 +98,12 @@ import {
  */
 
 const SERVER_INFO = { name: 'cco-dispatch', version: '0.5.0' };
+/**
+ * When this server process came up. Stamped on the mesh worker records it owns as a
+ * sanity token against a recycled pid (the same best-effort marker the owner lock uses);
+ * the mesh state file's own startedAt is preferred when the mesh is initialized.
+ */
+const SERVER_STARTED_AT = Date.now();
 /** Grace between SIGTERM and SIGKILL when cancelling a single request's workers. */
 const KILL_GRACE_MS = 3000;
 /** Grace between SIGTERM and SIGKILL while the whole server is going down. */
@@ -260,6 +278,18 @@ function cancelRequest(requestId: string | number): void {
     if (child !== undefined) {
       killChild(child, KILL_GRACE_MS);
     }
+    // Mesh (`--bg`) tasks have no child to signal: their worker is a persistent session
+    // owned by the CLI's background service, so the runner leaves a hook that runs
+    // `claude stop` for it (contract P4.5). Hooks outlive their task's own settle, so a
+    // batch cancel also stops a worker that already reported and went idle.
+    const stopBgWorker = bgWorkersByTask.get(taskId);
+    if (stopBgWorker !== undefined) {
+      try {
+        stopBgWorker();
+      } catch {
+        // fire-and-forget by contract — a stop failure must not abort the cancel sweep
+      }
+    }
   }
 }
 
@@ -302,9 +332,15 @@ function shutdown(reason: string): void {
   for (const id of inFlightRequests) {
     abortedRequests.add(id);
   }
-  // Tear down the mesh before exit: stop the bridge (prune its mirrors) and the gateway
-  // (kill the relay child — it is not in childrenByTask, so the sweep below never reaches
-  // it), and release the owner lock. The `--bg` mesh workers are deliberately left running.
+  // Tear down the mesh before exit: stop every `--bg` worker this process owns (P4.9), stop
+  // the bridge (prune its mirrors) and the gateway (kill the relay child — it is not in
+  // childrenByTask, so the sweep below never reaches it), and release the owner lock.
+  //
+  // Those workers are NOT left running. v1.4 left them alive deliberately and that was the
+  // leak this rework closes: an attachable worker outliving the session that owns it has
+  // nobody left to attach to it, stop it, or account for it. Do not "restore" that behavior
+  // — the session-end stop is the no-leak guarantee, and it applies even to keepAlive
+  // workers (see stopMesh).
   stopMesh();
   const children = [...childrenByTask.values()];
   for (const child of children) {
@@ -367,6 +403,11 @@ interface BatchArgs {
   tasks?: DispatchArgs[];
 }
 
+/** First line of an error message — what the mesh-unavailable prefix quotes. */
+function firstLine(text: string): string {
+  return text.split('\n', 1)[0].trim();
+}
+
 /**
  * In-process default dispatch: build the request-scoped context — cancellation
  * check, id tracking, child registration, and cleanup, all backed by this
@@ -374,22 +415,73 @@ interface BatchArgs {
  * registers each worker child in childrenByTask via onSpawn, so stdin-close
  * shutdown (D4) and request cancel (D5) keep signalling in-flight workers exactly
  * as before.
+ *
+ * THE MESH FORK LIVES HERE (contract P0.1–P0.4), deliberately in the server rather than
+ * inside task-runner: the `-p` core is ALSO the detach supervisor's core (run-task.ts),
+ * which has no gateway and must never grow a mesh path. With Mesh Mode on, every
+ * non-detach dispatch runs as a persistent, attachable `claude --bg` worker instead —
+ * one `if`, and the `-p` core stays a closed box.
  */
-function dispatchTask(args: DispatchArgs, requestId: string | number | null): Promise<string> {
+async function dispatchTask(args: DispatchArgs, requestId: string | number | null): Promise<string> {
   // Opt-in ownership/survival: hand the whole run to a standalone supervisor and
   // relay its result. Everything about blocking and the return string is unchanged
   // (contract §3) — only the host process differs.
+  //
+  // detach keeps the `-p` path even with mesh on (P0.2): survival is not attachability.
+  // The gateway dies with this session, so a detached task could never collect over it.
   if (args.detach === true) {
     return dispatchDetached(args, requestId);
   }
-  return runDispatchTask(args, {
-    shouldAbort: () => isAborted(requestId),
-    onTrack: (base) => trackTask(requestId, base),
-    onSpawn: (taskId, child) => registerChild(taskId, child),
-    onSettle: (taskId) => {
+  const ctx = {
+    shouldAbort: (): boolean => isAborted(requestId),
+    onTrack: (base: TaskBase): void => trackTask(requestId, base),
+    onSpawn: (taskId: string, child: ChildProcess): void => registerChild(taskId, child),
+    onSettle: (taskId: string): void => {
       taskBases.delete(taskId);
     },
-  });
+  };
+  let meshOn = false;
+  try {
+    meshOn = readRegistry().meshMode === 'on';
+  } catch {
+    // an unreadable registry reads as mesh OFF — never fail a dispatch over a settings read
+    meshOn = false;
+  }
+  if (!meshOn) {
+    return runDispatchTask(args, ctx);
+  }
+  // Simple-first (P0.3): mesh on routes EVERY non-detach dispatch through `--bg`. No
+  // per-task heuristics — a task the orchestrator cannot attach to is a surprise.
+  let initError: string | undefined;
+  try {
+    await ensureMesh();
+    if (!mesh.pool || !mesh.gateway) {
+      initError = meshError(
+        'capability_failed',
+        'the mesh reported initialized but its worker pool or gateway is missing.',
+      );
+    }
+  } catch (err) {
+    initError = err instanceof Error ? err.message : String(err);
+  }
+  if (initError === undefined) {
+    return runBgDispatchTask(args, {
+      pool: mesh.pool!,
+      gateway: mesh.gateway!,
+      ownerPid: process.pid,
+      ownerStartedAt: mesh.state?.startedAt ?? SERVER_STARTED_AT,
+      shouldAbort: ctx.shouldAbort,
+      onTrack: ctx.onTrack,
+      onSettle: ctx.onSettle,
+    });
+  }
+  // P0.4, the mesh-unavailable rule: a broken mesh (busy owner lock, unsupported
+  // platform, a gateway that never reached READY) must NEVER fail a dispatch — it runs
+  // the unchanged `-p` path. But it is never SILENT either: the caller asked for an
+  // attachable worker and did not get one, so the success text says so. Failures
+  // propagate unchanged, so an error is never disguised by this prefix.
+  const text = await runDispatchTask(args, ctx);
+  return `⚠ mesh unavailable — ran as a one-shot worker (not attachable): ${firstLine(initError)}\n${text}`;
 }
 
 /** Grace added to the worker-timeout ceiling for the supervisor to write result.json. */
@@ -728,8 +820,12 @@ function dispatchStatus(args: { id?: unknown; ids?: unknown }): string {
   const unique = [...new Set(ids)];
   // Headless reconcile of just these ids before reading their status, so a dead
   // supervisor's ledger is healed even with no VS Code host (F2). Never throws.
+  //
+  // The mesh-aware liveness callback is what keeps a `--bg` dispatch from being reaped as
+  // orphaned: those tasks deliberately carry no worker pid (their worker is not our
+  // child), so the pid test alone would call every live attachable task dead (P6.1).
   try {
-    reapDeadTasks(unique);
+    reapDeadTasks(unique, meshTaskAliveCheck());
   } catch {
     // reconcile is best-effort — a failed sweep must not fail the status read
   }
@@ -969,11 +1065,21 @@ async function listWorkers(): Promise<string> {
 }
 
 /* ------------------------------------------------------------------------- *
- * Mesh Mode (experimental, v1.4.0) — mesh_* tools wired over the gateway (P9),
- * the `claude --bg` worker pool (P10) and the cross-account bridge (P11). The
- * frozen contract lives in ../mesh/contract; the three subsystems are built by
- * sibling tasks in ../mesh/{gateway,pool,bridge}. See docs/session-messaging-spike.md
- * for why each mechanism behaves as it does.
+ * Mesh Mode (experimental) — ATTACHABLE DISPATCH. There is no separate mesh work
+ * path any more: with mesh on, dispatch_task/dispatch_tasks spawn persistent
+ * `claude --bg` workers (mcp/bg-runner.ts) instead of one-shot `claude -p` children,
+ * each in its own git worktree. The mesh_* tools cover exactly what dispatch cannot:
+ * the workers' lifetime (mesh_status, mesh_stop_worker, mesh_keep_worker) and the LIVE
+ * channel to them (mesh_send_worker, mesh_receive — A13). Peer-to-peer stays retired:
+ * mesh_spawn_workers is gone, and the live channel is scoped to workers of THIS
+ * workspace's ledger rather than to arbitrary peer addresses.
+ *
+ * The runtime below is the substrate that makes it work: the gateway session (the
+ * server's own mesh identity, which carries the wake pings and the steering), the pool
+ * (`claude --bg` lifecycle + the ownership ledger), and the cross-account bridge
+ * (registry mirroring, now plumbing rather than a feature). The binding contract is
+ * .orchestrator/contract-mesh-attach.md; docs/session-messaging-spike.md records why
+ * each underlying mechanism behaves as it does.
  * ------------------------------------------------------------------------- */
 
 /**
@@ -988,10 +1094,23 @@ interface MeshRuntime {
   gateway?: IGatewayManager;
   pool?: IWorkerPool;
   bridge?: IBridge;
-  state?: MeshState;
+  /**
+   * Our OWNER record — deliberately MeshOwnerFields and not MeshState: this process holds
+   * no copy of the `workers` array, because it is not this process's to hold. The ledger is
+   * read from disk at the moment it is needed (the pool, the reaper, mesh_status) and
+   * written only through mesh/pool's locked mutators. An in-memory snapshot here is exactly
+   * what the two removed whole-file writes used to put back over the extension host's edits.
+   */
+  state?: MeshOwnerFields;
   ownerLocked: boolean;
   /** Path of the atomic claim marker (M1) we created; used by stopMesh to release it. */
   lockFile?: string;
+  /**
+   * The claude executable resolved at init. Kept so shutdown can run `claude stop` for
+   * the workers this process owns (P4.9) WITHOUT re-resolving — resolveProbeCommand may
+   * spawn a login shell, which is not something to do from a signal handler.
+   */
+  claudePath?: string;
 }
 const mesh: MeshRuntime = { ownerLocked: false };
 /** Single in-flight init latch: concurrent first callers await the same ensureMesh(). */
@@ -1024,17 +1143,15 @@ function readMeshState(file: string): MeshState | undefined {
   }
 }
 
-/**
- * Write the mesh state file atomically (tmp+rename, same pattern as run-task.ts's
- * result writes) so the extension UI — a concurrent reader in another process — never
- * observes a torn file. The state dir (ROOT_DIR/mesh) may not exist yet.
+/*
+ * There is deliberately NO writeMeshState here any more (F1 completeness). This process
+ * wrote the whole state object at two points — the owner claim at init and the release at
+ * shutdown — and each of those re-serialized a `workers` array read moments earlier, which
+ * silently put back a snapshot the extension host had already edited (a vanished keepAlive
+ * mark, empirically, in two of three hammer runs). Both now go through mesh/pool's
+ * mutateMeshOwnerFields: one write lock for the whole file, and a mutator that structurally
+ * cannot reach `workers`.
  */
-function writeMeshState(file: string, state: MeshState): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, file);
-}
 
 function dedupe(dirs: string[]): string[] {
   return [...new Set(dirs)];
@@ -1147,14 +1264,17 @@ function releaseMeshLock(lockFile: string): void {
  * takes effect on the next server start (there is no live teardown path).
  */
 async function ensureMesh(): Promise<void> {
-  // M5: re-check the master switch on EVERY mesh tool call, even after init. The
-  // initialized short-circuit below otherwise pins meshMode to its value at first init,
-  // so an operator toggling meshMode off mid-session would leave mesh_send/spawn/receive
-  // running while only mesh_status reported OFF. Gate here so a toggle-off refuses new
-  // tool actions immediately. NOTE: this is a GATE only — it does not tear down the
-  // already-running gateway/bridge/workers; a full mid-session teardown on toggle-off is
-  // future work. mesh_status keeps its own meshMode check and does not call ensureMesh
-  // while off, so it still renders the static OFF text without hitting this throw.
+  // M5: re-check the master switch on EVERY call, even after init. The initialized
+  // short-circuit below otherwise pins meshMode to its value at first init, so an
+  // operator toggling meshMode off mid-session would leave the mesh tools — and now the
+  // dispatch fork — running while only mesh_status reported OFF. Gate here so a
+  // toggle-off takes effect immediately: mesh tools refuse. (dispatchTask reads meshMode
+  // itself and simply runs the unchanged one-shot path when it is off — no ⚠ prefix,
+  // because nothing was promised.) NOTE: this is a GATE only —
+  // it does not tear down the already-running gateway/bridge/workers; a full mid-session
+  // teardown on toggle-off is future work (session end still reaps every worker).
+  // mesh_status keeps its own meshMode check and does not call ensureMesh while off, so
+  // it still renders the static OFF text without hitting this throw.
   if (readRegistry().meshMode !== 'on') {
     throw new Error(
       meshError('mesh_off', 'enable claudeCodeOrchestrator.meshMode (experimental) in the extension settings.'),
@@ -1202,9 +1322,11 @@ async function doEnsureMesh(): Promise<void> {
   //   2. acquireMeshLock — atomic hardlink claim of a dedicated marker, so the read-modify-
   //      write of the state file below runs in a true cross-process critical section; a
   //      stale marker from a dead/released owner is broken and re-taken inside there.
-  //   3. Write our claim (ownerPid = us), then RE-READ and confirm ownerPid === our pid
-  //      before proceeding — a defensive backstop that also fails us out if the marker was
-  //      wrongly broken. A dead owner's worker ledger is preserved so takeover re-adopts.
+  //   3. Write our claim (ownerPid = us) through the ledger write lock, OWNER FIELDS ONLY,
+  //      then RE-READ and confirm ownerPid === our pid before proceeding — a defensive
+  //      backstop that also fails us out if the marker was wrongly broken. A dead owner's
+  //      worker ledger is preserved so takeover re-adopts, and after F1 that preservation is
+  //      structural: the claim write cannot address `workers` at all.
   const stateFile = meshStateFile(cwd);
   const lockFile = meshLockFile(cwd);
   const existing = readMeshState(stateFile);
@@ -1229,16 +1351,44 @@ async function doEnsureMesh(): Promise<void> {
     );
   }
   acquireMeshLock(lockFile);
-  // Re-read the ledger UNDER the lock so a concurrent takeover cannot cost us a worker record.
-  const ledger = readMeshState(stateFile);
-  const state: MeshState = {
+  // The claim is written through the LEDGER WRITE LOCK, and it writes the SERVER-owned
+  // fields only (F1 completeness). The old code read the ledger here and wrote it back with
+  // our claim attached — "re-read under the lock so a takeover cannot cost us a worker
+  // record" — but the lock it ran under is the claim marker, which the extension host does
+  // not take: a keep-alive mark or a stopped mark written between that read and that write
+  // was silently reverted. Not carrying `workers` at all is strictly stronger than
+  // re-reading it: the array we never touch cannot be the one we lose.
+  //
+  // Lock ORDER, and it is the only one in this system: the claim marker (`<state>.lock`,
+  // held for the whole session) is taken FIRST and the write lock (`<state>.write.lock`,
+  // held for milliseconds) inside it. Nothing takes the claim marker while holding the
+  // write lock, so the two can never deadlock.
+  const state: MeshOwnerFields = {
     ownerPid: process.pid,
     cwd,
     gatewayName: meshGatewayName(cwd),
     startedAt: Date.now(),
-    workers: ledger?.workers ?? [],
   };
-  writeMeshState(stateFile, state);
+  const claimed = mutateMeshOwnerFields(cwd, (owner) => {
+    // Object.assign of a MeshOwnerFields-typed record: the four owner fields, and nothing
+    // else exists to assign.
+    Object.assign(owner, state);
+  });
+  if (!claimed) {
+    // An unusable write lock SKIPS the mutation (its documented total behavior), so our
+    // claim never reached disk: the reaper, mesh_status and the extension would not know
+    // this process owns the workers it is about to spawn. Refuse the init, and say WHY
+    // distinctly from the lost-race branch below — the cause here is local (an unwritable
+    // mesh state dir), not another session.
+    releaseMeshLock(lockFile);
+    throw new Error(
+      meshError(
+        'capability_failed',
+        `could not record the mesh owner claim in ${stateFile}: its write lock was unusable ` +
+          '(check that the mesh state directory is writable).',
+      ),
+    );
+  }
   const confirmed = readMeshState(stateFile);
   if (!confirmed || confirmed.ownerPid !== process.pid) {
     releaseMeshLock(lockFile);
@@ -1252,6 +1402,18 @@ async function doEnsureMesh(): Promise<void> {
   mesh.ownerLocked = true;
   mesh.lockFile = lockFile;
   mesh.state = state;
+  mesh.claudePath = claudePath;
+
+  // c². Orphan sweep BEFORE adopt (P5.3): a previous owner that died without a clean
+  // shutdown may have left `--bg` workers running with nobody to stop them. Sweeping
+  // first means adopt() re-claims only what is genuinely still ours to own. Best effort —
+  // the mesh must still come up when the sweep cannot (a stale `claude stop` is not a
+  // reason to refuse dispatch).
+  try {
+    await reapOrphanedMeshWorkers({ claudePath, cwd });
+  } catch {
+    // orphans stay visible in mesh_status and are swept again on the next session start
+  }
 
   // d. worker pool + one adopt() to re-claim any workers a previous owner left running.
   const pool = new WorkerPool({ claudePath, cwd: process.cwd(), mainConfigDir });
@@ -1267,21 +1429,52 @@ async function doEnsureMesh(): Promise<void> {
   });
   await gateway.start();
 
-  // f. cross-account bridge (experimental²) — only when double-opted-in.
-  let bridge: IBridge | undefined;
-  if (registry.meshCrossAccountBridge === 'on') {
-    const participants = dedupe([mainConfigDir, ...registry.workers.map((w) => w.configDir)]);
-    bridge = new Bridge({ participants });
-    bridge.start();
-  }
+  // f. cross-account registry bridge. No longer an opt-in FEATURE: with dispatch workers
+  // spread over several accounts, mirroring session entries between config dirs is what
+  // lets a worker under one account address the gateway under another at all. It is
+  // plumbing beneath attachable dispatch now, so it starts with the mesh.
+  const bridge: IBridge = new Bridge({
+    participants: dedupe([mainConfigDir, ...registry.workers.map((w) => w.configDir)]),
+  });
+  bridge.start();
 
   // Assign last: `mesh.gateway` set is exactly what "initialized" means.
   mesh.pool = pool;
   mesh.gateway = gateway;
   mesh.bridge = bridge;
+
+  // The gateway is READY, so the ping/STATUS drain loop and the idle sweep can start.
+  // Ordering matters: this runs before any dispatch worker can be spawned (a spawn needs
+  // an initialized mesh), so a RESULT ping can never arrive before there is a consumer.
+  startBgLoops({ pool, gateway });
 }
 
-/** Clamp an optional numeric tool arg to [min, max] (rounded), falling back to a default. */
+/** "3m" / "2h 5m" — how long ago a worker last did anything, for mesh_status. */
+function formatIdleAge(sinceMs: number): string {
+  if (!isFinite(sinceMs) || sinceMs < 0) {
+    return 'unknown';
+  }
+  const minutes = Math.floor(sinceMs / 60_000);
+  if (minutes < 1) {
+    return 'just now';
+  }
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/** The same age, phrased for a sentence — "3m ago", but never "just now ago". */
+function formatAgo(sinceMs: number): string {
+  const age = formatIdleAge(sinceMs);
+  return age === 'just now' || age === 'unknown' ? age : `${age} ago`;
+}
+
+/**
+ * Clamp a caller-supplied number into a tool's accepted range, defaulting anything that is
+ * not a finite number. Absent and invalid deliberately land in the SAME place here: these
+ * are convenience bounds on a poll, not semantics worth erroring over.
+ */
 function clampMeshNumber(value: unknown, min: number, max: number, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return fallback;
@@ -1290,11 +1483,12 @@ function clampMeshNumber(value: unknown, min: number, max: number, fallback: num
 }
 
 /**
- * mesh_status — the mesh diagnostic. NEVER throws mesh_off: with meshMode off it returns
- * a static explanation and does NOT initialize. With meshMode on it triggers ensureMesh
- * so the report reflects live reality; if init fails (busy, unsupported, gateway down)
- * the failure is folded into the readable text rather than surfaced as a tool error,
- * because a status tool must report a broken mesh, not error on it.
+ * mesh_status — the primary surface of attachable dispatch, and the one place an
+ * orchestrator can see what it is holding open. NEVER throws mesh_off: with meshMode off
+ * it returns a static explanation and does NOT initialize. With meshMode on it triggers
+ * ensureMesh so the report reflects live reality; if init fails (busy, unsupported,
+ * gateway down) the failure is folded into the readable text rather than surfaced as a
+ * tool error, because a status tool must report a broken mesh, not error on it.
  */
 async function meshStatus(): Promise<string> {
   const registry = readRegistry();
@@ -1304,9 +1498,10 @@ async function meshStatus(): Promise<string> {
   if (registry.meshMode !== 'on') {
     return [
       'Mesh mode: OFF (experimental).',
-      'Enable "claudeCodeOrchestrator.meshMode" in the extension settings to arm the session mesh.',
+      'Enable "claudeCodeOrchestrator.meshMode" in the extension settings to run dispatched ' +
+        'workers as persistent, attachable background sessions.',
       platform,
-      'The mesh is not initialized while mesh mode is off.',
+      'The mesh is not initialized while mesh mode is off; every dispatch runs a one-shot worker.',
     ].join('\n');
   }
   let initError: string | undefined;
@@ -1315,7 +1510,10 @@ async function meshStatus(): Promise<string> {
   } catch (err) {
     initError = err instanceof Error ? err.message : String(err);
   }
-  const lines: string[] = ['Mesh mode: ON (experimental).', platform];
+  const lines: string[] = [
+    'Mesh mode: ON (experimental) — every non-detach dispatch runs as an attachable background worker.',
+    platform,
+  ];
   // Owner lock read straight from disk, so it shows even when init failed (e.g. busy).
   const state = readMeshState(meshStateFile(process.cwd()));
   if (state) {
@@ -1329,20 +1527,65 @@ async function meshStatus(): Promise<string> {
   } else {
     lines.push('owner lock: none recorded');
   }
+  if (mesh.gateway) {
+    // A down gateway costs the live channel — wake pings, progress notes, steering — but
+    // never a result: those are read from each task's result file, so pending dispatches
+    // still complete. Say that plainly; a bare "down" reads like lost work.
+    const caveat =
+      mesh.gateway.state === 'ready'
+        ? ''
+        : ' — ping/STATUS channel lost; results still collected via files';
+    lines.push(`gateway: ${mesh.gateway.name} (${mesh.gateway.state})${caveat}`);
+  } else {
+    lines.push('gateway: not initialized — ping/STATUS channel lost; results still collected via files');
+  }
   if (initError) {
     lines.push(`mesh not fully initialized: ${initError}`);
+    lines.push('dispatches fall back to one-shot workers and say so in their result.');
   }
-  lines.push(mesh.gateway ? `gateway: ${mesh.gateway.name} (${mesh.gateway.state})` : 'gateway: not initialized');
-  if (registry.meshCrossAccountBridge !== 'on') {
-    lines.push('bridge: off');
-  } else if (mesh.bridge) {
+  let liveWorkers = 0;
+  try {
+    liveWorkers = mesh.pool?.liveOwnedCount() ?? 0;
+  } catch {
+    liveWorkers = 0;
+  }
+  lines.push(`live workers: ${liveWorkers}/${registry.meshMaxLiveWorkers} (meshMaxLiveWorkers)`);
+  lines.push(
+    registry.meshWorkerIdleTimeoutMin > 0
+      ? `idle auto-stop: ${registry.meshWorkerIdleTimeoutMin}min (meshWorkerIdleTimeoutMin)`
+      : 'idle auto-stop: off (meshWorkerIdleTimeoutMin = 0)',
+  );
+  // A13-R3: the live channel advertises itself here, because an orchestrator that never
+  // calls mesh_receive has no other way to learn that a worker is waiting on an answer.
+  // Purely feed-derived — "unread" means "not yet returned by mesh_receive", and there is
+  // deliberately no answered-state bookkeeping behind it.
+  const now = Date.now();
+  const feed = bgFeedStatus();
+  const questionTail =
+    feed.questions > 0 && feed.oldestQuestionFrom !== undefined
+      ? `; oldest question from ${feed.oldestQuestionFrom} ` +
+        `${formatAgo(now - (feed.oldestQuestionAt ?? now))} — answer with mesh_send_worker`
+      : '';
+  lines.push(`live feed: ${feed.unread} unread (${feed.questions} questions)${questionTail}`);
+  const strays = bgUnmatchedCount();
+  if (strays > 0) {
+    // The newest one is worth a line: "RESULT for t… from (no fromName)" is the single
+    // most useful clue when a dispatch is not settling from its pings.
+    const newest = bgLastUnmatched();
+    lines.push(
+      `unmatched signals buffered: ${strays} (messages that matched no pending dispatch — ` +
+        'crossed, late or malformed; they settle nothing)' +
+        (newest ? `\n      newest: ${newest}` : ''),
+    );
+  }
+  if (mesh.bridge) {
     const s = mesh.bridge.status();
     lines.push(
-      `bridge: ${s.enabled ? 'on' : 'off'} — ${s.participants} participant(s), ${s.mirrors} mirror(s)` +
-        (s.degraded ? ` (degraded: ${s.degraded})` : ''),
+      `bridge: ${s.participants} participant(s), ${s.mirrors} mirror(s) — plumbing that lets a ` +
+        `worker under one account reach the gateway${s.degraded ? ` (degraded: ${s.degraded})` : ''}`,
     );
   } else {
-    lines.push('bridge: enabled but not initialized');
+    lines.push('bridge: not initialized');
   }
   const workers = mesh.pool?.list() ?? [];
   if (workers.length === 0) {
@@ -1350,80 +1593,154 @@ async function meshStatus(): Promise<string> {
   } else {
     lines.push(`workers (${workers.length}):`);
     for (const w of workers) {
-      const health = w.alive ? 'alive' : 'dead';
+      const health = w.stoppedAt !== undefined ? 'stopped' : w.alive ? 'alive' : 'dead';
       const reg = w.registryStatus ? `/${w.registryStatus}` : '';
       const exhausted = w.accountExhausted ? ' ⚠account-exhausted' : '';
+      const keep = w.keepAlive === true ? ' · keep-alive' : '';
+      const title = bgPendingTitle(w.taskId);
+      const job = w.taskId ? `${w.role} ${w.taskId}${title ? ` "${title}" (in flight)` : ''}` : w.role;
+      // A11: the worktree line is how unmerged work stays visible. It is printed for every
+      // worker that has one EXCEPT those whose worktree we watched `claude rm` remove
+      // (worktreeKept === false) — pointing at a directory that is provably gone would be
+      // worse than saying nothing. A KEPT worktree is the loud case: the platform refused
+      // to remove it because it holds uncommitted changes nobody has merged.
+      const worktreeLine =
+        w.worktree === undefined || w.worktreeKept === false
+          ? ''
+          : `\n      worktree: ${w.worktree}${w.branch ? ` (branch ${w.branch})` : ''}` +
+            (w.worktreeKept === true
+              ? ' — KEPT: it has uncommitted changes, so teardown left it in place. Merge or remove it yourself.'
+              : '');
       lines.push(
-        `  - ${w.name} [${w.account}] ${w.model} — ${health}${reg}${exhausted}\n      attach: ${w.attachCommand}`,
+        `  - ${w.name} [${w.account}] ${w.model} — ${job} — ${health}${reg}${exhausted} · idle ` +
+          `${formatIdleAge(now - bgIdleActivityAt(w))}${keep}${worktreeLine}\n      attach: ${w.attachCommand}`,
       );
     }
   }
   return lines.join('\n');
 }
 
-/** mesh_spawn_workers — spawn one or more `claude --bg` mesh workers (quota-aware placement). */
-async function meshSpawnWorkers(args: unknown): Promise<string> {
+/**
+ * mesh_send_worker — live orchestrator→worker steering (A13).
+ *
+ * SCOPED BY DESIGN: `name` must be a worker in THIS workspace's ledger that has not been
+ * stopped. That single check is what keeps worker↔worker peer-to-peer retired — the
+ * transport underneath can address any session on the machine, and the old mesh_send
+ * exposed exactly that. Anything else is invalid_input naming the workers that ARE live,
+ * because the realistic cause is a stale or mistyped name.
+ *
+ * A13-R1, BINDING: this path NEVER marks activity. It reads the ledger (pool.list()), it
+ * relays through bgSendToWorker, and it touches neither pool.markActivity nor any progress
+ * clock — steering a wedged or dead worker must not make it look alive to the A6 silence
+ * recovery or to the idle sweep.
+ */
+async function meshSendWorker(args: unknown): Promise<string> {
   await ensureMesh();
-  const workers = (args as { workers?: unknown } | null)?.workers;
-  if (!Array.isArray(workers) || workers.length === 0) {
-    throw new Error(meshError('invalid_input', '"workers" must be a non-empty array of { role, brief }.'));
+  const a = (args ?? {}) as { name?: unknown; message?: unknown; summary?: unknown };
+  if (typeof a.name !== 'string' || a.name.trim() === '') {
+    throw new Error(meshError('invalid_input', '"name" must be a live worker name from mesh_status.'));
   }
-  const results = await mesh.pool!.spawn(workers as WorkerSpawnSpec[]);
-  const lines = results.map((r) =>
-    r.ok
-      ? `ok: ${r.name} — account ${r.account}, job ${r.jobId}, model ${r.model}` +
-        (r.note ? ` (note: ${r.note})` : '')
-      : `fail: ${r.error}`,
-  );
-  const ok = results.filter((r) => r.ok).length;
-  return [
-    `Spawned ${ok}/${results.length} mesh worker(s).`,
-    ...lines,
-    'Workers reply over the mesh — poll mesh_receive for their STATUS / RESULT / QUESTION lines.',
-  ].join('\n');
-}
-
-/** mesh_send — relay a live message to a peer through the gateway; reports actual delivery state. */
-async function meshSend(args: unknown): Promise<string> {
-  await ensureMesh();
-  const a = (args ?? {}) as { to?: unknown; message?: unknown; summary?: unknown };
-  const invalid = validateSendInput(a.to, a.message, a.summary);
+  const target = a.name.trim();
+  const live = (mesh.pool?.list() ?? []).filter((w) => w.stoppedAt === undefined);
+  if (!live.some((w) => w.name === target)) {
+    const names = live.map((w) => w.name).join(', ');
+    throw new Error(
+      meshError(
+        'invalid_input',
+        `"${target}" is not a live attachable worker of this workspace, and messages can only be ` +
+          `sent to one. ${names === '' ? 'No workers are live right now.' : `Live workers: ${names}.`}`,
+      ),
+    );
+  }
+  // Shape validation is shared with the relay's own validator, so the message and summary
+  // bounds cannot drift from what the transport accepts.
+  const invalid = validateSendInput(target, a.message, a.summary);
   if (invalid) {
     throw new Error(meshError('invalid_input', invalid));
   }
-  // validateSendInput proved these are the right types. The upstream SendMessage tool
-  // REQUIRES a summary for plain-text messages ("RELAY JSON missing required summary
-  // field" otherwise — scenario-B probe H5), so an omitted summary is defaulted to the
-  // message's first line rather than surfacing that transport error to the caller.
-  const message = a.message as string;
-  const summary =
-    (a.summary as string | undefined) ?? message.split('\n', 1)[0].slice(0, 60);
-  const result = await mesh.gateway!.send({
-    to: a.to as string,
-    summary,
-    message,
+  const result = await bgSendToWorker(mesh.gateway!, {
+    to: target,
+    message: a.message as string,
+    summary: a.summary as string | undefined,
   });
-  // A delivered:false RESULT is a normal outcome carrying the upstream transport error.
-  // gateway_down / relay_timeout are REJECTIONS from send() — they propagate to the tool
-  // catch as `mesh error [code]: …` instead of reaching here.
+  // A delivered:false result is a normal outcome carrying the upstream transport error;
+  // gateway_down / relay_timeout are REJECTIONS from send() and surface as mesh errors.
   return result.delivered
-    ? `delivered to ${a.to} (msg_id ${result.msgId ?? 'unknown'})`
-    : `NOT delivered: ${result.error ?? 'unknown transport error'}`;
+    ? `delivered to ${target} (msg_id ${result.msgId ?? 'unknown'}). It lands at the worker's next ` +
+        'turn boundary; watch mesh_receive for its response.'
+    : `NOT delivered to ${target}: ${result.error ?? 'unknown transport error'}`;
 }
 
-/** mesh_receive — long-poll the gateway inbox; renders each message as worker-supplied DATA. */
+/**
+ * mesh_receive — long-poll the LIVE FEED (A13).
+ *
+ * The feed is what the drain loop did not consume: STATUS notes, worker questions, and any
+ * other message from one of this workspace's workers. Result wake-pings never appear here —
+ * they settle their dispatch and are consumed, because the orchestrator already receives
+ * that result through the dispatch call itself.
+ *
+ * A13-R2: a `QUESTION:` note is marked, never re-parsed. QUESTION stays a STATUS
+ * convention, and its visibility is purely a rendering decision made right here.
+ */
 async function meshReceive(args: unknown): Promise<string> {
   await ensureMesh();
   const a = (args ?? {}) as { max_wait_seconds?: unknown; max_messages?: unknown };
   const waitS = clampMeshNumber(a.max_wait_seconds, 0, RECEIVE_WAIT_MAX_S, RECEIVE_WAIT_DEFAULT_S);
   const maxMessages = clampMeshNumber(a.max_messages, 1, RECEIVE_MESSAGES_MAX, RECEIVE_MESSAGES_DEFAULT);
-  const messages = await mesh.gateway!.receive(waitS * 1000, maxMessages);
-  if (messages.length === 0) {
+  const entries = await bgReceiveFeed(waitS * 1000, maxMessages);
+  if (entries.length === 0) {
     const alive = (mesh.pool?.list() ?? []).filter((w) => w.alive).length;
-    return `no mesh messages (waited ${waitS}s). ${alive} workers alive.`;
+    return `no worker messages (waited ${waitS}s). ${alive} worker(s) alive.`;
   }
-  const blocks = messages.map(renderInboundMessage).join('\n\n');
-  return `${messages.length} mesh message(s):\n\n${blocks}`;
+  const blocks = entries
+    .map((entry) =>
+      entry.question
+        ? `❓ QUESTION — answer it with mesh_send_worker\n${renderInboundMessage(entry.msg)}`
+        : renderInboundMessage(entry.msg),
+    )
+    .join('\n\n');
+  const questions = entries.filter((entry) => entry.question).length;
+  const header =
+    `${entries.length} worker message(s)` + (questions > 0 ? `, ${questions} of them QUESTION(s)` : '');
+  return `${header}:\n\n${blocks}`;
+}
+
+/**
+ * mesh_keep_worker — mark one attachable worker as deliberately kept (or release the
+ * mark). The mark suppresses ONLY the idle auto-stop: session-end reaping still applies,
+ * because a worker whose owning session is gone has nobody left to attach to it from.
+ *
+ * This is the tool the doctrine orders the orchestrator to call BEFORE it hands a user an
+ * attach command — the alternative is a 15-minute race between the human opening the
+ * terminal and the idle sweep stopping the session under them.
+ */
+async function meshKeepWorker(args: unknown): Promise<string> {
+  await ensureMesh();
+  const a = (args ?? {}) as { name?: unknown; keep?: unknown };
+  if (typeof a.name !== 'string' || a.name.trim() === '') {
+    throw new Error(meshError('invalid_input', '"name" must be a worker name from mesh_status.'));
+  }
+  const target = a.name.trim();
+  // Absent `keep` means "keep it" — the common call is marking, not un-marking.
+  const keep = a.keep !== false;
+  const result = mesh.pool!.setKeepAlive(target, keep);
+  if (!result.ok) {
+    // The pool reports its own mesh-formatted error (e.g. unknown_worker); surface it
+    // verbatim when it already carries the wire format, else wrap it and name what IS
+    // known, since a typo'd worker name is the likely cause.
+    const known = (mesh.pool?.list() ?? []).map((w) => w.name).join(', ') || 'none';
+    throw new Error(
+      result.error && /^mesh error \[/.test(result.error)
+        ? result.error
+        : meshError(
+            'unknown_worker',
+            `${result.error ?? `could not mark worker "${target}".`} Known workers: ${known}.`,
+          ),
+    );
+  }
+  return keep
+    ? `keep-alive set for ${target} (idle auto-stop suppressed; session-end reaping still applies)`
+    : `keep-alive cleared for ${target} (idle auto-stop re-enabled; session-end reaping still applies)`;
 }
 
 /** mesh_stop_worker — run `claude stop` for one worker under its account (force falls back to SIGKILL). */
@@ -1448,16 +1765,30 @@ async function meshStopWorker(args: unknown): Promise<string> {
 }
 
 /**
- * Stop the mesh subsystems on server shutdown, WITHOUT touching the `--bg` workers —
- * they survive by design (owned by the CLI's background service, not this process).
- * Stops the bridge (prunes the registry mirrors it wrote) and the gateway (kills the
- * relay child; it was never registered in childrenByTask because it is not a task, so
+ * Stop the mesh subsystems on server shutdown. Stops every `--bg` worker this process
+ * owns (P4.9), the bridge (prunes the registry mirrors it wrote) and the gateway (kills
+ * the relay child; it was never registered in childrenByTask because it is not a task, so
  * shutdown's worker sweep never reaches it), then releases the owner lock by rewriting
- * ownerPid 0 so the next session takes over instantly. Re-reads the state file first so
- * the pool's latest worker ledger is preserved, and only releases a lock we still hold.
+ * ownerPid 0 so the next session takes over instantly. That release writes ownerPid alone,
+ * under the ledger write lock — the worker ledger is preserved because nothing here can
+ * address it — and only ever releases a lock that still names us.
  * Never throws (called from shutdown, itself called from signal handlers).
+ *
+ * Attachable workers used to be left running deliberately; that was the v1.4 leak this
+ * rework closes. Session-end stop applies even to keepAlive workers: keepAlive suppresses
+ * the IDLE timer, but a worker whose owning session is gone has nobody left to attach to
+ * it from — the no-leak guarantee outranks it. The stops are fire-and-forget (detached,
+ * unref'd `claude stop` children) because shutdown must not wait on them.
  */
 function stopMesh(): void {
+  try {
+    if (mesh.claudePath !== undefined) {
+      fireAndForgetStopOwned(process.cwd(), process.pid, mesh.claudePath);
+    }
+  } catch {
+    // best effort — the activation-time orphan reaper is the backstop for whatever
+    // survives this, and taskBases below still authors the terminal events
+  }
   try {
     mesh.bridge?.stop();
   } catch {
@@ -1472,10 +1803,26 @@ function stopMesh(): void {
   }
   if (mesh.ownerLocked) {
     try {
-      const file = meshStateFile(process.cwd());
-      const current = readMeshState(file) ?? mesh.state;
+      const current = readMeshState(meshStateFile(process.cwd())) ?? mesh.state;
       if (current && current.ownerPid === process.pid) {
-        writeMeshState(file, { ...current, ownerPid: 0 });
+        // The release writes ownerPid ONLY, under the ledger write lock (F1 completeness).
+        // The old `{...current, ownerPid: 0}` re-wrote the whole file, putting back a
+        // `workers` array read a moment earlier — and this runs at session end, exactly
+        // when the extension host's activation reaper and the tree cancel are most likely
+        // to be writing stopped marks into it.
+        //
+        // The read above is only a "have we anything to say" test. The DECIDING check is
+        // the one inside the mutator: it sees the freshest bytes under the lock, so
+        // "never release a lock that no longer names me" stops being a TOCTOU. A record
+        // that no longer names us (or a state file that is gone or corrupt) changes
+        // nothing, and a mutation that changes nothing writes nothing — so a shutdown can
+        // neither resurrect a deleted state file nor overwrite a corrupt one with this
+        // process's stale in-memory idea of it.
+        mutateMeshOwnerFields(process.cwd(), (owner) => {
+          if (owner.ownerPid === process.pid) {
+            owner.ownerPid = 0;
+          }
+        });
       }
     } catch {
       // best effort — a lock left with our pid is broken by liveness once we exit anyway
@@ -1542,9 +1889,21 @@ const TASK_PROPERTIES = {
       'Opt in to survival: a background supervisor owns this task, records its result, and keeps ' +
       'running even if this session ends mid-dispatch. Blocking and the returned result are ' +
       'unchanged — while this session stays alive you get the identical inline result. Leave unset ' +
-      'for the default, where a task is cancelled if the session ends before it finishes.',
+      'for the default, where a task is cancelled if the session ends before it finishes. A ' +
+      'detached task always runs as a one-shot worker, even with Mesh Mode on: survival is not ' +
+      'attachability (the relay this session owns dies with it, so a surviving task could not ' +
+      'report over it).',
   },
 };
+
+/**
+ * Appended to both dispatch tool descriptions. Static on purpose: tool descriptions are
+ * read once by the client at tools/list, so a sentence that tried to report the CURRENT
+ * mesh state would be a stale claim the moment the operator toggles the setting.
+ */
+const MESH_DISPATCH_NOTE =
+  ' When Mesh Mode is on, workers run as persistent, attachable background sessions (see ' +
+  'mesh_status; one-shot when off or when detach is set).';
 
 const TOOLS = [
   {
@@ -1556,7 +1915,8 @@ const TOOLS = [
       'execution. Each worker is a full Claude Code session with file and shell access to this ' +
       'workspace, but it does NOT see this conversation — every prompt must be complete and ' +
       'self-contained. Give each task a strong system_prompt (role, quality bar, output format). ' +
-      'Do the integration, judgment, and final synthesis yourself.',
+      'Do the integration, judgment, and final synthesis yourself.' +
+      MESH_DISPATCH_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -1579,7 +1939,8 @@ const TOOLS = [
       'Dispatch ONE self-contained task to a worker Claude account (full Claude Code session in ' +
       'this workspace; it does NOT see this conversation, so the prompt must be complete). For ' +
       'multiple subtasks use dispatch_tasks instead — it runs them in parallel. On quota errors ' +
-      'the task automatically fails over to another worker when one is available.',
+      'the task automatically fails over to another worker when one is available.' +
+      MESH_DISPATCH_NOTE,
     inputSchema: {
       type: 'object',
       properties: TASK_PROPERTIES,
@@ -1753,12 +2114,12 @@ async function handleRequest(msg: {
           text = await listWorkers();
         } else if (name === 'mesh_status') {
           text = await meshStatus();
-        } else if (name === 'mesh_spawn_workers') {
-          text = await meshSpawnWorkers(args);
-        } else if (name === 'mesh_send') {
-          text = await meshSend(args);
+        } else if (name === 'mesh_send_worker') {
+          text = await meshSendWorker(args);
         } else if (name === 'mesh_receive') {
           text = await meshReceive(args);
+        } else if (name === 'mesh_keep_worker') {
+          text = await meshKeepWorker(args);
         } else if (name === 'mesh_stop_worker') {
           text = await meshStopWorker(args);
         } else {
@@ -1782,6 +2143,15 @@ async function handleRequest(msg: {
         if (reqId !== null) {
           inFlightRequests.delete(reqId);
           abortedRequests.delete(reqId);
+          // Release this request's mesh cancel hooks. They are deliberately kept past
+          // each task's own settle (so a batch cancel can still stop a worker that is
+          // idle-after-result, P4.5); the request completing is when they stop mattering.
+          const bgIds = tasksByRequest.get(reqId);
+          if (bgIds !== undefined) {
+            for (const taskId of bgIds) {
+              bgWorkersByTask.delete(taskId);
+            }
+          }
           tasksByRequest.delete(reqId);
           detachTasksByRequest.delete(reqId);
         }

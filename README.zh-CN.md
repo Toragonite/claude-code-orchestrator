@@ -16,10 +16,9 @@
 
 把你现有的 **Claude Code** 面板变成多账号编排器。像平常一样与主会话对话；它负责设计与验证，并通过 MCP 调度工具把实现工作**并行**分发给工作账号（Opus / Sonnet — 以及计费防护之后的 Fable）。内置按账号的用量统计（含每个账号实时的真实计划用量与重置时间）、配额感知的自动故障转移，以及实时仪表盘。
 
-> **v1.4 新增 — Mesh 模式（实验性）**
-> 构建在 Claude Code 自身的跨会话消息机制之上（自 CLI 2.1.224 起默认开启），本次发布将其暴露为一层实时编排能力。
-> 生成常驻的 `claude --bg` 后台 worker，并与它进行实时双向对话（可在终端标签页中 attach 到任意 worker 观察或介入）——是对一次性调度的补充，而非替代。
-> 默认关闭。需要 Claude Code CLI 2.1.224 及以上版本，仅支持 macOS 或 Linux。 → [Mesh 模式](#mesh-模式实验性)
+> **新增 — Mesh 模式重做：可 attach、以 worktree 隔离的调度（实验性）**
+> Mesh 模式不再是一套自带工具的独立工作流。打开后，每个被调度的 worker 都是一个可以用终端 attach 上去的常驻 `claude --bg` 会话，并在**自己的 git worktree** 中干活——也就是说结果会以一个待合并的分支返回——同时编排器可以在任务进行中给它发消息来纠偏，worker 也会把进度报告回来。
+> 默认关闭；关闭时调度行为与以前完全一致。需要 Claude Code CLI 2.1.224 及以上版本，仅支持 macOS 或 Linux。 → [Mesh 模式](#mesh-模式实验性)
 
 ```
 Claude Code 面板（主账号 — 编排器）                ← 照常使用
@@ -122,61 +121,92 @@ Anthropic 的限流窗口（Session 5 小时、Weekly 7 天、Weekly Fable）在
 
 ## Mesh 模式（实验性）
 
-Mesh 模式在编排器会话与常驻后台 worker 之间新增了一层**实时双向协作**，构建在 Claude Code 自身的跨会话消息机制之上，是对一次性调度（dispatch）的补充，而不是替代。调度仍然是持久、配额精确的路径（结构化的 `result.json`、超时、取消、故障转移）；而当你想让一个 worker 常驻并与它进行实时对话——发消息、收状态更新、在终端标签页里盯着它工作——同时它在整个交互过程中保持自己的上下文时，就用 mesh。
+Mesh 模式不是"第二种干活方式"，它改变的是**调度本身是什么**：打开后，每个被调度的 worker 都以可 attach 的常驻 `claude --bg` 后台会话运行，而不是一次性执行；在 git 工作区里，它还会在自己的 git worktree 中干活。你照旧使用 `dispatch_task` / `dispatch_tasks`，结果、超时、取消、配额感知的故障转移都和以前一样。没有额外的 mesh 工作流需要学习。
 
-### 工作原理 — 网关与桥接
+它带来什么：你可以用终端 attach 到正在运行的 worker 上观察它，编排器可以在任务进行中给它发消息纠偏，worker 也会在干活的同时把进度和问题报告回来。
 
-两个部件，把它们分开理解会有帮助：
+Mesh 模式**关闭**时，调度与此前版本完全一致——每个任务一个一次性 worker，走的是没有改动的代码路径。
 
-- **网关（Gateway）** — 服务器以其**在 mesh 上的独立身份**启动的一个小型 `claude -p` 中继会话。编排器无法直接向 mesh 发消息：VS Code 面板会话注册时没有消息 socket（上游 [#82313](https://github.com/anthropics/claude-code/issues/82313)），而 MCP 服务器根本不是一个 Claude 会话——因此由网关代表它们收发消息。它只负责中继消息，所以运行一个便宜的模型（默认 haiku）。
-- **桥接（Bridge）** — 在各账户之间镜像会话发现。**同一**账户上的 worker 之间可以原生互相发现；桥接只是用来触达**其他**账户上的 worker。
+### 结果以一个待合并的分支返回
 
-|  | 网关（Gateway） | 桥接（Bridge） |
-|---|---|---|
-| **为什么** | 编排器（面板/服务器）无法直接加入 mesh | 会话发现按 `CLAUDE_CONFIG_DIR` 隔离 |
-| **何时需要** | 只要 Mesh 模式开启就始终需要（单账户或多账户） | 仅多账户时需要 |
-| **对应设置** | `meshMode` | `meshCrossAccountBridge` |
+这是用户能看到的最大变化。在 git 工作区里，每次调度都会得到自己的 worktree：`.claude/worktrees/cco-<taskId>`，检出在分支 `worktree-cco-<taskId>` 上（这是 Claude Code 自带的 `-w` worktree 能力）。worker 在**那里**改文件，而不是在你的共享检出里，调度结果中会写明 worktree 路径与分支。编排器收到的常驻指令是：在那个 worktree 里验证（diff、构建、测试），把通过的合并进来，然后移除 worktree 并停止 worker——分支没有被合并之前，这次调度就不算完成集成。
 
-（如果你改为在**终端**里以 Claude 会话的形式运行编排器，它本身就是完整的 mesh 参与者，无需网关即可给 worker 发消息——网关的存在正是为了本扩展所用的面板/服务器这个入口。）
+有两种情况**没有** worktree，此时结果里干脆没有 worktree 那一行，因为改动已经落在你的工作树里了：
 
-### 环境要求
+- 工作区不是 git 仓库；
+- 该次调度回退成了一次性 worker（见下文*mesh 无法启动时*）。
 
-- Claude Code CLI 2.1.224 或更新版本（跨会话消息机制从这个版本起默认开启）
-- 仅支持 macOS 或 Linux —— mesh 运行在 unix domain socket 之上，不支持 Windows
-- 与编排器同一台机器（mesh worker 以 `claude --bg` 后台进程的形式启动，mesh 消息不会跨机器传递）
+未合并的成果不会被替你清理掉：停止一个 worker 时会请求 Claude Code 移除它的 worktree，而 Claude Code **只会移除干净的 worktree**。含有未提交改动的 worktree 会被保留，并继续出现在 `mesh_status` 的列表里（标记为已保留），方便你找到它。
 
-### 如何启用
-
-Mesh 模式默认关闭，由两个相互独立的开关组成（均为实验性功能）：
-
-- `claudeCodeOrchestrator.meshMode`（默认 `off`）—— 总开关。打开后会启动网关中继会话（见下文），并向编排器暴露 `mesh_*` MCP 工具。
-- `claudeCodeOrchestrator.meshCrossAccountBridge`（默认 `off`）—— **实验性²**，见下方警示。仅在 `meshMode` 打开时才有意义。
-- `claudeCodeOrchestrator.meshGatewayModel`（默认 `haiku`）—— 网关中继会话使用的模型。网关只执行简单的消息中继回合，因此默认使用一个足够便宜的模型。
-
-### mesh_* 工具
+### 和正在运行的 worker 对话
 
 | 工具 | 用途 |
 |---|---|
-| `mesh_status` | 报告网关健康状况、跨账户桥接状态，以及每个 mesh worker（名称、账户、模型、来自注册表的实时状态、attach 命令）。调用其他 `mesh_*` 工具之前应先调用它。 |
-| `mesh_spawn_workers` | 一次调用生成一个或多个常驻的 `claude --bg` mesh worker，每个都带有角色标签和完整的常驻任务简报。配额感知的账户分配沿用调度的防护规则（登出、冷却、耗尽、超额计费、frontier）。 |
-| `mesh_send` | 向某个 mesh worker（或任何可达的对端会话）发送实时消息，可用 worker 名称或 `uds:...` 回复地址寻址。返回真实的投递状态。 |
-| `mesh_receive` | 长轮询网关收件箱，获取来自 mesh worker 的消息。 |
-| `mesh_stop_worker` | 停止一个 mesh worker（在其账户下执行 `claude stop <jobId>`；`force: true` 在失败时改为强制终止进程）。 |
+| `mesh_status` | 主要界面：中继健康状况、未读的实时消息与待答的 worker 提问、当前存活 worker 数与上限、空闲自动停止时长，以及每个 worker 的调度任务、账户、模型、存活状态、空闲时长、keep-alive 标记、worktree（因含未提交改动而被保留时会标出）和可直接复制的 attach 命令。 |
+| `mesh_send_worker` | 给本工作区中**某一个**正在运行的 worker 发实时消息：纠正、新发现的约束、对它提问的回答，或让它放弃错误路线。 |
+| `mesh_receive` | 长轮询本工作区各 worker 的实时消息流——进度说明，以及它们以 `STATUS <id> QUESTION: …` 形式提出的问题（会被高亮）。结果完成 ping 在内部消费，不会出现在这里。 |
+| `mesh_stop_worker` | 停止一个 worker（在其账户下执行 `claude stop`，随后用 `claude rm` 清理后台作业并移除干净的 worktree）。 |
+| `mesh_keep_worker` | 给 worker 打上 keep-alive 标记，使空闲自动停止不会动它——在把 attach 命令交给用户之前就要设置。会话结束时的回收仍然照常生效。 |
 
-### Worker 生命周期
+v1.4 的那些工具已经不在了。`mesh_spawn_workers` 不复存在（现在由调度来启动 worker），可以寻址任意对端会话的 `mesh_send` 也一样。`mesh_receive` 名字保留但含义变了：它是*本工作区自己的调度 worker* 的实时消息流，而不是通用的对端收件箱。worker 之间的点对点消息已经退役——`mesh_send_worker` 会拒绝任何不是本工作区存活 worker 的名称。
 
-一个 mesh worker 会经历：**生成**（`mesh_spawn_workers` 启动一个带常驻简报的 `claude --bg` 后台会话——它会持续存活并保留自己的上下文）→ **消息往来**（用 `mesh_send`/`mesh_receive` 进行不同于一次性调度提示词的实时来回对话）→ **attach**（从 Worker Accounts 视图把该 worker 打开到集成终端标签页，或直接运行 `mesh_status` 返回的 `attachCommand`，即可实时观察并介入——按 `Ctrl+Z` 可以分离而不停止它；也可以不 attach，用 `claude logs <jobId>` 快速查看输出）→ **停止**（`mesh_stop_worker`，或在终端里执行 `claude stop`）。
+消息会排队，并在 worker 的下一个回合边界送达，因此纠偏不会打断正在进行的工具调用。一条纠偏消息可以修改任务内容，与原任务冲突时以更新的指令为准；但它无法扩大 worker 的文件所有权清单，而且 worker 收到的消息内容始终被当作数据，而不是指令。
 
-### 跨账户桥接（实验性²）
+### 两条通道：结果走文件，纠偏走消息
 
-> ⚠️ **默认关闭 —— 依赖一个未公开文档化的 Claude Code 文件格式。** 该桥接会在每个已注册账户的 `CLAUDE_CONFIG_DIR` 之间镜像实时的会话注册表条目，使其他工作账户（不只是主账户）上的 mesh worker 也变得可达。这只是基于对 Claude Code CLI 的经验性观察（见 `docs/session-messaging-spike.md`），并非公开 API——未来的 Claude Code 版本可能在没有任何通知的情况下改变这个格式。桥接被设计为在那种情况下自动降级，而不会影响调度功能，但除非确实需要跨账户的 mesh worker，否则请保持关闭。
+worker 的报告通过调度服务器读取的**结果文件**返回，实时消息通道只承载简短的完成 ping、进度说明和纠偏内容。这个拆分是刻意的——中继挂掉时，你失去的是纠偏和进度说明，而不是结果。待完成的调度依然会由结果文件收尾，`mesh_status` 也会这么告诉你（"ping/STATUS channel lost; results still collected via files"）。进度说明在设计上就是尽力而为：worker 被要求发送它们，但没有任何机制依赖它们送达。
+
+### 收尾 —— 一个存活的 worker 是被占用的资源
+
+worker 在调度返回后**不会消失**，这正是可 attach 的意义所在，也意味着必须有人去停止它。编排器被要求在成果合并后就停止对应 worker，下面还有三道兜底：
+
+- **空闲自动停止** —— `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin`（默认 `15`，设为 `0` 则关闭）。一个没有进行中的调度、没有消息、也没有 keep-alive 标记的存活 worker，会在这么多分钟后被停止。从 **Attachable workers** 树里 attach 会先打上 keep-alive 标记，所以你正在里面操作的会话不会被回收（若该标记写入失败，会弹出警告告知）；编排器一侧由 `mesh_keep_worker` 做同样的事。
+- **存活 worker 上限** —— `claudeCodeOrchestrator.meshMaxLiveWorkers`（默认 `8`）。超过上限的调度会被**直接拒绝，而不是排队**：该任务以写明上限的 `worker_cap` 错误失败，这样一批任务就不会为了等谁也不会释放的名额而死锁。大规模并行之前先停掉已完成的 worker，或者把这个数字调大。
+- **会话结束** —— 调度服务器关闭时会停止它拥有的所有 worker（包括打了 keep-alive 标记的），下一次激活还会清扫被强杀会话遗留的孤儿 worker，把仍然存活的停掉。
+
+停止 worker 时也会清理它的后台作业（干净的 worktree 就是在这一步被移除的），因此一次触发超时的调度，可能比超时时刻本身晚约 30 秒才报告出来（停止与作业移除各自都有 15 秒上限）。
+
+### 如何启用
+
+Mesh 模式默认关闭。下面四个设置在编排器仪表板的 Settings 卡片里也有，改动会在该工作区的下一个 Claude Code 会话生效。
+
+| 设置 | 默认值 | 作用 |
+|---|---|---|
+| `claudeCodeOrchestrator.meshMode` | `false` | 总开关：启动中继会话，并把所有非 detach 的调度都交给可 attach 的 worker |
+| `claudeCodeOrchestrator.meshGatewayModel` | `haiku` | 中继会话使用的模型，它只执行极小的中继回合 |
+| `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin` | `15` | 空闲的可 attach worker 多少分钟后被停止；`0` 表示关闭 |
+| `claudeCodeOrchestrator.meshMaxLiveWorkers` | `8` | 同时存活的可 attach worker 上限；超出的调度会被拒绝而不是排队 |
+
+`meshCrossAccountBridge` 设置已被移除。它原先控制的跨账户镜像依然在工作（正是它让某个账户下的 worker 能够触达另一个账户下的中继），但现在它是随 mesh 一起启动的内部管道，而不是需要用户选择开启的功能。`mesh_status` 会用一行报告它。
+
+### mesh 无法启动时
+
+如果 mesh 因为任何原因无法初始化——平台不支持、本工作区的 mesh 已被另一个窗口占用、中继起不来——调度**不会失败**。它会作为普通的一次性 worker 运行，结果前面会加上：
+
+```
+⚠ mesh unavailable — ran as a one-shot worker (not attachable): <原因>
+```
+
+`mesh_status` 会持续报告这个初始化错误；这类调度没有 worktree——改动直接落在工作树里。
+
+### 环境要求与如实说明
+
+- **Claude Code CLI 2.1.224 或更新版本**（跨会话消息机制从这个版本起默认开启）；本节描述的 worktree 行为是在 2.1.227 上验证的。
+- **仅 macOS 或 Linux，且同一台机器。** mesh 运行在 unix domain socket 之上，因此在 Windows 上它根本不会启动，所有调度都走上面那条一次性回退路径。
+- **可 attach 的 worker 只写文件，不跑你的构建。** 它们在启动时没有 Bash 工具（Claude Code 仍可能自动批准明显安全的只读命令，所以请把它们当作"写文件的人"，而不是沙箱），而且本工作区的 MCP 服务器对它们是禁用的，所以 worker 无法再去调度别的 worker。构建、测试和 shell 工作仍然属于编排器。
+- **`detach: true` 依旧是一次性。** detach 任务的意义是活得比会话更久，而中继并不会，所以即使打开 Mesh 模式，detach 调度仍走原来的监管路径。
+- **中继会花一点钱。** Mesh 模式打开期间，服务器会在你的主账户上维持一个小的 `claude -p` 中继会话（`meshGatewayModel`，默认 `haiku`）。它只中继简短消息，但并非免费。
+- **没有按任务的 token 与费用数字。** CLI 不会报告 `--bg` 会话的用量，因此可 attach 的调度在本扩展自己的计数与图表中记为 0 token、0 费用，任务输出里写的是 `tokens n/a`。各账户的实时套餐用量不受影响——那是直接从账户读取的。
+- **可能残留 worktree。** 如果会话在移除动作执行之前就结束，干净的 `cco-…` worktree 可能会堆积在 `.claude/worktrees/` 下，可以用 `git worktree remove` 安全删除。另外在 worker 刚完成工作之后，确实干净的 worktree 偶尔会被报告为*已保留*——不会丢任何东西，过几秒再移除就会成功。
+- **失败后的重试会复用同一个任务 worktree**，因此同一个分支可能同时包含两次尝试的改动；合并前请通读整个 diff。
+- **它依赖没有公开 API 的 Claude Code 内部机制**（会话注册表与后台作业命令）。这些内部一旦变动，mesh 初始化会失败，调度回退成一次性 worker；若变动发生在调度进行中，它表现为超时或 worker 死亡错误，而不是错误的结果。
 
 ### 已知的上游限制
 
-- **IDE 面板会话无法直接加入 mesh** —— 它注册时没有消息 socket，因此既无法接收消息，自己发出的消息也会静默投递失败。这正是 Mesh 模式要单独启动一个后台中继（"网关"）会话作为编排器 mesh 身份的原因。上游 issue：[anthropics/claude-code#82313](https://github.com/anthropics/claude-code/issues/82313)。
-- **VS Code 扩展会忽略 `CLAUDE_CONFIG_DIR` 覆盖**，始终解析为 `~/.claude`——这也是上面跨账户桥接存在的原因之一：与其让扩展宿主直接看到其他账户，不如通过镜像文件的方式来实现。上游 issue：[anthropics/claude-code#30538](https://github.com/anthropics/claude-code/issues/30538)。
+- **IDE 面板会话无法直接加入 mesh** —— 它注册时没有消息 socket，因此既无法接收消息，自己发出的消息也会静默投递失败。这正是 Mesh 模式要单独启动一个后台中继会话作为编排器 mesh 身份的原因。上游 issue：[anthropics/claude-code#82313](https://github.com/anthropics/claude-code/issues/82313)。
+- **VS Code 扩展会忽略 `CLAUDE_CONFIG_DIR` 覆盖**，始终解析为 `~/.claude`——这也是跨账户可达性通过镜像注册表文件、而不是让扩展宿主直接看到其他账户来实现的原因之一。上游 issue：[anthropics/claude-code#30538](https://github.com/anthropics/claude-code/issues/30538)。
 
-支撑本节所有陈述的完整验证证据（探针 P1–P11）见 [docs/session-messaging-spike.md](docs/session-messaging-spike.md)。
+本功能所依托的消息机制验证（探针 P1–P11）见 [docs/session-messaging-spike.md](docs/session-messaging-spike.md)；该文档中的工具列表早于这次重做。
 
 ## 视图与仪表盘
 
@@ -185,7 +215,7 @@ Mesh 模式默认关闭，由两个相互独立的开关组成（均为实验性
 - **编排器仪表盘**（编辑器标签页）— 统计卡片（运行中、7 天任务、成功率、token、费用）、实时用量面板（每个计划窗口一条进度条，含百分比、严重程度颜色、重置倒计时，以及”N 分钟前更新”的新鲜度提示）、14 天任务图表、各 worker 的 token 分布、worker/任务表格，以及带快捷操作的设置面板。每 2 秒自动刷新，自动适配主题。运行中的行带有 Cancel 按钮，取消所有运行中的调度也作为一项快捷操作提供。
 - **Open Interactive Worker Session** — 在集成终端中以可见方式运行 worker（可注入初始任务），适合需要盯着并随时介入的工作。
 
-停止调度确实会真正停止：按下 Stop 会取消对应的 MCP 请求，并终止该 worker 的整个进程树（通过 `dispatch_tasks` 发出的批量调度是同一个请求，因此取消它会停止批次中的所有任务）。结束编排器会话——关闭面板、重新加载、退出，或强制结束进程——会终止它启动的所有 worker，而不是任其挂到 `workerTimeoutMinutes` 壁钟超时。扩展只会向已核实仍属于自己 worker 的进程 ID 发信号（绝不会误杀被操作系统回收复用的进程 ID），取消操作从不计入 worker 错误或配额冷却，任何仍标记为运行中、但其 worker 已消失的任务会在下次激活时被回收为孤儿任务。
+停止调度确实会真正停止：按下 Stop 会取消对应的 MCP 请求，并终止该 worker 的整个进程树（通过 `dispatch_tasks` 发出的批量调度是同一个请求，因此取消它会停止批次中的所有任务）。打开 Mesh 模式时，取消会停止该 worker 的后台会话，而不是向进程树发信号；它此前写下的内容仍然留在磁盘上。结束编排器会话——关闭面板、重新加载、退出，或强制结束进程——会终止它启动的所有 worker，而不是任其挂到 `workerTimeoutMinutes` 壁钟超时。扩展只会向已核实仍属于自己 worker 的进程 ID 发信号（绝不会误杀被操作系统回收复用的进程 ID），取消操作从不计入 worker 错误或配额冷却，任何仍标记为运行中、但其 worker 已消失的任务会在下次激活时被回收为孤儿任务。
 
 ## 资源包与 Asset Manager
 
@@ -246,6 +276,8 @@ Mesh 模式默认关闭，由两个相互独立的开关组成（均为实验性
 | `claudeCodeOrchestrator.assetPacks` | `[]` | 内置包之外、用于加载资源的额外资源包目录 |
 | `claudeCodeOrchestrator.assetAutoSync` | `true` | 激活时静默同步已启用的资源，只有实际发生变化时才弹出通知 |
 
+Mesh 模式还新增了四个设置（`meshMode`、`meshGatewayModel`、`meshWorkerIdleTimeoutMin`、`meshMaxLiveWorkers`）—— 见 [Mesh 模式](#mesh-模式实验性)。
+
 ## 数据与隐私
 
 一切都留在你的机器上。扩展与服务器在 `~/.claude-code-orchestrator/` 下共享状态：worker 注册表（名称、配置目录路径、默认模型 — **不含令牌、不含凭据**）、各 worker 的用量统计、任务日志，以及 markdown 格式的任务产出。除了你主动调度的 Claude Code CLI 调用之外，不向任何地方发送任何数据。卸载扩展后该目录会保留 — 彻底清除请手动删除。
@@ -259,7 +291,7 @@ Mesh 模式默认关闭，由两个相互独立的开关组成（均为实验性
 
 ## 限制与说明
 
-- 各 worker 会并发修改**同一工作区**的文件。对可能重叠的任务，请在提示词中划分互不相交的文件所有权清单（按任务的 worktree 隔离在路线图上）。
+- 各 worker 会并发修改**同一工作区**的文件。对可能重叠的任务，请在提示词中划分互不相交的文件所有权清单。（在 git 工作区里打开 [Mesh 模式](#mesh-模式实验性)后，每次调度改为隔离在自己的 worktree 中，你再去合并分支。）
 - 不会动你的主账号 — 面板继续使用默认的 `~/.claude` 登录。
 - 使用多个 Claude 账号需遵守 Anthropic 的服务条款与使用政策。**确保你的账号配置与使用方式合规是你自己的责任。** 被调度的工作消耗的是各 worker 账号自己的配额或按量计费。
 

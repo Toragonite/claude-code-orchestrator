@@ -152,14 +152,19 @@ export interface TaskRunContext {
   onResult?(result: TaskResult): void;
 }
 
-interface RunResult {
+export interface RunResult {
   text: string;
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
 }
 
-function isQuotaError(message: string): boolean {
+/**
+ * Exported for the `--bg` dispatch runner (mcp/bg-runner.ts), which must classify a
+ * spawn failure exactly as this path does — a quota failure fails over, anything else
+ * surfaces. Behavior is unchanged; only the visibility of the symbol is.
+ */
+export function isQuotaError(message: string): boolean {
   return /quota|usage limit|rate.?limit|limit (reached|exceeded)|too many requests|overloaded|429|529/i.test(
     message,
   );
@@ -719,7 +724,7 @@ function pickWorker(
  * ExpiredLoginBlock ends the dispatch instead of looping. The healthy path adds
  * nothing at all: no cached-expired worker, no probe.
  */
-async function pickWorkerLive(
+export async function pickWorkerLive(
   workers: WorkerProfile[],
   preferred: string | undefined,
   attempted: Set<string>,
@@ -751,7 +756,7 @@ async function pickWorkerLive(
   }
 }
 
-function recordSuccess(name: string, run: RunResult): void {
+export function recordSuccess(name: string, run: RunResult): void {
   // updateStats holds the stats.json advisory lock across the read-modify-write, so
   // concurrent detach supervisors never lose an increment (contract R4).
   updateStats((stats) => {
@@ -766,7 +771,7 @@ function recordSuccess(name: string, run: RunResult): void {
   });
 }
 
-function recordFailure(name: string, message: string, quota: boolean, cooldownMinutes: number): void {
+export function recordFailure(name: string, message: string, quota: boolean, cooldownMinutes: number): void {
   updateStats((stats) => {
     const s = stats[name] ?? emptyStats();
     s.errors++;

@@ -16,10 +16,9 @@
 
 Turn your existing **Claude Code** panel into a multi-account orchestrator. You chat with your main session as usual; it designs and verifies, and fans implementation work out **in parallel** to worker Claude accounts (Opus / Sonnet — or Fable, behind a billing guard) through MCP dispatch tools. Per-account usage tracking (including each account's real, live plan usage and resets), quota-aware failover, and a live dashboard included.
 
-> **New in v1.4 — Mesh Mode (experimental)**
-> Built on top of Claude Code's own cross-session messaging — default-on since CLI 2.1.224 — this release surfaces it as a live orchestration layer.
-> Spawn persistent `claude --bg` background workers and hold a real two-way conversation with them (attach to any worker in a terminal tab to watch or steer it) — complementing, not replacing, fire-and-forget dispatch.
-> Off by default. Requires Claude Code CLI ≥ 2.1.224, macOS or Linux. → [Mesh Mode](#mesh-mode-experimental)
+> **New — Mesh Mode reworked: attachable, worktree-isolated dispatch (experimental)**
+> Mesh Mode is no longer a separate workflow with its own tools. With it on, every dispatched worker is a persistent `claude --bg` session you can attach a terminal to, working in **its own git worktree** — so results come back as a branch to merge — and the orchestrator can message it mid-task to steer it while it reports progress back.
+> Off by default; with it off, dispatch is unchanged. Requires Claude Code CLI ≥ 2.1.224, macOS or Linux. → [Mesh Mode](#mesh-mode--attachable-dispatch-experimental)
 
 ```
 Claude Code panel (main account — the orchestrator)     ← use it as usual
@@ -120,63 +119,94 @@ The extension surfaces each account's overage state across `list_workers`, the W
 - `list_workers` and the tool schema surface the guard state before any dispatch is attempted.
 - Flip it deliberately: the `claudeCodeOrchestrator.frontierWorkerDispatch` setting, or the dropdown in the dashboard. A surgical pattern that works well: enable, dispatch one adversarial review of a significant build, disable.
 
-## Mesh Mode (experimental)
+## Mesh Mode — attachable dispatch (experimental)
 
-Mesh Mode adds a **live, bidirectional coordination layer** between your orchestrator session and persistent background workers, built on top of Claude Code's own cross-session messaging. It complements fire-and-forget dispatch — it does not replace it. Dispatch stays the durable, quota-precise path (structured `result.json`, timeouts, cancellation, failover); mesh is for when you want to spawn a worker once and then have a live conversation with it — send it messages, get status updates, watch it work in a terminal tab — while it holds context across the whole exchange.
+Mesh Mode is not a second way to work. It changes what a **dispatch is**: with it on, every dispatched worker runs as a persistent, attachable `claude --bg` background session — in a git workspace, inside its own git worktree — instead of a one-shot run. You keep using `dispatch_task` / `dispatch_tasks` exactly as before, with the same results, timeouts, cancellation and quota-aware failover. There is no separate mesh workflow to learn.
 
-### How it works — gateway vs bridge
+What it buys you: you can attach a terminal to a running worker and watch it, the orchestrator can message it mid-task to steer it, and workers report progress and questions back while they work.
 
-Two pieces, and it helps to keep them separate:
+With Mesh Mode **off**, dispatch behaves exactly as in previous releases — one one-shot worker per task, on the unchanged code path.
 
-- **Gateway** — a small `claude -p` relay session the server spawns as its *own identity on the mesh*. The orchestrator can't message the mesh directly: a VS Code panel session registers without a messaging socket (upstream [#82313](https://github.com/anthropics/claude-code/issues/82313)), and the MCP server isn't a Claude session at all — so the gateway sends and receives on their behalf. It only relays messages, so it runs a cheap model (haiku by default).
-- **Bridge** — mirrors session discovery across accounts. Workers on the **same** account find each other natively; the bridge is only what lets you reach workers on **other** accounts.
+### Results come back as a branch to merge
 
-|  | Gateway | Bridge |
-|---|---|---|
-| **Why** | the orchestrator (panel/server) can't join the mesh directly | discovery is scoped per `CLAUDE_CONFIG_DIR` |
-| **Needed** | always, whenever Mesh Mode is on (single- or multi-account) | only for multi-account |
-| **Setting** | `meshMode` | `meshCrossAccountBridge` |
+This is the biggest visible change. In a git workspace, each dispatch gets its own worktree at `.claude/worktrees/cco-<taskId>`, checked out on branch `worktree-cco-<taskId>` (Claude Code's own `-w` worktree feature). The worker edits **there**, not in your shared checkout, and the dispatch result names the worktree and the branch. The orchestrator's standing instructions are to verify that worktree (diff, build, test), merge what passes, then remove the worktree and stop the worker — a dispatch is not integrated until its branch is merged.
 
-(If you instead run the orchestrator as a Claude session in a **terminal**, it *is* a full mesh participant and could message workers without a gateway — the gateway exists specifically for the panel/server entry point this extension uses.)
+Two cases have **no** worktree, and their results simply carry no worktree line, because the edits are already in your working tree:
 
-### Requirements
+- the workspace is not a git repository, and
+- the dispatch fell back to a one-shot worker (see *When the mesh can't start*).
 
-- Claude Code CLI 2.1.224 or newer (cross-session messaging ships default-on from this version)
-- macOS or Linux only — the mesh runs over unix domain sockets, so it does not work on Windows
-- Same machine as the orchestrator (mesh workers are spawned as `claude --bg` background processes, and mesh messaging does not cross machines)
+Unmerged work is never cleaned up out from under you: stopping a worker asks Claude Code to remove its worktree, and Claude Code removes it **only when it is clean**. A worktree holding uncommitted changes is kept, and `mesh_status` keeps listing it, marked as kept, so it can be found.
 
-### Enabling it
-
-Mesh Mode is off by default and layered as two independent opt-ins, both experimental:
-
-- `claudeCodeOrchestrator.meshMode` (default `off`) — the master switch. Turning it on starts the gateway relay session (below) and exposes the `mesh_*` MCP tools to the orchestrator.
-- `claudeCodeOrchestrator.meshCrossAccountBridge` (default `off`) — **experimental²**, see the caveat below. Only relevant once `meshMode` is on.
-- `claudeCodeOrchestrator.meshGatewayModel` (default `haiku`) — the model the gateway relay session runs as. The gateway performs only trivial message-relay turns, so the default is deliberately cheap.
-
-### The mesh_* tools
+### Talking to a running worker
 
 | Tool | Purpose |
 |---|---|
-| `mesh_status` | Report gateway health, cross-account bridge status, and every mesh worker (name, account, model, live registry status, attach command). Call this before other `mesh_*` tools. |
-| `mesh_spawn_workers` | Spawn one or more persistent `claude --bg` mesh workers in one call, each with a role slug and a complete standing brief. Quota-aware account placement mirrors dispatch's guards (logged-out, cooldown, exhausted, overage, frontier). |
-| `mesh_send` | Send a live message to a mesh worker (or any reachable peer session), addressed by worker name or by its `uds:...` reply address. Returns actual delivery state. |
-| `mesh_receive` | Long-poll the gateway inbox for messages from mesh workers. |
-| `mesh_stop_worker` | Stop a mesh worker (`claude stop <jobId>` under its account; `force: true` falls back to killing the process). |
+| `mesh_status` | The primary surface: relay health, unread live-feed messages and pending worker questions, how many workers are live against the cap, the idle auto-stop window, and per worker its dispatch task, account, model, alive/dead state, idle age, keep-alive mark, its worktree (marked when kept because it holds uncommitted work), and a copy-pasteable attach command. |
+| `mesh_send_worker` | Send a live message to one running worker of this workspace: a correction, a discovered constraint, an answer to its question, or an instruction to abandon a wrong path. |
+| `mesh_receive` | Long-poll the live feed of messages from this workspace's workers — progress notes and their `STATUS <id> QUESTION: …` questions, which are highlighted. Result wake-pings are consumed internally and never appear here. |
+| `mesh_stop_worker` | Stop one worker (`claude stop` under its own account, then `claude rm` to clear its background job and remove a clean worktree). |
+| `mesh_keep_worker` | Mark a worker keep-alive so the idle auto-stop leaves it alone — set before handing out an attach command. Session-end reaping still applies. |
 
-### Worker lifecycle
+The v1.4 tools are gone. `mesh_spawn_workers` no longer exists (dispatch spawns the workers), and neither does `mesh_send`, which could address arbitrary peer sessions. `mesh_receive` kept its name but not its meaning: it is the live feed of *this workspace's own dispatch workers*, not a general peer inbox. Worker-to-worker messaging is retired — `mesh_send_worker` refuses any name that is not a live worker of this workspace.
 
-A mesh worker moves through: **spawn** (`mesh_spawn_workers` starts a `claude --bg` background session with a standing brief — it stays alive holding its own context) → **message** (`mesh_send`/`mesh_receive` carry a live back-and-forth, distinct from a one-shot dispatch prompt) → **attach** (open the worker in an integrated terminal tab from the Worker Accounts view, or run the `attachCommand` from `mesh_status`, to watch and steer it directly — `Ctrl+Z` detaches without stopping it; or peek without attaching via `claude logs <jobId>`) → **stop** (`mesh_stop_worker`, or `claude stop` from the terminal).
+Messages are queued and land at the worker's next turn boundary, so steering never interrupts a tool call in progress. A steer may amend the task, and where it conflicts with the original task text the newer instruction wins — but it cannot widen a worker's file-ownership list, and worker-supplied message content is always treated as data rather than as instructions.
 
-### Cross-account bridge (experimental²)
+### Two channels: files carry results, messages carry steering
 
-> ⚠️ **Off by default — depends on an undocumented Claude Code file format.** The bridge mirrors live session-registry entries across every registered account's `CLAUDE_CONFIG_DIR` so mesh workers on other worker accounts (not just the main account) become reachable. This works only because of empirically observed, unpublished behavior of the Claude Code CLI (see `docs/session-messaging-spike.md`) — there is no public API for it. A future Claude Code release can change that format without notice; the bridge is built to auto-degrade rather than break dispatch when that happens, but keep it off unless you specifically need cross-account mesh workers.
+A worker's report travels in a **result file** that the dispatch server reads; the live message channel carries only short wake pings, progress notes and steering. The split is deliberate — if the relay dies you lose steering and progress notes, never results. A pending dispatch still settles from its result file, and `mesh_status` says as much ("ping/STATUS channel lost; results still collected via files"). Progress notes are best-effort by design: workers are instructed to send them, but nothing depends on their arrival.
+
+### Teardown — a live worker is a held resource
+
+A worker does **not** vanish when its dispatch returns; that is the point of attachability, and it means someone has to stop it. The orchestrator is instructed to stop each worker once its work is merged, and three backstops sit beneath it:
+
+- **Idle auto-stop** — `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin` (default `15`, `0` disables it). A live worker with no in-flight dispatch, no messages and no keep-alive mark is stopped after that many minutes. Attaching from the **Attachable workers** tree marks the worker keep-alive first, so a session you are sitting in is not reaped (if that mark cannot be written, a warning says so); `mesh_keep_worker` does the same from the orchestrator.
+- **Live-worker cap** — `claudeCodeOrchestrator.meshMaxLiveWorkers` (default `8`). Dispatches past the cap are **refused, not queued**: the task fails with a `worker_cap` error naming the limit, so a batch can never deadlock waiting for slots nobody frees. Stop finished workers before a large fan-out, or raise the number.
+- **Session end** — when the dispatch server shuts down it stops every worker it owns, keep-alive marks included, and the next activation sweeps for orphans left behind by a session that was killed, stopping any that are still alive.
+
+Stopping a worker also clears its background job, which is what removes a clean worktree — so a dispatch that hits its timeout can take up to about 30 seconds longer to report than the timeout itself (the stop and the job removal are each bounded at 15 seconds).
+
+### Enabling it
+
+Mesh Mode is off by default. All four settings are also in the Orchestrator Dashboard's Settings card, and a change takes effect for the next Claude Code session in that workspace.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `claudeCodeOrchestrator.meshMode` | `false` | Master switch: starts the relay session and routes every non-detached dispatch through an attachable worker |
+| `claudeCodeOrchestrator.meshGatewayModel` | `haiku` | Model for the relay session, which only performs tiny relay turns |
+| `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin` | `15` | Minutes an idle attachable worker may sit before being stopped; `0` disables |
+| `claudeCodeOrchestrator.meshMaxLiveWorkers` | `8` | Cap on live attachable workers; dispatches past it are refused, not queued |
+
+The `meshCrossAccountBridge` setting is gone. The cross-account mirroring it controlled still happens — it is what lets a worker under one account reach the relay under another — but it is now internal plumbing that starts with the mesh, not a feature to opt into. `mesh_status` reports it as one line.
+
+### When the mesh can't start
+
+If the mesh cannot initialize for any reason — an unsupported platform, another window already owning the mesh for this workspace, the relay failing to come up — the dispatch does **not** fail. It runs as an ordinary one-shot worker, and the result is prefixed with:
+
+```
+⚠ mesh unavailable — ran as a one-shot worker (not attachable): <reason>
+```
+
+`mesh_status` keeps reporting the initialization error, and there is no worktree for such a dispatch: its edits land directly in the working tree.
+
+### Requirements and honest limits
+
+- **Claude Code CLI 2.1.224 or newer** (cross-session messaging ships default-on from that version); the worktree behavior described here was verified against 2.1.227.
+- **macOS or Linux, same machine.** The mesh runs over unix domain sockets, so on Windows it never starts and every dispatch takes the one-shot fallback above.
+- **Attachable workers author files; they do not run your build.** They are spawned without the Bash tool (Claude Code may still auto-approve obviously-safe read-only commands, so treat them as file authors rather than as sandboxed), and the workspace's MCP servers are disabled for them, so a worker cannot dispatch further workers. Builds, tests and shell work stay with the orchestrator.
+- **`detach: true` still means one-shot.** A detached task is meant to outlive the session and the relay is not, so detached dispatches keep the previous supervisor path even with Mesh Mode on.
+- **The relay costs a little.** While Mesh Mode is on, the server keeps one small `claude -p` relay session alive on your main account (`meshGatewayModel`, `haiku` by default). It only relays short messages, but it is not free.
+- **No per-task token or cost numbers.** The CLI does not report usage for `--bg` sessions, so attachable dispatches record 0 tokens and 0 cost in this extension's own counters and charts, and the task output says `tokens n/a`. Each account's live plan usage is unaffected — that is read from the account itself.
+- **Leftover worktrees are possible.** If a session ends before the removal runs, clean `cco-…` worktrees can accumulate under `.claude/worktrees/`; they are safe to remove with `git worktree remove`. Immediately after a worker finishes, a genuinely clean worktree is occasionally reported as *kept* — nothing is lost, and removing it a few seconds later succeeds.
+- **A retry after a failed attempt reuses the same task worktree**, so one branch can carry the edits of both attempts. Verify the whole diff before merging.
+- **It rides Claude Code internals that have no public API** (the session registry and the background-job commands). If they move, mesh initialization fails and dispatch falls back to one-shot workers; a change landing mid-dispatch surfaces as a timeout or a dead-worker error, not as a wrong result.
 
 ### Known upstream limitations
 
-- **The IDE panel session cannot join the mesh directly** — it registers without a messaging socket, so it can receive nothing and its own sends silently fail to deliver. This is why Mesh Mode hosts its own background relay ("gateway") session as the orchestrator's mesh identity instead. Tracked upstream: [anthropics/claude-code#82313](https://github.com/anthropics/claude-code/issues/82313).
-- **The VS Code extension ignores `CLAUDE_CONFIG_DIR` overrides** and always resolves to `~/.claude` — a factor in why the cross-account bridge above exists and why it works by mirroring files rather than by having the extension host see other accounts directly. Tracked upstream: [anthropics/claude-code#30538](https://github.com/anthropics/claude-code/issues/30538).
+- **The IDE panel session cannot join the mesh directly** — it registers without a messaging socket, so it can receive nothing and its own sends silently fail to deliver. That is why Mesh Mode hosts its own background relay session as the orchestrator's mesh identity. Tracked upstream: [anthropics/claude-code#82313](https://github.com/anthropics/claude-code/issues/82313).
+- **The VS Code extension ignores `CLAUDE_CONFIG_DIR` overrides** and always resolves to `~/.claude` — part of why cross-account reachability works by mirroring registry files rather than by having the extension host see other accounts directly. Tracked upstream: [anthropics/claude-code#30538](https://github.com/anthropics/claude-code/issues/30538).
 
-See [docs/session-messaging-spike.md](docs/session-messaging-spike.md) for the full verification evidence (probes P1–P11) behind every claim in this section.
+See [docs/session-messaging-spike.md](docs/session-messaging-spike.md) for the messaging-mechanics probes (P1–P11) this is built on; its tool surface predates this rework.
 
 ## Views and dashboard
 
@@ -185,7 +215,7 @@ See [docs/session-messaging-spike.md](docs/session-messaging-spike.md) for the f
 - **Orchestrator Dashboard** (editor tab) — stat tiles (running, 7-day tasks, success rate, tokens, cost), a live usage panel (a bar per plan window with %, severity color, reset countdown, and "updated N min ago" freshness), a 14-day task chart, per-worker token distribution, workers/tasks tables, and a settings panel with quick actions. Auto-refreshes every 2 s, theme-aware. Running rows get a Cancel button, and canceling all running dispatches is available as a quick action.
 - **Open Interactive Worker Session** — run a worker visibly in an integrated terminal (optionally with an initial task) when you want to watch and steer.
 
-Stopping a dispatch actually stops it: pressing Stop cancels the MCP request and terminates its worker's whole process tree (a `dispatch_tasks` batch is one request, so cancelling it stops every task in the batch). Ending the orchestrator session — closing the panel, reloading, quitting, or killing the process — terminates every worker it spawned rather than leaving them to run out the `workerTimeoutMinutes` clock. It only ever signals a process ID it has confirmed is still its own worker (never one the OS recycled), a cancellation is never counted as a worker error or a quota cooldown, and any task left marked running with a dead worker is reclaimed as orphaned on the next activation.
+Stopping a dispatch actually stops it: pressing Stop cancels the MCP request and terminates its worker's whole process tree (a `dispatch_tasks` batch is one request, so cancelling it stops every task in the batch). With Mesh Mode on, cancelling stops the worker's background session instead of signaling a process tree; whatever it had already written stays on disk. Ending the orchestrator session — closing the panel, reloading, quitting, or killing the process — terminates every worker it spawned rather than leaving them to run out the `workerTimeoutMinutes` clock. It only ever signals a process ID it has confirmed is still its own worker (never one the OS recycled), a cancellation is never counted as a worker error or a quota cooldown, and any task left marked running with a dead worker is reclaimed as orphaned on the next activation.
 
 ## Asset packs and Asset Manager
 
@@ -246,6 +276,8 @@ Run **Sync Assets** any time to pull in pack updates. `claudeCodeOrchestrator.as
 | `claudeCodeOrchestrator.assetPacks` | `[]` | Additional asset pack directories (beyond the bundled pack) to load assets from |
 | `claudeCodeOrchestrator.assetAutoSync` | `true` | Silently sync enabled assets on activation and notify only when something changed |
 
+Mesh Mode adds four more settings (`meshMode`, `meshGatewayModel`, `meshWorkerIdleTimeoutMin`, `meshMaxLiveWorkers`) — see [Mesh Mode](#mesh-mode--attachable-dispatch-experimental).
+
 ## Data and privacy
 
 Everything stays on your machine. The extension and server share state under `~/.claude-code-orchestrator/`: the worker registry (names, config-dir paths, default models — **no tokens, no credentials**), per-worker usage stats, the task log, and task outputs as markdown. Nothing is sent anywhere except the Claude Code CLI calls you dispatch. Uninstalling the extension leaves that directory; delete it to remove all traces.
@@ -259,7 +291,7 @@ Everything stays on your machine. The extension and server share state under `~/
 
 ## Limitations and notes
 
-- Workers edit files in the **same workspace** concurrently. Give overlapping tasks disjoint file-ownership lists in their prompts (per-task worktree isolation is on the roadmap).
+- Workers edit files in the **same workspace** concurrently. Give overlapping tasks disjoint file-ownership lists in their prompts. (With [Mesh Mode](#mesh-mode--attachable-dispatch-experimental) on in a git workspace, each dispatch is isolated in its own worktree instead, and you merge the branches.)
 - Your main account is untouched — the panel keeps using the default `~/.claude` login.
 - Using multiple Claude accounts is subject to Anthropic's Terms of Service and usage policies. **You are responsible for making sure your account setup and usage comply.** Dispatched work consumes each worker account's own quota or metered billing.
 

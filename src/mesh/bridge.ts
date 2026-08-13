@@ -28,6 +28,13 @@ import { isPidAlive } from '../registry';
  * matter how stale it looks (contract prune rule, premortem #4). The marker is what
  * lets a crash-litter sweep run without risking a real session's discovery entry.
  *
+ * BEHAVIOR IS UNCHANGED by the attachable-dispatch rework; only its gating moved. The
+ * `meshCrossAccountBridge` registry setting that used to double-opt-in to this daemon is
+ * gone, so the bridge is now plain plumbing the server owns: attachable dispatch does not
+ * depend on cross-account discovery (results ride files and the workspace's own gateway),
+ * and this mirror only widens who can SEE whom. Everything below — the ccoMirror-only
+ * deletion invariant above all — still holds exactly as written.
+ *
  * Implements the frozen IBridge contract. vscode-free, node18 stdlib only; imports
  * restricted to ./contract, ../registry and node builtins.
  */

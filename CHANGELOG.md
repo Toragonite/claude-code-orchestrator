@@ -4,6 +4,123 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-08-13
+
+Mesh Mode (experimental) is reworked into **attachable, worktree-isolated dispatch**. With Mesh Mode **off**, this release is byte-identical to 1.4.2.
+
+### Changed
+- **Mesh Mode is now attachable dispatch — the separate mesh workflow is gone.**
+  With Mesh Mode on, `dispatch_task` / `dispatch_tasks` spawn persistent,
+  attachable `claude --bg` sessions instead of one-shot workers, and that is the
+  whole feature: same tools, same results, same timeouts, same cancellation, same
+  quota-aware failover. There is nothing new to call and no second work path. You
+  can attach a terminal to a running worker, and the orchestrator can message it
+  mid-task while it reports progress back. **With Mesh Mode off, dispatch is
+  exactly what it was before** — one one-shot worker per task, on the unchanged
+  code path.
+- **Every mesh dispatch now runs in its own git worktree, so results come back as
+  a branch to merge.** In a git workspace a worker edits inside
+  `.claude/worktrees/cco-<taskId>` on branch `worktree-cco-<taskId>` instead of
+  the shared checkout, and the dispatch result, the task output file and
+  `mesh_status` all name that worktree and branch. The orchestrator's doctrine is
+  to verify the worktree, merge what passes, then remove it and stop the worker.
+  There is no worktree in two cases, and the result then carries no worktree line:
+  a workspace that is not a git repository, and a dispatch that fell back to a
+  one-shot worker. This is the biggest behavioral change in the release: a
+  dispatch is not integrated until its branch is merged.
+- **Worker teardown became the orchestrator's explicit job, with backstops.** A
+  worker no longer disappears when its dispatch returns. Idle auto-stop, a
+  live-worker cap and session-end reaping sit beneath the orchestrator's own
+  stop discipline; a worktree holding uncommitted changes is always kept, never
+  removed for you, and stays listed in `mesh_status`.
+- **The dashboard's Mesh card** now carries the idle auto-stop and max-live-worker
+  numbers and describes attachable dispatch; the Worker Accounts tree group is
+  named **Attachable workers**, its rows show each worker's dispatch task and
+  keep-alive mark, and attaching from the tree marks the worker keep-alive first
+  so the idle sweep cannot stop a session you are sitting in.
+
+### Added
+- **`mesh_send_worker`** — send live mid-task guidance, a correction, or an answer
+  to one running worker of this workspace. Delivery is queued and lands at the
+  worker's next turn boundary, so it never interrupts a tool call. A steer may
+  amend the task (the newer instruction wins) but cannot widen the worker's
+  file-ownership list.
+- **`mesh_keep_worker`** — mark a worker keep-alive so idle auto-stop leaves it
+  alone. Session-end reaping still applies.
+- **`claudeCodeOrchestrator.meshWorkerIdleTimeoutMin`** (default `15`, `0`
+  disables) — minutes an idle attachable worker may sit before it is stopped.
+- **`claudeCodeOrchestrator.meshMaxLiveWorkers`** (default `8`) — cap on live
+  attachable workers. Dispatches past the cap are **refused, not queued**: the
+  task fails with a `worker_cap` error naming the limit, so a batch cannot
+  deadlock waiting for slots nobody frees.
+- **Result files as the channel of record.** A worker's report travels in a file
+  the dispatch server reads; the live message channel carries only short wake
+  pings, progress notes and steering. A dead relay costs you live steering and
+  progress notes, never results — a pending dispatch still settles from its file,
+  and `mesh_status` says so.
+
+### Removed
+- **`mesh_spawn_workers` and `mesh_send`.** Dispatch spawns the workers now, and
+  messaging is scoped to this workspace's own workers — `mesh_send_worker`
+  refuses any other address, which is what keeps worker-to-worker messaging
+  retired. `mesh_receive` kept its name but is now the live feed of this
+  workspace's dispatch workers rather than a general peer inbox.
+- **The `claudeCodeOrchestrator.meshCrossAccountBridge` setting.** Cross-account
+  registry mirroring still runs — it is what lets a worker under one account
+  reach the relay under another — but it is internal plumbing that starts with
+  the mesh, not a user-facing opt-in. Old settings files carrying the key are
+  harmless; nothing reads it.
+
+### Fixed
+- Concurrent ledger writes from the extension host and the dispatch server no
+  longer lose each other's updates (a keep-alive mark could be clobbered by a
+  simultaneous activity write); every writer now goes through one exclusive lock.
+- Each dispatch's task and result files live in their own directory, granted to
+  that worker alone and carrying a per-task token, so one worker cannot settle
+  another's dispatch even with a well-formed result file.
+- Cancelling a running mesh dispatch from the tree no longer inflates the
+  worker's error count or writes a second terminal event, and it now records the
+  worker as stopped so the idle sweep stops retrying it.
+- An oversize (> 256 KB) result file now fails its dispatch immediately, naming
+  the size and path, instead of being ignored until the task times out.
+- A worker that drops its turn without reporting is nudged by the system after
+  about three minutes of silence (sooner on short timeouts) and resumes; if the
+  account's plan window is actually exhausted, the attempt fails fast and fails
+  over to another account, as a one-shot dispatch does.
+
+### Notes and known rough edges
+- **Attachable workers author files; they do not run your build.** They are
+  spawned without the Bash tool (Claude Code may still auto-approve obviously-safe
+  read-only commands, so treat them as file authors rather than as sandboxed), and
+  the workspace's MCP servers are disabled for them, so a worker cannot dispatch
+  further workers.
+- **`detach: true` tasks still run as one-shot workers**, even with Mesh Mode on:
+  a detached task is meant to outlive the session and the relay is not.
+- **Costs and counters.** While Mesh Mode is on, one small `claude -p` relay
+  session runs on your main account (`meshGatewayModel`, `haiku` by default). The
+  CLI reports no usage for `--bg` sessions, so attachable dispatches record 0
+  tokens and 0 cost in this extension's own counters and charts (task output says
+  `tokens n/a`); each account's live plan usage is unaffected.
+- **Progress notes are best-effort.** Their end-to-end fidelity was not measured
+  under load — the file channel is what dispatch correctness rests on. In the
+  runs that were observed, progress and question lines arrived byte-exact.
+- **Leftover worktrees.** If a session ends before the removal runs, clean
+  `cco-…` worktrees can accumulate under `.claude/worktrees/`; remove them with
+  `git worktree remove`. Immediately after a worker finishes, a genuinely clean
+  worktree is occasionally reported as *kept* — nothing is lost, and removing it
+  a few seconds later succeeds. Stopping a worker also clears its background job,
+  so a dispatch that times out can take up to about 15 seconds longer to report.
+- **A retry after a failed attempt reuses the same task worktree**, so its branch
+  can carry both attempts' edits — verify the whole diff before merging.
+- **A worker's own error report is not classified as a quota error**, so an error
+  report mentioning rate limits does not trigger a cooldown or a failover; it is
+  surfaced to the orchestrator as written. Genuine mid-run exhaustion is caught by
+  the silence check above, which reads the account's real plan usage.
+- Mesh Mode remains experimental and rides Claude Code internals that have no
+  public API. It is verified against Claude Code 2.1.226–2.1.227 on macOS and
+  Linux; if those internals move, mesh initialization fails and dispatch falls
+  back to one-shot workers rather than breaking.
+
 ## [1.4.2] — 2026-08-10
 
 ### Fixed
