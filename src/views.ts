@@ -75,6 +75,14 @@ interface MeshWorkerRow {
    * ledger record to address.
    */
   cwd?: string;
+  /** Epoch ms the worker was spawned (ledger record) — feeds the "Started" detail row. */
+  spawnedAt?: number;
+  /** Epoch ms of the worker's last activity (ledger record) — feeds the "Idle" detail row. */
+  lastActivityAt?: number;
+  /** Workspace-relative git worktree the worker edits in, when one was created (ledger record). */
+  worktree?: string;
+  /** Branch the worktree is checked out on, absent with it (ledger record). */
+  branch?: string;
   alive: boolean;
   /** Live status from the session registry, when the worker has a live entry. */
   status?: string;
@@ -667,7 +675,7 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
       return item;
     }
     if (isMeshWorker(node)) {
-      const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
+      const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `mesh:${node.name}`;
       const statusText = node.alive
         ? node.status ?? vscode.l10n.t('alive')
@@ -754,22 +762,30 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     if (isMeshGroup(node)) {
       return this.meshWorkerRows();
     }
-    if (isStatRow(node) || isMeshWorker(node)) {
+    if (isMeshWorker(node)) {
+      return this.meshWorkerStatRows(node);
+    }
+    if (isStatRow(node)) {
       return [];
     }
     return this.statRows(node);
   }
 
   /**
-   * Rows under the mesh group: the union of state-file records and live session
-   * entries across every known account. Records seed the list; a live session
-   * entry (matched by name) wins for liveness/status and fills a missing job id.
-   * Live-only workers (adopted, or from a since-crashed server) still appear,
-   * attributed to the account whose sessions/ dir held them.
+   * Rows under the "Attachable workers" group: LIVE mesh workers only. A ledger
+   * record is included only while it has no `stoppedAt` (a stopped worker is history,
+   * not something to attach to); live session entries across every known account are
+   * unioned in on top. Records seed the list; a live session entry (matched by name)
+   * wins for liveness/status and fills a missing job id. Live-only workers (adopted,
+   * or from a since-crashed server) still appear, attributed to the account whose
+   * sessions/ dir held them.
    */
   private meshWorkerRows(): MeshWorkerRow[] {
     const byName = new Map<string, MeshWorkerRow>();
     for (const rec of readAllMeshWorkerRecords()) {
+      if (rec.stoppedAt !== undefined) {
+        continue; // stopped worker — belongs in Worker history, not the attach list
+      }
       byName.set(rec.name, {
         kind: 'meshWorker',
         name: rec.name,
@@ -781,6 +797,10 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
         taskId: typeof rec.taskId === 'string' ? rec.taskId : undefined,
         keepAlive: rec.keepAlive === true,
         cwd: rec.stateCwd,
+        spawnedAt: typeof rec.spawnedAt === 'number' ? rec.spawnedAt : undefined,
+        lastActivityAt: typeof rec.lastActivityAt === 'number' ? rec.lastActivityAt : undefined,
+        worktree: typeof rec.worktree === 'string' ? rec.worktree : undefined,
+        branch: typeof rec.branch === 'string' ? rec.branch : undefined,
         alive: typeof rec.pid === 'number' ? isPidAlive(rec.pid) : false,
       });
     }
@@ -829,6 +849,52 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
     }
 
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * Read-only detail rows for one expanded attachable worker. Same node kind and shape
+   * the account-worker rows use (`stat`, command left undefined so the row is not
+   * clickable). Everything is computed at render from the row's fields — no timer — so
+   * the Idle row's "idle since" clock is the last-activity wall time, not a live counter.
+   */
+  private meshWorkerStatRows(node: MeshWorkerRow): WorkerStatRow[] {
+    const rows: WorkerStatRow[] = [];
+    const push = (label: string, description: string, icon: string): void => {
+      rows.push({ kind: 'stat', worker: node.name, label, description, icon });
+    };
+    const clock = (ms: number): string => new Date(ms).toLocaleTimeString();
+
+    const project =
+      node.worktree !== undefined
+        ? `worktree ${node.worktree}${node.branch ? ` (branch ${node.branch})` : ''}`
+        : node.cwd;
+    if (project) {
+      push(vscode.l10n.t('Project'), project, 'folder');
+    }
+    if (node.taskId) {
+      push(vscode.l10n.t('Task'), node.taskId, 'checklist');
+    }
+    if (node.spawnedAt !== undefined) {
+      push(vscode.l10n.t('Started'), clock(node.spawnedAt), 'clock');
+    }
+    if (node.lastActivityAt !== undefined) {
+      // Idle auto-stop window is a workspace setting (0 = the sweep is disabled).
+      const idleTimeout = vscode.workspace
+        .getConfiguration('claudeCodeOrchestrator')
+        .get<number>('meshWorkerIdleTimeoutMin', 15);
+      const autoStop = idleTimeout > 0 ? ` · auto-stop ${idleTimeout}m` : '';
+      push(vscode.l10n.t('Idle'), `idle since ${clock(node.lastActivityAt)}${autoStop}`, 'history');
+    }
+    const identity = [node.account, node.model, node.role].filter((part) => Boolean(part)).join(' · ');
+    if (identity) {
+      push(vscode.l10n.t('Account/Model/Role'), identity, 'account');
+    }
+    push(
+      vscode.l10n.t('Attach'),
+      `CLAUDE_CONFIG_DIR=${node.configDir} claude attach ${node.jobId ?? '—'}`,
+      'terminal',
+    );
+    return rows;
   }
 
   private statRows(worker: WorkerProfile): WorkerStatRow[] {
@@ -1055,6 +1121,47 @@ export class WorkersProvider implements vscode.TreeDataProvider<WorkerNode>, vsc
   }
 }
 
+/** How a dispatch was carried out, which drives the task row's icon color. */
+type DispatchMode = 'mesh' | 'detached' | 'oneshot';
+
+/**
+ * Classify a task event by dispatch mode. A mesh (attachable `claude --bg`) dispatch is
+ * the only one that records a worker NAME on its events (`meshWorker`), and a detached
+ * (supervised) dispatch is the only one that records a supervisor pid or a process-group
+ * id; everything else is a one-shot `claude -p`. The workspace-global mesh toggle is NOT
+ * consulted here on purpose: it would collapse every row to "mesh" whenever the toggle is
+ * on and erase the detached / one-shot distinction this coloring exists to show, so the
+ * per-event `meshWorker` field — present exactly when a dispatch ran attachable — is the
+ * discriminator.
+ */
+function dispatchMode(event: TaskEvent): DispatchMode {
+  if (typeof event.meshWorker === 'string' && event.meshWorker !== '') {
+    return 'mesh';
+  }
+  if (typeof event.supervisorPid === 'number' || typeof event.pgid === 'number') {
+    return 'detached';
+  }
+  return 'oneshot';
+}
+
+/**
+ * The fullest prompt text available for a task: the complete dispatched prompt from the
+ * event's `promptFile` (the absolute path a dispatch worker's task file lives at) when it
+ * is present and readable, else the ~300-char `promptPreview` the event always carries.
+ * The file read is best-effort — a missing or unreadable file falls back to the preview.
+ */
+function fullPrompt(event: TaskEvent): string {
+  const file = event.promptFile;
+  if (typeof file === 'string' && file !== '') {
+    try {
+      return fs.readFileSync(file, 'utf8');
+    } catch {
+      // fall through to the always-present inline preview
+    }
+  }
+  return typeof event.promptPreview === 'string' ? event.promptPreview : '';
+}
+
 /**
  * Tails the shared tasks.jsonl, which the MCP dispatch server appends to as
  * the main session fans tasks out. Scoped to the current workspace by
@@ -1101,28 +1208,68 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
         : 'error';
 
     item.description = `${event.worker} · ${event.model} · ${errKind ?? event.status}`;
-    // Prompt and error text are untrusted (account-derived): build the tooltip
-    // with appendText, which escapes markdown metacharacters. Undefined when
-    // there is nothing to show, as before.
-    const preview = typeof event.promptPreview === 'string' ? event.promptPreview : '';
-    if (preview || event.error) {
-      const tip = new vscode.MarkdownString();
-      if (preview) {
-        tip.appendMarkdown('**Prompt** ');
-        tip.appendText(preview);
+
+    const mode = dispatchMode(event);
+    // Full-metadata hover. Prompt and error text are untrusted (account-derived) and go
+    // through appendText, which escapes markdown metacharacters; the config-derived
+    // metadata values (model, account, cwd, worktree) do too, out of the same caution.
+    const tip = new vscode.MarkdownString();
+    if (mode === 'mesh') {
+      tip.appendMarkdown('**Mesh — attachable claude --bg');
+      if (typeof event.meshWorker === 'string' && event.meshWorker !== '') {
+        tip.appendMarkdown(' (worker ');
+        tip.appendText(event.meshWorker);
+        tip.appendMarkdown(')');
       }
-      if (event.error) {
-        if (preview) {
-          tip.appendMarkdown('\n\n');
-        }
-        tip.appendMarkdown('**Error**\n\n');
-        tip.appendText(event.error);
-      }
-      item.tooltip = tip;
+      tip.appendMarkdown('**');
+    } else if (mode === 'detached') {
+      tip.appendMarkdown('**Detached (supervised)**');
     } else {
-      item.tooltip = undefined;
+      tip.appendMarkdown('**One-shot (claude -p)**');
     }
-    item.iconPath = new vscode.ThemeIcon(
+    tip.appendMarkdown('\n\n');
+    tip.appendText(`Task ${event.id}`);
+    tip.appendMarkdown('\n\n');
+    tip.appendText(`Model ${event.model} · Account ${event.worker}`);
+    if (typeof event.cwd === 'string' && event.cwd) {
+      tip.appendMarkdown('\n\n');
+      tip.appendText(`cwd ${event.cwd}`);
+      // A mesh worker's worktree/branch live in the ledger record, keyed by worker name.
+      const rec =
+        mode === 'mesh' && typeof event.meshWorker === 'string'
+          ? findMeshWorkerRecord(event.meshWorker)
+          : undefined;
+      if (rec && typeof rec.worktree === 'string') {
+        tip.appendText(
+          rec.branch
+            ? ` · worktree ${rec.worktree} (branch ${rec.branch})`
+            : ` · worktree ${rec.worktree}`,
+        );
+      }
+    }
+    tip.appendMarkdown('\n\n');
+    if (event.status === 'running') {
+      const runningMin = Math.max(0, Math.round((Date.now() - event.ts) / 60_000));
+      tip.appendText(`Started ${new Date(event.ts).toLocaleTimeString()} · running ${runningMin}m`);
+    } else {
+      tip.appendText(`Ended ${new Date(event.ts).toLocaleTimeString()}`);
+    }
+    tip.appendMarkdown('\n\n');
+    tip.appendText(`Status: ${errKind ?? event.status}`);
+    const promptText = fullPrompt(event);
+    if (promptText) {
+      tip.appendMarkdown('\n\n**Prompt** ');
+      tip.appendText(promptText);
+    }
+    if (event.error) {
+      tip.appendMarkdown('\n\n**Error**\n\n');
+      tip.appendText(event.error);
+    }
+    item.tooltip = tip;
+
+    // Keep the status-shaped icon; add a dispatch-mode color (mesh = blue, detached =
+    // purple, one-shot = default/no color) so the row's mode reads at a glance.
+    const shape =
       event.status === 'running'
         ? 'sync~spin'
         : event.status === 'done'
@@ -1131,8 +1278,14 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskEvent>, vscode
         ? 'circle-slash'
         : errKind === 'orphaned'
         ? 'debug-disconnect'
-        : 'error',
-    );
+        : 'error';
+    const color =
+      mode === 'mesh'
+        ? new vscode.ThemeColor('charts.blue')
+        : mode === 'detached'
+        ? new vscode.ThemeColor('charts.purple')
+        : undefined;
+    item.iconPath = new vscode.ThemeIcon(shape, color);
     item.command = {
       command: 'claudeCodeOrchestrator.showTaskOutput',
       title: vscode.l10n.t('Show Task Output'),

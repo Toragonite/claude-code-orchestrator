@@ -4,6 +4,27 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] — 2026-08-18
+
+Mesh Mode gains a **Worker History** view, a configurable retention cap, and a **Clear stopped workers** command, and every mesh worker's full prompt is now persisted so a finished worker's task stays readable. The dispatch path is unchanged: with Mesh Mode **off**, dispatch behaves exactly as in 1.5.0 — `src/mcp/task-runner.ts` is untouched. What changed is the extension UI, the retention logic, and one additive persistence write on the mesh path.
+
+### Added
+- **Worker History view.** A new tree lists finished (`done`/`error`) mesh dispatches for the workspace, newest first; each row opens the task's output, and its hover carries the full prompt, model, account, branch and completion time. A worker that kept its worktree (uncommitted work) is flagged so the unmerged branch is never silently lost.
+- **`claudeCodeOrchestrator.meshHistoryLimit`** (default `50`, min `1`, max `1000`, editable in the dashboard) — how many stopped workers the history retains before the oldest are dropped. Enforced both in the view and by the reaper's cap-prune on the ledger.
+- **Clear stopped workers** command, inline on the Attachable workers group — drops the retained stopped-worker records for the workspace (never a live, keep-alive, or worktree-owning record).
+- **Full-prompt persistence.** Each mesh dispatch writes its complete task prompt to `tasks/<id>.prompt.txt` (best-effort, capped at 64 KiB), so a surface can show the whole task instead of only the 300-character preview even after the worker is gone.
+
+### Changed
+- **The Attachable workers tree now lists only LIVE workers**, and each row expands to read-only detail: project/worktree, dispatch task, started time, idle-since, account/model/role, and a copy-paste attach command. Stopped workers move to the new Worker History view.
+- **Dispatched task rows are colored by dispatch mode** — mesh (blue), detached (purple), one-shot `claude -p` (no color) — with a full-metadata hover. The status-shaped icon (and its spinner) is unchanged; only its color and tooltip are new. This is a UI change for all tasks, including on the mesh-off path; dispatch execution is unchanged.
+
+### Fixed
+- **A kept worktree is never pruned or cleared even when its recorded path is empty, absolute, or escaping.** History retention now requires a real relative worktree path under the workspace before treating a record as still owning a worktree, closing an edge where such a record became permanently un-removable and the Clear command appeared to do nothing.
+- **The history view and the reaper's cap-prune read the retention limit from a single sanitized source**, so a non-integer setting can no longer make the view show a different count than the ledger retains; the limit is bounded to `[1, 1000]` everywhere.
+
+### Notes
+- Mesh Mode stays experimental. With it off, dispatch is byte-identical to 1.5.0 on the `claude -p` code path.
+
 ## [1.5.0] — 2026-08-13
 
 Mesh Mode (experimental) is reworked into **attachable, worktree-isolated dispatch**. With Mesh Mode **off**, this release is byte-identical to 1.4.2.

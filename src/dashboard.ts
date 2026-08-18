@@ -175,6 +175,7 @@ const SETTING_KEYS = [
   'meshGatewayModel',
   'meshWorkerIdleTimeoutMin',
   'meshMaxLiveWorkers',
+  'meshHistoryLimit',
 ] as const;
 const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks', 'openAssetManager'] as const;
 
@@ -288,6 +289,7 @@ export function openDashboard(): void {
         meshGatewayModel: cfg.get('meshGatewayModel', 'haiku'),
         meshWorkerIdleTimeoutMin: cfg.get('meshWorkerIdleTimeoutMin', 15),
         meshMaxLiveWorkers: cfg.get('meshMaxLiveWorkers', 8),
+        meshHistoryLimit: cfg.get('meshHistoryLimit', 50),
       },
     });
   };
@@ -383,6 +385,7 @@ export interface DashboardStrings {
   meshGatewayModelLabel: string;
   meshIdleLabel: string;
   meshMaxLiveLabel: string;
+  meshHistoryLabel: string;
   meshNote: string;
   btnInstallMcp: string;
   btnAddPolicy: string;
@@ -460,6 +463,7 @@ export function dashboardStrings(): DashboardStrings {
     meshGatewayModelLabel: vscode.l10n.t('gateway model'),
     meshIdleLabel: vscode.l10n.t('idle auto-stop (minutes, 0 = off)'),
     meshMaxLiveLabel: vscode.l10n.t('max live attachable workers'),
+    meshHistoryLabel: vscode.l10n.t('worker history limit'),
     meshNote: vscode.l10n.t('With Mesh Mode on, every dispatched worker runs as a persistent `claude --bg` session you can attach to in a terminal instead of a one-shot; dispatch tools, results, timeouts, cancellation and failover are unchanged, and detached tasks stay one-shot. Teardown backstops: orphan reaping on session end, idle auto-stop, and the live-worker cap (dispatches past it are refused, not queued). Requires Claude Code ≥ 2.1.224 on macOS/Linux. Off by default; toggling here takes effect on the next Claude session in this workspace.'),
     btnInstallMcp: vscode.l10n.t('Register MCP here'),
     btnAddPolicy: vscode.l10n.t('Add policy to CLAUDE.md'),
@@ -664,6 +668,8 @@ export function dashboardHtml(s: DashboardStrings): string {
       <input id="s-mesh-idle" type="number" min="0" max="1440">
       <label for="s-mesh-cap">${escHtml(s.meshMaxLiveLabel)}</label>
       <input id="s-mesh-cap" type="number" min="1" max="64">
+      <label for="s-mesh-history">${escHtml(s.meshHistoryLabel)}</label>
+      <input id="s-mesh-history" type="number" min="1" max="1000">
       <div class="muted" style="font-size:0.8em;margin-top:4px">${escHtml(s.meshNote)}</div>
       <div class="actions">
         <button data-cmd="installMcp">${escHtml(s.btnInstallMcp)}</button>
@@ -738,6 +744,7 @@ export function dashboardHtml(s: DashboardStrings): string {
   };
   bindSetting('s-mesh-idle', 'meshWorkerIdleTimeoutMin', (v) => clampNumber(v, 0, 1440, 15), 'input', 700);
   bindSetting('s-mesh-cap', 'meshMaxLiveWorkers', (v) => clampNumber(v, 1, 64, 8), 'input', 700);
+  bindSetting('s-mesh-history', 'meshHistoryLimit', (v) => clampNumber(v, 1, 1000, 50), 'input', 700);
   for (const b of document.querySelectorAll('button[data-cmd]')) {
     b.addEventListener('click', () => vscode.postMessage({ type: 'runCommand', id: b.dataset.cmd }));
   }
@@ -974,6 +981,7 @@ export function dashboardHtml(s: DashboardStrings): string {
     if (editing !== 's-mesh-model') document.getElementById('s-mesh-model').value = data.settings.meshGatewayModel;
     if (editing !== 's-mesh-idle') document.getElementById('s-mesh-idle').value = data.settings.meshWorkerIdleTimeoutMin;
     if (editing !== 's-mesh-cap') document.getElementById('s-mesh-cap').value = data.settings.meshMaxLiveWorkers;
+    if (editing !== 's-mesh-history') document.getElementById('s-mesh-history').value = data.settings.meshHistoryLimit;
   }
 </script>
 </body>

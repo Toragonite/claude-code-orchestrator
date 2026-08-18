@@ -168,7 +168,7 @@ v1.4의 도구들은 사라졌습니다. `mesh_spawn_workers`는 더 이상 없�
 
 ### 활성화 방법
 
-메시 모드는 기본적으로 꺼져 있습니다. 아래 네 설정은 오케스트레이터 대시보드의 Settings 카드에도 있으며, 변경은 해당 워크스페이스의 다음 Claude Code 세션부터 적용됩니다.
+메시 모드는 기본적으로 꺼져 있습니다. 아래 다섯 설정은 오케스트레이터 대시보드의 Settings 카드에도 있으며, 변경은 해당 워크스페이스의 다음 Claude Code 세션부터 적용됩니다.
 
 | 설정 | 기본값 | 효과 |
 |---|---|---|
@@ -176,6 +176,7 @@ v1.4의 도구들은 사라졌습니다. `mesh_spawn_workers`는 더 이상 없�
 | `claudeCodeOrchestrator.meshGatewayModel` | `haiku` | 릴레이 세션의 모델. 아주 작은 중계 턴만 수행합니다 |
 | `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin` | `15` | 유휴 상태의 attach 가능 워커를 중지하기까지의 분. `0`이면 비활성화 |
 | `claudeCodeOrchestrator.meshMaxLiveWorkers` | `8` | 동시에 살아 있을 수 있는 attach 가능 워커 수. 초과 디스패치는 큐잉이 아니라 거부 |
+| `claudeCodeOrchestrator.meshHistoryLimit` | `50` | Worker History 뷰가 유지하는 중지된 워커 기록 수. 초과 시 오래된 것부터 삭제 (최소 `1`, 최대 `1000`) |
 
 `meshCrossAccountBridge` 설정은 사라졌습니다. 그 설정이 제어하던 계정 간 미러링은 여전히 동작하며(한 계정의 워커가 다른 계정의 릴레이에 도달하게 해주는 장치입니다), 이제는 사용자가 켜고 끄는 기능이 아니라 메시와 함께 시작되는 내부 배관입니다. `mesh_status`는 이를 한 줄로 보고합니다.
 
@@ -276,7 +277,7 @@ v1.4의 도구들은 사라졌습니다. `mesh_spawn_workers`는 더 이상 없�
 | `claudeCodeOrchestrator.assetPacks` | `[]` | 번들 팩 외에 에셋을 불러올 추가 에셋 팩 디렉토리 |
 | `claudeCodeOrchestrator.assetAutoSync` | `true` | 활성화 시 활성화된 에셋을 조용히 동기화하고, 실제로 변경된 경우에만 알림 표시 |
 
-메시 모드는 네 개의 설정(`meshMode`, `meshGatewayModel`, `meshWorkerIdleTimeoutMin`, `meshMaxLiveWorkers`)을 추가합니다 — [메시 모드](#메시-모드-실험적) 참고.
+메시 모드는 다섯 개의 설정(`meshMode`, `meshGatewayModel`, `meshWorkerIdleTimeoutMin`, `meshMaxLiveWorkers`, `meshHistoryLimit`)을 추가합니다 — [메시 모드](#메시-모드-실험적) 참고.
 
 ## 데이터와 프라이버시
 

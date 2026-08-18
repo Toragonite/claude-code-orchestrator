@@ -21,7 +21,7 @@ import {
   runMeshProcess,
   setKeepAliveInLedger,
 } from './pool';
-import { isPidAlive, type TaskEvent } from '../registry';
+import { isPidAlive, readRegistry, type TaskEvent } from '../registry';
 
 /**
  * mesh/reaper — the guarantee that no `claude --bg` worker outlives its owning session
@@ -181,6 +181,48 @@ function markStopped(
   return marked;
 }
 
+/**
+ * Whether a stopped record still owns a git worktree on disk, and so must survive every
+ * history prune (INV-3): the CLI KEPT the worktree because it holds uncommitted work
+ * (`worktreeKept === true`), or the recorded worktree path still exists.
+ *
+ * The path stored on a record is WORKSPACE-RELATIVE (contract MeshWorkerRecord.worktree,
+ * e.g. `.claude/worktrees/cco-<taskId>`), so it is resolved against the ledger's own
+ * workspace `cwd` — passed in, because the record does not carry its workspace and a reaper
+ * sweep runs with a process.cwd() that is some unrelated directory. Resolving against
+ * process.cwd() would test the wrong path and could prune a record whose worktree still
+ * holds work.
+ */
+export function keptWorktree(rec: MeshWorkerRecord, cwd: string): boolean {
+  if (rec.worktreeKept === true) {
+    return true;
+  }
+  const worktree = rec.worktree;
+  if (typeof worktree !== 'string' || worktree === '') {
+    return false;
+  }
+  // The stored path is workspace-RELATIVE. An empty, absolute, or `..`-escaping value is
+  // never a worktree THIS workspace owns: path.join(cwd, '') === cwd (which always exists,
+  // so an empty string would make the record permanently un-prunable AND make the Clear
+  // command silently no-op on it), and an absolute or escaping path would test an unrelated
+  // directory. Require the resolved path to stay strictly under cwd before trusting existsSync.
+  const resolved = path.resolve(cwd, worktree);
+  if (resolved === cwd || !resolved.startsWith(cwd + path.sep)) {
+    return false;
+  }
+  return fs.existsSync(resolved);
+}
+
+/**
+ * Whether a record may be dropped from the ledger by history retention (B2 cap-prune and B3
+ * clear): it is stopped, it carries no keep-alive mark, and it owns no surviving worktree.
+ * The worktree clause is INV-3 — a record still owning a worktree on disk is NEVER removed,
+ * because that would orphan a git branch that may hold uncommitted work.
+ */
+export function removable(rec: MeshWorkerRecord, cwd: string): boolean {
+  return rec.stoppedAt !== undefined && rec.keepAlive !== true && !keptWorktree(rec, cwd);
+}
+
 /** One workspace's sweep. Accumulates into `report`; never throws for a single worker. */
 async function reapWorkspace(cwd: string, claudePath: string, report: ReapReport): Promise<void> {
   const toMark: string[] = [];
@@ -276,6 +318,35 @@ async function reapWorkspace(cwd: string, claudePath: string, report: ReapReport
     await finishTeardown(rec);
   }
   report.marked += markStopped(cwd, toMark, worktreeVerdicts);
+
+  // B2 — cap-prune stopped HISTORY (F5b history retention). Runs AFTER the orphan sweep
+  // above so a record this sweep just marked stopped is a candidate in the same activation.
+  // Of the removable records (stopped, not keep-alive, no surviving worktree — INV-3), keep
+  // the newest `limit` by stoppedAt and delete the rest; records that are NOT removable are
+  // never counted toward the cap and never dropped. The field, its default and its clamp are
+  // Task D's (registry.meshHistoryLimit); this reads it the same way the cap read
+  // meshMaxLiveWorkers — off a fresh readRegistry().
+  //
+  // The pre-check keeps a workspace we merely inspected from getting an empty ledger written
+  // under it (mutateMeshWorkers creates the file when absent), and every deletion happens
+  // INSIDE the locked read-modify-write (INV-2), re-derived from the freshest bytes there.
+  const limit = readRegistry().meshHistoryLimit;
+  if (readMeshWorkerRecords(cwd).filter((rec) => removable(rec, cwd)).length > limit) {
+    mutateMeshWorkers(cwd, (workers) => {
+      const removableRecs = workers.filter((rec) => removable(rec, cwd));
+      if (removableRecs.length <= limit) {
+        return; // another writer pruned in the window between the pre-check and this lock
+      }
+      // Newest first (largest stoppedAt = newest); the first `limit` are kept, the tail dropped.
+      removableRecs.sort((a, b) => (b.stoppedAt ?? 0) - (a.stoppedAt ?? 0));
+      const doomed = new Set(removableRecs.slice(limit));
+      for (let i = workers.length - 1; i >= 0; i--) {
+        if (doomed.has(workers[i])) {
+          workers.splice(i, 1);
+        }
+      }
+    });
+  }
 }
 
 /**
@@ -298,6 +369,31 @@ export async function reapOrphanedMeshWorkers(opts: {
     }
   }
   return report;
+}
+
+/**
+ * B3 — clear ALL stopped history for one workspace (the UI "clear history" command Task D
+ * wires to this export). Removes every removable record — stopped, not keep-alive, no
+ * surviving worktree — with no cap, the difference from B2's cap-prune. It honours the SAME
+ * safety floor: live workers, keep-alive workers, and records still owning a worktree on
+ * disk are left untouched (INV-3).
+ *
+ * One locked read-modify-write (INV-2), through mutateMeshWorkers like every other ledger
+ * write. The pre-check skips the call when nothing is removable, so a workspace with no
+ * clearable history does not get an empty ledger created under it.
+ */
+export function clearStoppedWorkers(cwd: string): void {
+  if (!readMeshWorkerRecords(cwd).some((rec) => removable(rec, cwd))) {
+    return;
+  }
+  mutateMeshWorkers(cwd, (workers) => {
+    for (let i = workers.length - 1; i >= 0; i--) {
+      const rec = workers[i];
+      if (rec && removable(rec, cwd)) {
+        workers.splice(i, 1);
+      }
+    }
+  });
 }
 
 /**

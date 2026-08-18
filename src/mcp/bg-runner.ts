@@ -579,6 +579,29 @@ function removeBgIoTaskDir(taskId: string): void {
   }
 }
 
+/** Ceiling for the persisted full-prompt file; longer prompts are truncated (C1). */
+const PROMPT_FILE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Persist the FULL user task prompt (raw, whitespace uncollapsed — the collapse is only for
+ * the 300-char preview) to tasks/<id>.prompt.txt, capped at 64 KiB with a truncation marker.
+ *
+ * Best effort: the promptPreview on the event is the guaranteed surface; this file is an
+ * extra convenience, so any fs failure is swallowed and NEVER thrown into the dispatch path.
+ */
+function writeBgPromptFile(promptFile: string, prompt: string): void {
+  try {
+    const buf = Buffer.from(prompt, 'utf8');
+    const body =
+      buf.length > PROMPT_FILE_MAX_BYTES
+        ? buf.subarray(0, PROMPT_FILE_MAX_BYTES).toString('utf8') + '\n…[truncated]'
+        : prompt;
+    fs.writeFileSync(promptFile, body);
+  } catch {
+    // unwritable, out of space, or gone — the preview still carries the task text
+  }
+}
+
 /* ------------------------------------------------------------------------- *
  * Result FILE channel (P4.1) — the channel of record
  * ------------------------------------------------------------------------- */
@@ -1951,6 +1974,7 @@ export interface BgRunContext {
 /** Task identity carried on every event for this dispatch (never a pid — see P4.10). */
 interface BgTaskBase extends TaskBase {
   promptPreview: string;
+  promptFile?: string;
   meshWorker?: string;
 }
 
@@ -2229,6 +2253,11 @@ export async function runBgDispatchTask(args: DispatchArgs, ctx: BgRunContext): 
   // promptPreview is built from the USER's task prompt, never the bootstrap wrapper —
   // the surfaces that show it are answering "what is this task", not "how was it started".
   const promptPreview = prompt.replace(/\s+/g, ' ').trim().slice(0, 300);
+  // The FULL user prompt persisted beside the preview so a surface can show the whole task,
+  // not just its first 300 chars. Written here (before any settle-time cleanup) and pointed
+  // at by promptFile on the events; the write is best-effort and cannot fail the dispatch.
+  const promptFile = path.join(TASKS_DIR, `${id}.prompt.txt`);
+  writeBgPromptFile(promptFile, prompt);
   const systemPrompt = args.system_prompt?.trim();
   const systemPromptSection = systemPrompt ? `\n\n## Task system prompt\n\n${systemPrompt}` : '';
   const requestedModel =
@@ -2351,6 +2380,7 @@ export async function runBgDispatchTask(args: DispatchArgs, ctx: BgRunContext): 
         outputFile,
         cwd: process.cwd(),
         promptPreview,
+        promptFile,
       };
       const output: OutputContext = {
         title,
@@ -2511,6 +2541,7 @@ export async function runBgDispatchTask(args: DispatchArgs, ctx: BgRunContext): 
       outputFile,
       cwd: process.cwd(),
       promptPreview,
+      promptFile,
       ts: Date.now(),
       status: 'error',
       error: finalMessage,

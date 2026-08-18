@@ -168,7 +168,7 @@ worker 在调度返回后**不会消失**，这正是可 attach 的意义所在�
 
 ### 如何启用
 
-Mesh 模式默认关闭。下面四个设置在编排器仪表板的 Settings 卡片里也有，改动会在该工作区的下一个 Claude Code 会话生效。
+Mesh 模式默认关闭。下面五个设置在编排器仪表板的 Settings 卡片里也有，改动会在该工作区的下一个 Claude Code 会话生效。
 
 | 设置 | 默认值 | 作用 |
 |---|---|---|
@@ -176,6 +176,7 @@ Mesh 模式默认关闭。下面四个设置在编排器仪表板的 Settings �
 | `claudeCodeOrchestrator.meshGatewayModel` | `haiku` | 中继会话使用的模型，它只执行极小的中继回合 |
 | `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin` | `15` | 空闲的可 attach worker 多少分钟后被停止；`0` 表示关闭 |
 | `claudeCodeOrchestrator.meshMaxLiveWorkers` | `8` | 同时存活的可 attach worker 上限；超出的调度会被拒绝而不是排队 |
+| `claudeCodeOrchestrator.meshHistoryLimit` | `50` | Worker History 视图保留的已停止 worker 记录数量，超出后从最旧的开始丢弃（最小 `1`，最大 `1000`） |
 
 `meshCrossAccountBridge` 设置已被移除。它原先控制的跨账户镜像依然在工作（正是它让某个账户下的 worker 能够触达另一个账户下的中继），但现在它是随 mesh 一起启动的内部管道，而不是需要用户选择开启的功能。`mesh_status` 会用一行报告它。
 
@@ -276,7 +277,7 @@ Mesh 模式默认关闭。下面四个设置在编排器仪表板的 Settings �
 | `claudeCodeOrchestrator.assetPacks` | `[]` | 内置包之外、用于加载资源的额外资源包目录 |
 | `claudeCodeOrchestrator.assetAutoSync` | `true` | 激活时静默同步已启用的资源，只有实际发生变化时才弹出通知 |
 
-Mesh 模式还新增了四个设置（`meshMode`、`meshGatewayModel`、`meshWorkerIdleTimeoutMin`、`meshMaxLiveWorkers`）—— 见 [Mesh 模式](#mesh-模式实验性)。
+Mesh 模式还新增了五个设置（`meshMode`、`meshGatewayModel`、`meshWorkerIdleTimeoutMin`、`meshMaxLiveWorkers`、`meshHistoryLimit`）—— 见 [Mesh 模式](#mesh-模式实验性)。
 
 ## 数据与隐私
 

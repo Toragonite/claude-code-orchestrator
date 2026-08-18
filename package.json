@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "%extension.description%",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -75,6 +75,11 @@
           "id": "claudeCodeOrchestrator.tasks",
           "name": "%view.tasks.name%",
           "icon": "$(checklist)"
+        },
+        {
+          "id": "claudeCodeOrchestrator.workerHistory",
+          "name": "%view.workerHistory.name%",
+          "icon": "$(history)"
         }
       ]
     },
@@ -221,6 +226,12 @@
         "title": "%command.stopMeshWorker.title%",
         "category": "%command.category%",
         "icon": "$(stop-circle)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.clearStoppedWorkers",
+        "title": "%command.clearStoppedWorkers.title%",
+        "category": "%command.category%",
+        "icon": "$(clear-all)"
       }
     ],
     "menus": {
@@ -326,6 +337,11 @@
           "command": "claudeCodeOrchestrator.stopMeshWorker",
           "when": "view == claudeCodeOrchestrator.workers && viewItem == meshWorker",
           "group": "1_manage@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.clearStoppedWorkers",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == meshGroup",
+          "group": "inline@0"
         }
       ]
     },
@@ -486,6 +502,13 @@
           "minimum": 1,
           "maximum": 64,
           "description": "%config.meshMaxLiveWorkers.description%"
+        },
+        "claudeCodeOrchestrator.meshHistoryLimit": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "%config.meshHistoryLimit.description%"
         }
       }
     }

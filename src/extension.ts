@@ -4,6 +4,7 @@ import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { configDirForName, dirHasLogin, openReloginTerminal, WorkerManager } from './workerManager';
 import { cancelTaskMeshAware, TasksProvider, WorkersProvider } from './views';
+import { WorkerHistoryProvider } from './history-view';
 import {
   clearTaskLog,
   LEGACY_ROOT_DIR,
@@ -21,6 +22,7 @@ import {
   MESH_SETTING_FIELDS,
 } from './mesh/contract';
 import {
+  clearStoppedWorkers,
   meshTaskAliveCheck,
   reapOrphanedMeshWorkers,
   setWorkerKeepAlive,
@@ -325,6 +327,8 @@ const IDLE_TIMEOUT_MAX_MIN = 1440;
 const MAX_LIVE_WORKERS_DEFAULT = 8;
 const MAX_LIVE_WORKERS_MIN = 1;
 const MAX_LIVE_WORKERS_MAX = 64;
+const MESH_HISTORY_LIMIT_DEFAULT = 50;
+const MESH_HISTORY_LIMIT_MIN = 1;
 
 /**
  * Sanitize the idle auto-stop window at the level of VALUE semantics: 0 is a
@@ -348,6 +352,15 @@ function clampMaxLiveWorkers(value: unknown): number {
     return MAX_LIVE_WORKERS_DEFAULT;
   }
   return Math.min(MAX_LIVE_WORKERS_MAX, Math.max(MAX_LIVE_WORKERS_MIN, Math.round(raw)));
+}
+
+/** History retention count: non-finite falls back to the default, everything else clamps to a floor of 1. */
+function clampHistoryLimit(value: unknown): number {
+  const raw = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(raw)) {
+    return MESH_HISTORY_LIMIT_DEFAULT;
+  }
+  return Math.max(MESH_HISTORY_LIMIT_MIN, Math.round(raw));
 }
 
 /**
@@ -375,12 +388,18 @@ function syncMeshSettings(): void {
   const maxLive = clampMaxLiveWorkers(
     cfg.get<number>('meshMaxLiveWorkers', MAX_LIVE_WORKERS_DEFAULT),
   );
+  const historyLimit = clampHistoryLimit(
+    cfg.get<number>('meshHistoryLimit', MESH_HISTORY_LIMIT_DEFAULT),
+  );
   updateRegistry((registry) => {
     const fields = registry as unknown as Record<string, string | number>;
     fields[MESH_SETTING_FIELDS.mode] = meshMode ? 'on' : 'off';
     fields[MESH_SETTING_FIELDS.gatewayModel] = validModel;
     fields[MESH_SETTING_FIELDS.idleTimeout] = idleTimeout;
     fields[MESH_SETTING_FIELDS.maxLive] = maxLive;
+    // MESH_SETTING_FIELDS is frozen in the mesh contract and carries no historyLimit key;
+    // write the registry field name directly (it matches the Registry.meshHistoryLimit key).
+    fields.meshHistoryLimit = historyLimit;
   });
 }
 
@@ -517,6 +536,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const workersProvider = new WorkersProvider(workers);
   const tasksProvider = new TasksProvider();
+  const historyProvider = new WorkerHistoryProvider();
 
   // A crashed or killed orchestrator session leaves its dispatches stuck at
   // 'running'. Reclaim them on startup — best-effort, never blocks activation.
@@ -580,8 +600,13 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     tasksProvider,
     workersProvider,
+    historyProvider,
     tasksView,
     vscode.window.registerTreeDataProvider('claudeCodeOrchestrator.workers', workersProvider),
+    vscode.window.registerTreeDataProvider(
+      'claudeCodeOrchestrator.workerHistory',
+      historyProvider,
+    ),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeCodeOrchestrator')) {
         workers.syncSettings();
@@ -1130,6 +1155,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('claudeCodeOrchestrator.stopMeshWorker', (node?: unknown) => {
       runMeshWorkerCommand(node, 'stop');
+    }),
+
+    // Clear the retained history of stopped workers for this workspace, then refresh
+    // both the live workers tree and the history tree so the cleared rows disappear.
+    vscode.commands.registerCommand('claudeCodeOrchestrator.clearStoppedWorkers', async () => {
+      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!cwd) {
+        return;
+      }
+      await clearStoppedWorkers(cwd);
+      workersProvider.refresh();
+      historyProvider.refresh();
     }),
   );
 

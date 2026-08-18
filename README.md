@@ -163,12 +163,13 @@ A worker does **not** vanish when its dispatch returns; that is the point of att
 - **Idle auto-stop** — `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin` (default `15`, `0` disables it). A live worker with no in-flight dispatch, no messages and no keep-alive mark is stopped after that many minutes. Attaching from the **Attachable workers** tree marks the worker keep-alive first, so a session you are sitting in is not reaped (if that mark cannot be written, a warning says so); `mesh_keep_worker` does the same from the orchestrator.
 - **Live-worker cap** — `claudeCodeOrchestrator.meshMaxLiveWorkers` (default `8`). Dispatches past the cap are **refused, not queued**: the task fails with a `worker_cap` error naming the limit, so a batch can never deadlock waiting for slots nobody frees. Stop finished workers before a large fan-out, or raise the number.
 - **Session end** — when the dispatch server shuts down it stops every worker it owns, keep-alive marks included, and the next activation sweeps for orphans left behind by a session that was killed, stopping any that are still alive.
+- **History retention** — a stopped worker leaves the live **Attachable workers** tree and appears in the new **Worker History** view (newest first, capped by `claudeCodeOrchestrator.meshHistoryLimit`, default `50`); the reaper prunes the ledger to that cap, and **Clear stopped workers** — inline on the Attachable workers group — drops them on demand. A worker still holding an uncommitted worktree is never dropped by either path, so unmerged work is not silently lost. Each finished worker's full prompt is kept (in `tasks/<id>.prompt.txt`) and shown in the history hover, so you can still see what a dead worker was asked to do.
 
 Stopping a worker also clears its background job, which is what removes a clean worktree — so a dispatch that hits its timeout can take up to about 30 seconds longer to report than the timeout itself (the stop and the job removal are each bounded at 15 seconds).
 
 ### Enabling it
 
-Mesh Mode is off by default. All four settings are also in the Orchestrator Dashboard's Settings card, and a change takes effect for the next Claude Code session in that workspace.
+Mesh Mode is off by default. All five settings are also in the Orchestrator Dashboard's Settings card, and a change takes effect for the next Claude Code session in that workspace.
 
 | Setting | Default | Effect |
 |---|---|---|
@@ -176,6 +177,7 @@ Mesh Mode is off by default. All four settings are also in the Orchestrator Dash
 | `claudeCodeOrchestrator.meshGatewayModel` | `haiku` | Model for the relay session, which only performs tiny relay turns |
 | `claudeCodeOrchestrator.meshWorkerIdleTimeoutMin` | `15` | Minutes an idle attachable worker may sit before being stopped; `0` disables |
 | `claudeCodeOrchestrator.meshMaxLiveWorkers` | `8` | Cap on live attachable workers; dispatches past it are refused, not queued |
+| `claudeCodeOrchestrator.meshHistoryLimit` | `50` | How many stopped workers the Worker History view keeps before the oldest are dropped (min `1`, max `1000`) |
 
 The `meshCrossAccountBridge` setting is gone. The cross-account mirroring it controlled still happens — it is what lets a worker under one account reach the relay under another — but it is now internal plumbing that starts with the mesh, not a feature to opt into. `mesh_status` reports it as one line.
 

@@ -3,6 +3,7 @@
   "viewsContainer.title": "Claude Code Orchestrator",
   "view.workers.name": "Worker Accounts",
   "view.tasks.name": "Dispatched Tasks",
+  "view.workerHistory.name": "Worker History",
   "command.category": "Claude Code Orchestrator",
   "command.addWorker.title": "Add Worker Account",
   "command.importWorkers.title": "Import Existing Claude Config Directories",
@@ -46,7 +47,9 @@
   "config.meshGatewayModel.enumDescription.sonnet": "Run the relay gateway on Sonnet — more capable but more expensive; rarely needed for pure relay work.",
   "config.meshWorkerIdleTimeoutMin.description": "EXPERIMENTAL. Minutes an attachable Mesh Mode worker may sit idle before it is stopped automatically. 0 disables the idle stop entirely; a live attachable worker with no in-flight dispatch, no messages and no keep-alive mark is stopped after this many minutes. Attaching from the Attachable workers tree marks a worker keep-alive, and so does the mesh_keep_worker tool, so a session you are sitting in is never reaped. This is a leak backstop, not a plan — the orchestrator is still expected to stop its own workers. Only takes effect when Mesh Mode is on.",
   "config.meshMaxLiveWorkers.description": "EXPERIMENTAL. Maximum number of live attachable Mesh Mode workers allowed at once. Dispatches past the cap are REFUSED, not queued: the dispatch fails with a worker_cap error naming this limit. Stop finished workers (mesh_stop_worker, or let the idle auto-stop reap them) before a large fan-out, or raise this number. Only takes effect when Mesh Mode is on.",
+  "config.meshHistoryLimit.description": "EXPERIMENTAL. Maximum number of stopped Mesh Mode workers kept in the Worker History view before the oldest are dropped. Integer, default 50, minimum 1. Only takes effect when Mesh Mode is on.",
   "command.attachMeshWorker.title": "Attach to Mesh Worker in Terminal",
   "command.meshWorkerLogs.title": "Show Mesh Worker Logs",
-  "command.stopMeshWorker.title": "Stop Mesh Worker"
+  "command.stopMeshWorker.title": "Stop Mesh Worker",
+  "command.clearStoppedWorkers.title": "Clear Stopped Workers"
 }

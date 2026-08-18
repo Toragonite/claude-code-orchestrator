@@ -103,6 +103,12 @@ export interface Registry {
    */
   meshMaxLiveWorkers: number;
   /**
+   * Cap on how many stopped/finished workers the history view retains before the oldest
+   * are dropped. Integer, default 50, clamped to a floor of 1 (a zero-length history is
+   * never a useful choice — the view exists to keep at least the most recent).
+   */
+  meshHistoryLimit: number;
+  /**
    * Model alias the mesh gateway relay runs under (the gateway does trivial relay turns
    * only, so a small model is the right default). The default duplicates the contract
    * constant MESH_GATEWAY_MODEL_DEFAULT's literal 'haiku' ON PURPOSE: registry.ts must
@@ -150,6 +156,8 @@ export interface TaskEvent {
    * initial 'running' event and carried on every later event for the task.
    */
   promptPreview?: string;
+  /** Absolute path to the file holding the full dispatched prompt, when one was written. */
+  promptFile?: string;
   /** PID of the worker `claude -p` child. Set on a second 'running' event emitted after spawn. */
   pid?: number;
   /** Process-group id of the worker, recorded only when it was spawned as its own group leader (detached). Present => the whole tree can be signalled with -pgid. */
@@ -272,6 +280,9 @@ export const MESH_IDLE_TIMEOUT_MAX = 1440;
 export const MESH_MAX_LIVE_DEFAULT = 8;
 export const MESH_MAX_LIVE_MIN = 1;
 export const MESH_MAX_LIVE_MAX = 64;
+export const MESH_HISTORY_LIMIT_DEFAULT = 50;
+export const MESH_HISTORY_LIMIT_MIN = 1;
+export const MESH_HISTORY_LIMIT_MAX = 1000;
 
 /**
  * Numeric reading of a hand-editable setting. A numeric STRING is accepted (the registry
@@ -315,6 +326,19 @@ export function sanitizeMeshMaxLive(value: unknown): number {
   return Math.min(MESH_MAX_LIVE_MAX, Math.max(MESH_MAX_LIVE_MIN, Math.round(raw)));
 }
 
+/**
+ * History retention count. Clamped to a floor of 1 rather than defaulted at the edge: 0 or
+ * a negative number means "keep as few as possible", which is 1 — a zero-length history is
+ * never a useful choice. Only an unreadable value falls back to the default.
+ */
+export function sanitizeMeshHistoryLimit(value: unknown): number {
+  const raw = numericSetting(value);
+  if (!Number.isFinite(raw)) {
+    return MESH_HISTORY_LIMIT_DEFAULT;
+  }
+  return Math.min(MESH_HISTORY_LIMIT_MAX, Math.max(MESH_HISTORY_LIMIT_MIN, Math.round(raw)));
+}
+
 const DEFAULTS: Registry = {
   workers: [],
   permissionMode: 'acceptEdits',
@@ -326,6 +350,7 @@ const DEFAULTS: Registry = {
   meshMode: 'off',
   meshWorkerIdleTimeoutMin: MESH_IDLE_TIMEOUT_DEFAULT,
   meshMaxLiveWorkers: MESH_MAX_LIVE_DEFAULT,
+  meshHistoryLimit: MESH_HISTORY_LIMIT_DEFAULT,
   // Duplicates the contract's MESH_GATEWAY_MODEL_DEFAULT literal — registry.ts must not
   // import src/mesh/contract.ts (that module imports ROOT_DIR/WorkerModel from here, so
   // importing it back would cycle).
@@ -356,6 +381,7 @@ export function readRegistry(): Registry {
       // survives untouched. See the two helpers for why the edges differ.
       meshWorkerIdleTimeoutMin: sanitizeMeshIdleTimeout(raw.meshWorkerIdleTimeoutMin),
       meshMaxLiveWorkers: sanitizeMeshMaxLive(raw.meshMaxLiveWorkers),
+      meshHistoryLimit: sanitizeMeshHistoryLimit(raw.meshHistoryLimit),
       // Free-form gateway model alias; a non-string or empty value coerces to the
       // default (contract MESH_GATEWAY_MODEL_DEFAULT, duplicated here as 'haiku').
       meshGatewayModel:
