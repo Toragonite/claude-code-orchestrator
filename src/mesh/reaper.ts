@@ -182,30 +182,24 @@ function markStopped(
 }
 
 /**
- * Whether a stopped record still owns a git worktree on disk, and so must survive every
- * history prune (INV-3): the CLI KEPT the worktree because it holds uncommitted work
- * (`worktreeKept === true`), or the recorded worktree path still exists.
+ * Whether a record still owns a git worktree ON DISK, and so must survive history prune/clear
+ * (INV-3). Disk existence is the SOLE signal — the `worktreeKept` flag is NOT trusted. A worktree
+ * removed AFTER that flag was written (a stop, a manual `git worktree remove`, `claude rm`) leaves
+ * the flag stale, which made removed-worktree records permanently un-clearable and showed false
+ * "uncommitted branch" warnings in the history view (observed in real 1.5.1 use). Under auto-commit
+ * at settle the work is a durable COMMIT on the branch anyway, so pruning a record whose worktree
+ * is gone can never lose work; an on-disk worktree simply means "there is un-integrated work here".
  *
- * The path stored on a record is WORKSPACE-RELATIVE (contract MeshWorkerRecord.worktree,
- * e.g. `.claude/worktrees/cco-<taskId>`), so it is resolved against the ledger's own
- * workspace `cwd` — passed in, because the record does not carry its workspace and a reaper
- * sweep runs with a process.cwd() that is some unrelated directory. Resolving against
- * process.cwd() would test the wrong path and could prune a record whose worktree still
- * holds work.
+ * The path stored on a record is WORKSPACE-RELATIVE (e.g. `.claude/worktrees/cco-<taskId>`), so it
+ * is resolved against the ledger's own workspace `cwd` (passed in — the record carries no
+ * workspace, and a sweep runs with an unrelated process.cwd()). Empty / absolute / `..`-escaping
+ * values name no worktree this workspace owns and are rejected before existsSync.
  */
 export function keptWorktree(rec: MeshWorkerRecord, cwd: string): boolean {
-  if (rec.worktreeKept === true) {
-    return true;
-  }
   const worktree = rec.worktree;
   if (typeof worktree !== 'string' || worktree === '') {
     return false;
   }
-  // The stored path is workspace-RELATIVE. An empty, absolute, or `..`-escaping value is
-  // never a worktree THIS workspace owns: path.join(cwd, '') === cwd (which always exists,
-  // so an empty string would make the record permanently un-prunable AND make the Clear
-  // command silently no-op on it), and an absolute or escaping path would test an unrelated
-  // directory. Require the resolved path to stay strictly under cwd before trusting existsSync.
   const resolved = path.resolve(cwd, worktree);
   if (resolved === cwd || !resolved.startsWith(cwd + path.sep)) {
     return false;

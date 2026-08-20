@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -38,6 +39,7 @@ import {
   bgIoTaskDir,
   bgResultFile,
   bgTaskFile,
+  bgWorktreeBranch,
   bgWorktreePath,
   ENTRY_APPEAR_GRACE_MS,
   isGitWorkspace,
@@ -602,6 +604,102 @@ function writeBgPromptFile(promptFile: string, prompt: string): void {
   }
 }
 
+/**
+ * At settle, turn a mesh worker's still-uncommitted worktree edits into a durable commit on
+ * its branch (A11), and return the commit's SHORT sha. The worker is spawned WITHOUT the Bash
+ * tool and told not to run git, so at settle its branch has zero commits and its tree is
+ * dirty — a "merge the branch" then finds nothing, and a later force-remove of the dirty
+ * worktree DISCARDS the work. This is where that work is captured into a mergeable commit.
+ *
+ * Returns undefined when there is nothing to hand back: a falsy or non-directory worktree
+ * path, a clean tree (git's "nothing to commit"), or any git failure whatsoever.
+ *
+ * STRICTLY best-effort, exactly like removeBgIoTaskDir / writeBgPromptFile: a data-safety
+ * feature must never itself become a data-loss or dispatch-failure cause, so a missing git, a
+ * git error, a 15s timeout — everything — is swallowed here and NEVER thrown into the settle
+ * path. `stdio: 'ignore'` on the mutating calls keeps git's own chatter off the server's
+ * streams; only rev-parse's stdout is captured, for the sha.
+ */
+function commitBgWorktree(
+  worktreeAbs: string,
+  workerName: string,
+  taskId: string,
+): string | undefined {
+  if (!worktreeAbs) {
+    return undefined;
+  }
+  try {
+    if (!fs.statSync(worktreeAbs).isDirectory()) {
+      return undefined;
+    }
+    execFileSync('git', ['-C', worktreeAbs, 'add', '-A'], { timeout: 15_000, stdio: 'ignore' });
+    execFileSync(
+      'git',
+      [
+        '-C',
+        worktreeAbs,
+        // Guarantee an identity (a repo/global one may be unset ⇒ commit fails silently), and
+        // bypass repo commit HOOKS and GPG SIGNING — a failing pre-commit hook or a signing
+        // prompt would silently defeat this durable-commit or hang it to the timeout.
+        '-c',
+        'user.name=Claude Code Orchestrator',
+        '-c',
+        'user.email=orchestrator@users.noreply.github.com',
+        'commit',
+        '--no-verify',
+        '--no-gpg-sign',
+        '-m',
+        `mesh: ${workerName} · task ${taskId} — auto-committed at settle (review before merge)`,
+      ],
+      { timeout: 15_000, stdio: 'ignore' },
+    );
+    return execFileSync('git', ['-C', worktreeAbs, 'rev-parse', '--short', 'HEAD'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+    }).trim();
+  } catch {
+    // a clean tree ("nothing to commit"), no git on PATH, a broken worktree, or a timeout —
+    // all swallowed. The auto-commit must never throw into or fail the dispatch/settle path.
+    return undefined;
+  }
+}
+
+/**
+ * The settle-time hook for a mesh dispatch (A11): commit the worker's worktree edits and, when
+ * a commit was actually made, point the orchestrator at the durable branch in the very report
+ * it reads. A no-op for the non-git / one-shot fallback (no worktree). Best-effort throughout
+ * — commitBgWorktree cannot throw — so this only ever augments the report, never fails it.
+ */
+function commitWorktreeIntoReport(entry: BgPending, report: string): string {
+  // Best-effort AND never-throw: the WHOLE body is guarded. path.resolve throws on a non-string
+  // or an undefined base (ioWorkspace() during shutdown/reload), and this runs inside the settle
+  // deliver closure, so an unguarded throw would break the settle path — the exact invariant a
+  // data-safety feature must not violate. Any failure leaves the report untouched.
+  try {
+    if (typeof entry.worktree !== 'string' || entry.worktree === '') {
+      return report;
+    }
+    // entry.worktree is workspace-RELATIVE; resolve it against the io workspace base and CONTAIN
+    // it strictly under that base (mirror reaper.keptWorktree). Without this an empty / `.` / `..`
+    // / absolute value would resolve to (or above) the workspace ROOT and make `git add -A` commit
+    // the user's ENTIRE checkout onto whatever branch it is on — destructive. A path that does not
+    // contain must be a no-op, not a commit.
+    const base = ioWorkspace();
+    const worktreeAbs = path.resolve(base, entry.worktree);
+    if (worktreeAbs === base || !worktreeAbs.startsWith(base + path.sep)) {
+      return report;
+    }
+    const sha = commitBgWorktree(worktreeAbs, entry.workerName, entry.id);
+    if (sha === undefined) {
+      return report;
+    }
+    const branch = entry.branch ?? bgWorktreeBranch(entry.id);
+    return `${report}\n· work committed to branch ${branch} (${sha}) — merge it`;
+  } catch {
+    return report;
+  }
+}
+
 /* ------------------------------------------------------------------------- *
  * Result FILE channel (P4.1) — the channel of record
  * ------------------------------------------------------------------------- */
@@ -940,7 +1038,10 @@ function settle(entry: BgPending, deliver: () => void): void {
 }
 
 function settleDone(entry: BgPending, report: string): void {
-  settle(entry, () => entry.resolve(report));
+  // Inside the deliver closure so the commit runs exactly once — the settle gate fires it
+  // once — and BEFORE resolve() hands the terminal report up, so the branch holds the work
+  // and the report can name it. Best-effort: commitWorktreeIntoReport cannot throw.
+  settle(entry, () => entry.resolve(commitWorktreeIntoReport(entry, report)));
 }
 
 function settleFailed(entry: BgPending, message: string): void {
@@ -980,7 +1081,10 @@ function settleFailed(entry: BgPending, message: string): void {
  * cleanup removes the whole io directory moments later.
  */
 function settleWorkerError(entry: BgPending, report: string): void {
-  settle(entry, () => entry.reject(new BgWorkerReportError(report)));
+  // Commit on the error path too: a worker that reported a failure may still have produced
+  // valuable partial edits, and force-removing its dirty worktree later would lose them.
+  // Same guarantees as settleDone — once, before reject(), best-effort.
+  settle(entry, () => entry.reject(new BgWorkerReportError(commitWorktreeIntoReport(entry, report))));
 }
 
 /** Arm a per-task timer that is cleared on settle and never pins the event loop. */

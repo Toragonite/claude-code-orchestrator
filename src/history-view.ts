@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
 import { readRegistry, readTaskEvents, TaskEvent, TASKS_LOG_FILE } from './registry';
 import { readMeshWorkerRecords } from './mesh/pool';
 import { MeshWorkerRecord } from './mesh/contract';
@@ -66,6 +67,13 @@ export class WorkerHistoryProvider
    */
   private recordsByName = new Map<string, MeshWorkerRecord>();
 
+  /**
+   * Worker names whose worktree still EXISTS on disk, rebuilt each getChildren. This is the
+   * disk-truth the "unmerged branch" badge gates on — a removed worktree is never falsely
+   * flagged (its stale worktreeKept flag is not trusted), matching the reaper's keptWorktree.
+   */
+  private liveWorktree = new Set<string>();
+
   constructor() {
     fs.watchFile(TASKS_LOG_FILE, { interval: 2000 }, this.onTasksChange);
   }
@@ -85,12 +93,16 @@ export class WorkerHistoryProvider
 
     const rec = this.recordsByName.get(event.meshWorker ?? '');
     const parts = [event.worker, event.model];
-    // A kept worktree holds uncommitted work nobody merged — surface it loudly. When the
-    // merge state is not recorded, just show the branch name.
-    if (rec?.worktreeKept === true) {
-      parts.push(rec.branch ? `⚠ uncommitted branch ${rec.branch}` : '⚠ uncommitted branch');
-    } else if (rec?.branch) {
-      parts.push(`branch ${rec.branch}`);
+    // A branch whose worktree still EXISTS on disk holds committed-but-unmerged work
+    // (auto-committed at settle) — flag it loudly so it is not lost. A worktree that is GONE is
+    // not flagged (the stale worktreeKept flag is not trusted), matching the reaper's disk-truth;
+    // and the durable work is a commit on the branch regardless.
+    if (rec?.branch) {
+      parts.push(
+        this.liveWorktree.has(event.meshWorker ?? '')
+          ? `⚠ unmerged branch ${rec.branch}`
+          : `branch ${rec.branch}`,
+      );
     }
     item.description = parts.join(' · ');
 
@@ -114,7 +126,7 @@ export class WorkerHistoryProvider
     if (rec?.branch) {
       tip.appendMarkdown('\n\n');
       tip.appendText(
-        `Branch ${rec.branch}${rec.worktreeKept === true ? ' (uncommitted — worktree kept)' : ''}`,
+        `Branch ${rec.branch}${this.liveWorktree.has(event.meshWorker ?? '') ? ' (unmerged — worktree on disk)' : ''}`,
       );
     }
     tip.appendMarkdown('\n\n');
@@ -135,9 +147,19 @@ export class WorkerHistoryProvider
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     this.recordsByName = new Map();
+    this.liveWorktree = new Set();
     if (root) {
       for (const rec of readMeshWorkerRecords(root)) {
         this.recordsByName.set(rec.name, rec);
+        if (typeof rec.worktree === 'string' && rec.worktree !== '') {
+          // Contain the path exactly like reaper.keptWorktree — an absolute / `..` / root-
+          // resolving value is never a live worktree of THIS workspace (path.resolve, not join,
+          // so an absolute second segment cannot escape the base silently).
+          const resolved = path.resolve(root, rec.worktree);
+          if (resolved !== root && resolved.startsWith(root + path.sep) && fs.existsSync(resolved)) {
+            this.liveWorktree.add(rec.name);
+          }
+        }
       }
     }
 

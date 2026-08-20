@@ -129,14 +129,14 @@ Mesh 模式**关闭**时，调度与此前版本完全一致——每个任务�
 
 ### 结果以一个待合并的分支返回
 
-这是用户能看到的最大变化。在 git 工作区里，每次调度都会得到自己的 worktree：`.claude/worktrees/cco-<taskId>`，检出在分支 `worktree-cco-<taskId>` 上（这是 Claude Code 自带的 `-w` worktree 能力）。worker 在**那里**改文件，而不是在你的共享检出里，调度结果中会写明 worktree 路径与分支。编排器收到的常驻指令是：在那个 worktree 里验证（diff、构建、测试），把通过的合并进来，然后移除 worktree 并停止 worker——分支没有被合并之前，这次调度就不算完成集成。
+这是用户能看到的最大变化。在 git 工作区里，每次调度都会得到自己的 worktree：`.claude/worktrees/cco-<taskId>`，检出在分支 `worktree-cco-<taskId>` 上（这是 Claude Code 自带的 `-w` worktree 能力）。worker 在**那里**改文件，而不是在你的共享检出里。**当这次调度 settle 时，扩展会把这些改动自动提交到该分支**（结果里会写明分支和一个短提交 sha），所以分支始终是一个真正可合并的提交，而不是一个会被误用 force-remove 丢掉的脏 worktree。编排器收到的常驻指令是：验证该分支（diff、构建、测试），把通过的合并进来，然后移除 worktree 并停止 worker——分支没有被合并之前，这次调度就不算完成集成。
 
 有两种情况**没有** worktree，此时结果里干脆没有 worktree 那一行，因为改动已经落在你的工作树里了：
 
 - 工作区不是 git 仓库；
 - 该次调度回退成了一次性 worker（见下文*mesh 无法启动时*）。
 
-未合并的成果不会被替你清理掉：停止一个 worker 时会请求 Claude Code 移除它的 worktree，而 Claude Code **只会移除干净的 worktree**。含有未提交改动的 worktree 会被保留，并继续出现在 `mesh_status` 的列表里（标记为已保留），方便你找到它。
+未合并的成果不会丢失：settle 后的 worker 改动是分支上的持久提交，所以你停止 worker 时移除（此时已干净的）worktree，成果仍留在分支上等待合并。如果 worker 恢复运行又把 worktree 弄脏，Claude Code 只会移除干净的、保留脏的，并继续在 `mesh_status` 列表里显示。
 
 ### 和正在运行的 worker 对话
 

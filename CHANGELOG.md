@@ -4,6 +4,20 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] — 2026-08-19
+
+Worktree durability + ghost cleanup, driven by real 1.5.1 usage. A mesh worker's edits are now committed to its branch when the dispatch settles — so they survive as a mergeable commit instead of being discarded — and stale "kept worktree" records no longer haunt the history view. With Mesh Mode **off**, dispatch is unchanged (`src/mcp/task-runner.ts` untouched). First of a split; orphan visibility and a durable dispatch-reconcile engine follow in later releases.
+
+### Fixed
+- **A mesh worker's work is no longer silently reverted.** Workers run in a git worktree but are spawned without Bash and told not to run git, so they left uncommitted changes on a branch with zero commits — the orchestrator's "merge the branch" then found nothing, and force-removing the dirty worktree discarded the work (observed in real use). The extension now AUTO-COMMITS the worktree to its branch when the dispatch settles (best-effort — commit hooks and GPG signing are bypassed and a git identity is guaranteed, so a repo's hooks or an unset identity can't silently defeat it; strictly contained to the worktree, never the workspace root; and it can never throw into or fail the dispatch). The work becomes a durable, mergeable commit, and the dispatch result names the branch and short sha. The error path commits too, to preserve partial work.
+- **Stale "kept worktree" records no longer show a false warning and can be cleared.** `keptWorktree` now trusts only whether the worktree ACTUALLY EXISTS on disk, not the `worktreeKept` flag, which went stale once a worktree was removed — so a removed worktree's record is clearable and cap-prunable again, and the Worker History badge (now "unmerged branch") reflects disk truth instead of a permanent false "uncommitted branch".
+
+### Changed
+- The Mesh Mode doctrine now tells the orchestrator that a worker's edits arrive as an auto-committed branch: integrate by MERGING THE BRANCH (the result names it), and never force-remove a worktree before merging.
+
+### Notes
+- Experimental Mesh Mode; mesh-off dispatch is byte-identical to 1.5.1.
+
 ## [1.5.1] — 2026-08-18
 
 Mesh Mode gains a **Worker History** view, a configurable retention cap, and a **Clear stopped workers** command, and every mesh worker's full prompt is now persisted so a finished worker's task stays readable. The dispatch path is unchanged: with Mesh Mode **off**, dispatch behaves exactly as in 1.5.0 — `src/mcp/task-runner.ts` is untouched. What changed is the extension UI, the retention logic, and one additive persistence write on the mesh path.

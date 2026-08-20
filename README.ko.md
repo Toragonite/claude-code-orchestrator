@@ -129,14 +129,14 @@ Anthropic의 레이트리밋 윈도우(Session 5시간, Weekly 7일, Weekly Fabl
 
 ### 결과는 머지할 브랜치의 형태로 돌아옵니다
 
-사용자에게 가장 크게 보이는 변화입니다. git 워크스페이스에서는 디스패치마다 자기 worktree(`.claude/worktrees/cco-<taskId>`)를 받고, `worktree-cco-<taskId>` 브랜치가 체크아웃됩니다(Claude Code 자체의 `-w` worktree 기능). 워커는 공유 체크아웃이 아니라 **그 worktree 안에서** 파일을 수정하며, 디스패치 결과에 worktree 경로와 브랜치가 함께 적힙니다. 오케스트레이터는 그 worktree에서 검증(diff, 빌드, 테스트)하고, 통과한 것을 머지한 뒤, worktree를 제거하고 워커를 중지하도록 지시받습니다 — 브랜치가 머지되기 전까지 그 디스패치는 통합된 것이 아닙니다.
+사용자에게 가장 크게 보이는 변화입니다. git 워크스페이스에서는 디스패치마다 자기 worktree(`.claude/worktrees/cco-<taskId>`)를 받고, `worktree-cco-<taskId>` 브랜치가 체크아웃됩니다(Claude Code 자체의 `-w` worktree 기능). 워커는 공유 체크아웃이 아니라 **그 worktree 안에서** 파일을 수정합니다. **디스패치가 settle되면 확장이 그 수정을 브랜치에 자동 커밋하며**(결과에 브랜치와 짧은 커밋 sha가 적힘), 그래서 브랜치는 force-remove로 날아갈 수 있는 dirty worktree가 아니라 항상 실제로 머지 가능한 커밋입니다. 오케스트레이터는 브랜치를 검증(diff, 빌드, 테스트)하고, 통과한 것을 머지한 뒤, worktree를 제거하고 워커를 중지하도록 지시받습니다 — 브랜치가 머지되기 전까지 그 디스패치는 통합된 것이 아닙니다.
 
 worktree가 **없는** 경우는 두 가지이며, 이때 결과에는 worktree 줄이 아예 없습니다. 수정 내용이 이미 작업 트리에 들어와 있다는 뜻입니다:
 
 - 워크스페이스가 git 저장소가 아닐 때,
 - 디스패치가 일회성 워커로 폴백했을 때(아래 *메시를 시작할 수 없을 때* 참고).
 
-머지되지 않은 작업이 임의로 정리되는 일은 없습니다: 워커를 중지하면 Claude Code에 worktree 제거를 요청하지만, Claude Code는 **깨끗한(clean)** worktree만 제거합니다. 커밋되지 않은 변경이 있는 worktree는 보존되고, `mesh_status`가 "보존됨" 표시와 함께 계속 목록에 보여주므로 잃어버릴 일이 없습니다.
+머지되지 않은 작업은 잃지 않습니다: settle된 워커의 수정은 브랜치의 durable 커밋이라, 워커를 중지할 때 (이제 깨끗한) worktree를 제거해도 작업은 브랜치에 남아 머지할 수 있습니다. 워커가 resume해서 worktree가 다시 dirty해지면 Claude Code는 깨끗할 때만 제거하고 dirty한 것은 보존하며, `mesh_status`가 계속 목록에 보여줍니다.
 
 ### 실행 중인 워커와 대화하기
 

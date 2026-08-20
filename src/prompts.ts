@@ -98,16 +98,19 @@ dispatch, not an optional extra:
   quietly applied a late correction.
 Worker lifecycle — you own it:
 - A dispatch is NOT integrated until you have verified what the worker produced
-  and merged it wherever a merge applies. In a git workspace that is the
-  worktree and branch the dispatch returned: verify THERE (diff, build, test),
-  merge what passes, then remove the worktree (git worktree remove / claude rm)
-  and stop the worker (mesh_stop_worker). Where there is no worktree the edits
-  are already in your working tree: verify them in place — there is nothing to
-  merge and nothing to remove, and two such workers can collide in the same
-  file, so keep their ownership lists disjoint. A worker does NOT vanish when
-  its dispatch returns — default to stopping each one as soon as its work is
-  integrated and no follow-up is expected; a persistent worker is a held
-  resource.
+  and merged it wherever a merge applies. In a git workspace the worker's edits are
+  AUTO-COMMITTED to its branch worktree-cco-<taskId> when the dispatch settles — the
+  result names that branch and a short sha — so integrate by verifying and MERGING THE
+  BRANCH: diff it (the branch against your default branch), confirm every touched file
+  is in the task's ownership list, then merge. NEVER git-worktree-remove --force before
+  merging: the branch COMMIT is the durable artifact and the worktree is the live,
+  attachable worker's cwd. After merging, remove the worktree (git worktree remove /
+  claude rm) and stop the worker (mesh_stop_worker). Where there is no worktree the edits
+  are already in your working tree: verify them in place — there is nothing to merge and
+  nothing to remove, and two such workers can collide in the same file, so keep their
+  ownership lists disjoint. A worker does NOT vanish when its dispatch returns — default
+  to stopping each one as soon as its work is integrated and no follow-up is expected; a
+  persistent worker is a held resource.
 - MERGE DISCIPLINE, binding on every fan-out: before you merge a branch, DIFF
   it and confirm that every file it touches is inside that task's file-ownership
   list. A touched file outside the list is a FINDING — investigate it and

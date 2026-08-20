@@ -129,14 +129,14 @@ With Mesh Mode **off**, dispatch behaves exactly as in previous releases — one
 
 ### Results come back as a branch to merge
 
-This is the biggest visible change. In a git workspace, each dispatch gets its own worktree at `.claude/worktrees/cco-<taskId>`, checked out on branch `worktree-cco-<taskId>` (Claude Code's own `-w` worktree feature). The worker edits **there**, not in your shared checkout, and the dispatch result names the worktree and the branch. The orchestrator's standing instructions are to verify that worktree (diff, build, test), merge what passes, then remove the worktree and stop the worker — a dispatch is not integrated until its branch is merged.
+This is the biggest visible change. In a git workspace, each dispatch gets its own worktree at `.claude/worktrees/cco-<taskId>`, checked out on branch `worktree-cco-<taskId>` (Claude Code's own `-w` worktree feature). The worker edits **there**, not in your shared checkout. When the dispatch settles, the extension **auto-commits** those edits to the branch (the result names the branch and a short commit sha) — so the branch is always a real, mergeable commit rather than a dirty worktree a stray force-remove could discard. The orchestrator's standing instructions are to verify the branch (diff it, build, test), merge what passes, then remove the worktree and stop the worker — a dispatch is not integrated until its branch is merged.
 
 Two cases have **no** worktree, and their results simply carry no worktree line, because the edits are already in your working tree:
 
 - the workspace is not a git repository, and
 - the dispatch fell back to a one-shot worker (see *When the mesh can't start*).
 
-Unmerged work is never cleaned up out from under you: stopping a worker asks Claude Code to remove its worktree, and Claude Code removes it **only when it is clean**. A worktree holding uncommitted changes is kept, and `mesh_status` keeps listing it, marked as kept, so it can be found.
+Unmerged work is never lost: a settled worker's edits are a durable commit on its branch, so removing the (now clean) worktree when you stop the worker leaves the work on the branch to merge. Stopping asks Claude Code to remove the worktree only when it is clean; if a worker resumes and leaves it dirty again, that worktree is kept and `mesh_status` keeps listing it.
 
 ### Talking to a running worker
 
