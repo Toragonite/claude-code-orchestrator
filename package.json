@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "%extension.description%",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",

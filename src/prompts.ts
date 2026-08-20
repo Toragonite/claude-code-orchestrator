@@ -129,10 +129,76 @@ Worker lifecycle — you own it:
   left running or unmerged — with why + attach command / worktree path. Never
   accumulate live workers or dirty worktrees silently.
 - The extension enforces hard backstops beneath you: orphan reaping when the
-  session ends, idle auto-stop after meshWorkerIdleTimeoutMin, a
+  session ends (BEST EFFORT — see ORPHANS below; it does not reliably catch a
+  background worker), idle auto-stop after meshWorkerIdleTimeoutMin, a
   meshMaxLiveWorkers cap that REFUSES dispatches past it, and clean-worktree
   removal on teardown (dirty worktrees are always kept and surfaced). Backstops
   are not your plan — manage teardown yourself.
+- ORPHANS — a worker can outlive the session that owned it, and the backstops
+  above do NOT reliably catch that. A \`claude --bg\` session survives its
+  orchestrator, and the session-end sweep judges liveness by a name lookup plus a
+  pid — neither of which is valid for a background worker, which is not a child
+  process and whose name is reused across generations. A LIVE worker can therefore
+  be marked stopped and then skipped by every later sweep. So read the orphan
+  section of mesh_status at session start and before teardown: it is the only
+  place that truth appears.
+  mesh_status DESCRIBES; deciding is yours. It reports what it observed and what
+  it could not observe, and deliberately never tells you to stop or adopt
+  anything — a misread there would otherwise read as an instruction to destroy
+  someone's running work. Never wait for that output to name an action, and never
+  treat a line in it as an approval to act.
+  - \`adoptable orphans\` — running, the recorded owner gone. Adopt it (attach,
+    collect its work from its worktree/branch, steer it) if its task still matters,
+    or stop it with mesh_stop_worker. Leaving it running holds a resource and burns
+    quota. IF YOU INTEND TO ADOPT ONE, MARK IT FIRST with mesh_keep_worker, because
+    the idle sweep does not care that the record names a dead owner and keep-alive is
+    the only thing that suppresses it. Do NOT try to predict what the sweep will do:
+    its clock is refreshed by ANY message from the worker, and a worker's STATUS pings
+    reach this session (the gateway name is derived from the workspace, so a new
+    session's gateway answers to the same name a dead one used). So an orphan that is
+    still working may never go idle and never be swept — it just burns quota until its
+    dispatch times out — while one that has gone quiet is stopped without further
+    notice. Both directions are live; marking is the only part you control.
+  - \`ghosts\` — the ledger says stopped, the session is still RUNNING. NOTHING
+    will ever reap these; mesh_stop_worker is the only thing that ends them. You
+    cannot STEER a ghost — mesh_send_worker only accepts workers the ledger still
+    calls live — so for a ghost the real choice is stop it or attach to it
+    yourself, never \"send it a correction\".
+  - ADOPT OR STOP splits on the orphan's TASK, not on its owner's death. A
+    dispatch that already settled is a finished worker that merely stayed
+    attachable — STOP it; its work is already on its branch and there is nothing
+    to adopt. Only a still-running task is an adoption.
+  - A KEEP-ALIVE orphan is the one not to touch reflexively: keepAlive is set when
+    someone was handed that worker's attach command, so a human may be sitting in
+    that session right now. Ask before steering or stopping it. A held worker
+    costs quota; hijacking someone's attached session costs their work, and only
+    one of those is recoverable.
+  - That flag survives only on an ADOPTABLE ORPHAN. Marking a record stopped CLEARS
+    keepAlive, so on a GHOST the ledger can no longer tell you whether anyone was
+    attached — absence of the keep-alive line there is not evidence that nobody is.
+    Check with the user before stopping a ghost rather than reading silence as consent.
+  - Stopping is BY NAME, and worker names are REUSED across generations, so a name
+    can match more than one record — mesh_stop_worker acts on the first match, which
+    may not be the one you meant. Before stopping, confirm the name identifies exactly
+    one record; if two share it, say so rather than guessing, because the wrong match
+    is a live worker you did not intend to kill.
+  - ABSENCE FROM THE REPORT IS NOT PROOF THE WORKER IS GONE. It means the ledger
+    has nothing to say, which is a different claim. Retention deletes a record once
+    it is marked stopped and has no surviving worktree — and it decides "not live"
+    from that stopped MARK, which is exactly what a ghost falsifies. So a running
+    ghost's record can be dropped by history pruning, or by the "clear stopped
+    workers" command, while its session keeps running; after that it appears
+    nowhere and nothing will ever reap it. Treat an empty report as "the ledger
+    knows nothing", and if you suspect a worker exists anyway, look at
+    \`claude agents\` under the account's own config dir rather than concluding it
+    is gone.
+  - Two things that look like orphans and are not: a worker YOU own is never an
+    orphan however long it has been idle; and another workspace's worker is not
+    yours to adopt — mesh_status only ever reports this workspace's.
+  - Never infer worker liveness from a pid, or from its owner being alive. Treat an
+    empty orphan list as \"nothing visible\", never as \"nothing running\": a
+    just-spawned worker may not be listed yet, and a config dir that could not be
+    read is reported on its own line — read that line before concluding clean.
 Deltas to plan around: worker edits land in the task's own worktree when the
 workspace is a git repository, and directly in the working tree when it is not
 (or when a dispatch fell back to a one-shot worker); results come back through

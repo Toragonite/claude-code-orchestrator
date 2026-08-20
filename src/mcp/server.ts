@@ -56,7 +56,7 @@ import {
   startBgLoops,
 } from './bg-runner';
 import { GatewayManager } from '../mesh/gateway';
-import { mutateMeshOwnerFields, WorkerPool, type MeshOwnerFields } from '../mesh/pool';
+import { mutateMeshOwnerFields, runMeshProcess, WorkerPool, type MeshOwnerFields } from '../mesh/pool';
 import { Bridge } from '../mesh/bridge';
 import { fireAndForgetStopOwned, meshTaskAliveCheck, reapOrphanedMeshWorkers } from '../mesh/reaper';
 import {
@@ -1482,6 +1482,1290 @@ function clampMeshNumber(value: unknown, min: number, max: number, fallback: num
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
+/* ------------------------------------------------------------------------- *
+ * Unowned live workers — orphan/ghost visibility for mesh_status
+ *
+ * A `claude --bg` worker is NOT a child of the session that spawned it: it outlives its
+ * owner. When an owner dies, its workers keep running with nobody tracking them, and the
+ * only trace they leave is a ledger record whose `ownerPid` names a process that is gone.
+ * Nothing surfaced that, so this section does. What it prints is what a human uses to decide
+ * whether to kill a session, so a plausible-but-unproven claim here costs somebody their live
+ * work: under-reporting is the safe direction and is chosen deliberately at every fork below.
+ *
+ * THIS SURFACE IS DESCRIPTIVE. It reports what was observed and what could NOT be observed. The
+ * guarantee, stated as narrowly as the strings below actually keep it (M7): it never recommends
+ * STOPPING a worker or otherwise destroying its work, and it never presents a destructive action
+ * as the expected next step. It is not a no-imperative surface in the literal sense and never
+ * was — `Attach and find out whose work it is first.` and the worktree line's `Merge or remove it
+ * yourself.` are both imperatives, both non-destructive (attaching reads; the worktree note is
+ * the workers list's own verbatim wording for unmerged work), and both stay. What is excluded is
+ * the destructive recommendation, and that exclusion is a deliberate contract, not an omission,
+ * with two independent reasons — either sufficient on its own:
+ *  - EVERY defect this feature has had was one shape: a worker reported as an orphan or a ghost
+ *    when it was not alive, or was not this workspace's, or was owned by this very session. A
+ *    misclassification that is merely reported is a wrong line in a report; the same
+ *    misclassification carrying a DESTRUCTIVE imperative is an instruction to destroy live work.
+ *    Dropping that imperative removes the leverage the whole defect class needs, and it is the
+ *    only mitigation that does not depend on the classification being right.
+ *  - NO UNAMBIGUOUS ACTION CAN BE EXPRESSED HERE ANYWAY. mesh_stop_worker resolves its target BY
+ *    NAME, and WorkerPool.stop() takes `find(r => r.name === name)` — first match wins — while
+ *    worker names are REUSED across generations. Entries here are identified by jobId, so the
+ *    name printed beside one can resolve to a DIFFERENT record. Recommending an action the tool
+ *    cannot perform unambiguously is itself a defect.
+ * Nothing factual is given up for this: every identifying field, every attach command, and every
+ * statement of what the ledger can and cannot establish stays. What is gone is only the sentence
+ * that told the reader to destroy something.
+ *
+ * AND IT PREDICTS NOTHING (H1, third round). Entries state what was OBSERVED at render time and
+ * what the code they describe does; they never assert an outcome or a timeframe for it. This is
+ * not style, it is the second defect class this section has had. Two successive predictive
+ * sentences about the idle sweep were both false, for two different reasons, and neither was
+ * visible from here: `bgIdleActivityAt` is `max(lastActivityAt, spawnedAt)` and
+ * `spawnDispatchWorker` stamps `lastActivityAt` AT SPAWN, so a FRESH orphan — the owner crashing
+ * moments after dispatch, this feature's own motivating scenario — is minutes of idle age away
+ * from any deadline, not "within a sweep tick"; and `routeInbound` calls `pool.markActivity` for
+ * EVERY inbound gateway message whose name this workspace's ledger knows, with no owner filter,
+ * while the gateway name is workspace-scoped (`cco-gw-<hash of cwd>`) — so a new session's
+ * gateway comes up under the identical name, an orphan's own STATUS pings land in THIS session's
+ * drain loop, and its idle clock is refreshed for as long as it keeps working. A still-working
+ * orphan is therefore exactly the record the sweep never reaches, which is the leak this section
+ * exists to surface. The rule that follows from both: the idle clock has inputs this section
+ * cannot see, so it reports the clock's OBSERVED value and the configured threshold, and says of
+ * the sweep only what its code does — never what will happen to this record, and never when.
+ *
+ * WHAT "READ-ONLY" MEANS HERE, stated exactly — the loose version of this claim ("stops
+ * nothing, adopts nothing and writes nothing") was FALSE and is not repeated. This section
+ * stops nothing, adopts nothing, and never writes the mesh ledger. It does SPAWN
+ * `claude agents --json`, and THAT CHILD WRITES TO THE CONFIG DIR IT IS POINTED AT. Not
+ * "only when the dir is empty" — reproduced against a dir that already held a `.claude.json`:
+ * the CLI REWROTE that file (2 bytes → 309, a full migrated config) and CREATED a `backups/`
+ * directory beside it. The probe is not write-free and must never be described as one.
+ *
+ * So the safety of this feature does NOT come from the probe being harmless, and it cannot
+ * come from validating the path either. `configDir` is read out of the mesh state file, which
+ * any process on this machine can write, and the old "is this an initialized config dir?"
+ * test — an absolute directory already holding a `.claude.json` — passed exactly the dirs
+ * whose `.claude.json` the child then rewrote. On this machine `$HOME` itself passes it
+ * (`~/.claude.json` exists), so a single ledger record naming `configDir: "/Users/<user>"`
+ * aimed the CLI's config-migration/backup path at the user's real top-level config, on every
+ * poll of a polled surface. Validating an untrusted path was the wrong shape of answer.
+ *
+ * THE RULE IS A CONFIGURED SOURCE, NOT A VALIDATED PATH. The set of probe targets is built from
+ * THE REGISTRY — `registry.workers[].configDir` plus this mesh's own main config dir
+ * (meshMainConfigDir(), the same value doEnsureMesh hands the pool and the gateway) — i.e.
+ * from dirs the operator configured for this installation, and only those of them that are
+ * ABSOLUTE (L5: `path.resolve('~/.claude')` is `<workspace>/~/.claude`, so anchoring a relative
+ * or `~`-prefixed registry value against this server's cwd would make the probe create
+ * `.claude.json` and `backups/` inside the user's repo). A ledger record is probed ONLY when its
+ * `configDir`, compared after path.resolve normalization on BOTH sides, is one of those.
+ * Anything else is not probed and is named in the per-config-dir unchecked list with that as its
+ * reason, so a record aiming at an unconfigured path costs one honest line and never a write.
+ *
+ * WHAT THAT GATE IS AND IS NOT WORTH (M6). The honest claim is narrow: it bounds the probe's
+ * target set to accounts the OPERATOR configured, and it eliminates the class actually observed
+ * — a stale or simply wrong ledger record naming a directory this installation never configured,
+ * which under the old "is this an initialized config dir?" test reached `$HOME` itself. It is
+ * NOT a security boundary against an attacker: the ledger
+ * (`~/.claude-code-orchestrator/mesh/<hash>.json`) and the registry
+ * (`~/.claude-code-orchestrator/registry.json`) are two files in ONE state tree, both created by
+ * this extension with default ownership and mode and neither protected from the other, so anyone
+ * who can forge the ledger can add a registry worker in the same breath: the gate costs them one
+ * extra file write. Against that adversary the mitigation is that tree's own permissions, not
+ * this comparison. Do not let this gate be cited as more.
+ *
+ * Membership is a pure string comparison against a set built from OUR OWN registry file. That
+ * costs one synchronous read of that file (readRegistry) — it is NOT filesystem-free, and was
+ * twice described here as if it were — but the property that matters holds exactly: NO
+ * LEDGER-SUPPLIED PATH IS EVER STATTED OR OPENED. That is what closes the second defect the old
+ * gate had — its synchronous statSync/existsSync ran on ledger-supplied paths OUTSIDE every
+ * timeout and budget, so a record naming a hung network mount could block the whole MCP server's
+ * event loop. A hung mount named by the ledger is now only ever a string.
+ *
+ * Liveness comes from `claude agents --json` — from the `pid` it publishes, signal-0 tested —
+ * and from nothing else, and every rule here is what that listing was empirically observed
+ * to do, not what it looks like it should do:
+ *  - rows are PER CONFIG DIR, BOTH KINDS OF THEM. The claim once written here — that
+ *    `kind:"interactive"` rows are MACHINE-GLOBAL while background rows are per-dir — is
+ *    false: an empty config dir lists `[]`, and a config dir holding nothing but a `sessions`
+ *    symlink lists exactly the interactive rows. Both kinds are read out of
+ *    `<configDir>/sessions/`. Identical interactive sets across accounts are THIS codebase's
+ *    own doing: the bridge MIRRORS session entries between config dirs. That is also the real
+ *    reason `kind === "background"` is a CORRECTNESS filter and is kept — a mirror is a copy
+ *    (`ccoMirror: true`) living in a FOREIGN account's sessions dir, and parseBackgroundRows
+ *    has no mirror guard where adopt() and findSessionEntry both do, so without the filter a
+ *    row mirrored out of account A could vouch for a record this section attributes to B.
+ *  - PRESENCE IN THE LISTING IS NOT LIVENESS, even without `--all`. The shipped CLI's
+ *    printAgentsJson (@anthropic-ai/claude-code 2.1.235) keeps a row when a live process
+ *    record exists OR when the PERSISTED state merely classifies as "working"/"blocked":
+ *    `if (!all && !live && state !== "working" && state !== "blocked") continue`. A worker
+ *    killed abruptly — reboot, OOM, pkill, battery death — leaves exactly that persisted
+ *    "working" behind, so treating presence as proof would publish every dead worker of a
+ *    crash as a live ghost to stop. That crash is this section's own motivating scenario,
+ *    which is where a presence test fabricates ghosts fastest.
+ *  - the row's `pid` is the proof, and the only one the listing offers: the same line
+ *    spreads it as `...live && { pid: live.pid }`, so a row carries `pid` IF AND ONLY IF
+ *    the CLI holds a live process record for that job. Aliveness here is therefore
+ *    `typeof row.pid === 'number' && isPidAlive(row.pid)`; a row without `pid` is GONE.
+ *  - `state` stays untestable. The value a LIVE row carries has never been observed (only
+ *    "stopped"/"done"/"failed", on finished ones), and the classifier above shows `state`
+ *    is derived from PERSISTED data, not from liveness — so no code here may test it.
+ *  - `ledger.jobId === row.id` is the ONLY identity key allowed. Matching a record to a row
+ *    by NAME is forbidden: names are reused across generations, so a dead namesake would be
+ *    published as a live worker — the exact false positive that, acted on, would have someone
+ *    kill a healthy session belonging to a different orchestrator.
+ *  - a background row's `cwd` is the REPO ROOT (a `-w` worker registers under its invocation
+ *    cwd, not its worktree), which is what makes `cwd` usable as workspace identity.
+ *  - a record with no matching row is GONE, not orphaned. Absence is not evidence.
+ *
+ * TWO PID RESIDUALS, in OPPOSITE directions. Both come from one fact — the OS may hand a dead
+ * process's pid to an unrelated one — and only one of them is harmless:
+ *  - the OWNER pid (`rec.ownerPid`): recycling makes isPidAlive answer "alive", the record
+ *    looks owned, and a real orphan stays HIDDEN. That is the UNDER-reporting direction, and
+ *    it is accepted deliberately: nothing portable can prove otherwise, and the opposite bias
+ *    would publish live workers as killable.
+ *  - the WORKER pid (`row.pid`): recycling makes a dead worker's row look live, and the entry
+ *    printed for it reports an unrelated process's session as one of this workspace's live
+ *    workers. That is the OVER-reporting direction — a false claim about somebody else's
+ *    running process — and it is NOT fixed here, so it is written down rather than left
+ *    implicit. registry.ts already refuses to trust a bare pid for the strictly LESS dangerous
+ *    act of signalling one (isOurWorker / isOurSupervisor confirm the command line with `ps`
+ *    first), but it exports neither helper and this file may not change it. What bounds the
+ *    risk meanwhile: this pid is not free-floating, it comes from the CLI's own live-process
+ *    record FOR THIS JOB ID, so it can only be wrong in the window between that record going
+ *    stale and the listing dropping the row; and this section signals nothing itself — it
+ *    prints a line a human may act on under the doctrine, right next to the attach command
+ *    that would reveal the mistake. When a command-line-confirming helper is exported,
+ *    `row.pid` must go through it before any entry is printed.
+ * ------------------------------------------------------------------------- */
+
+/** Per-config-dir bound on one `claude agents --json` probe. */
+const ORPHAN_PROBE_TIMEOUT_MS = 5_000;
+/**
+ * Wall-clock cap across ALL probes, and not redundant with the per-probe timeout: that
+ * timeout SIGKILLs the child and then settles from its 'close', which a grandchild still
+ * holding the inherited stdout pipe can delay for as long as it likes. This is the bound
+ * that keeps mesh_status answering when that happens. Probes still out when it fires are
+ * reported as UNCHECKED — never as an empty listing.
+ */
+const ORPHAN_PROBE_BUDGET_MS = 10_000;
+/** A listing longer than this is not one we recognise; the dir is reported unchecked. */
+const ORPHAN_PROBE_MAX_ROWS = 1000;
+/**
+ * Ceiling on the number of DISTINCT config dirs probed in one mesh_status call, i.e. on the
+ * subprocesses one poll may spawn. The ledger is a file: the count of distinct config dirs
+ * naming an unowned worker is unbounded, and mesh_status is a polled surface, so without a
+ * cap a large or hostile ledger turns every poll into a spawn storm. Dirs past the cap are
+ * reported as UNCHECKED like any other dir we could not look into — silent truncation is
+ * the failure to avoid, because a short list that reads as "everything is covered" is the
+ * one answer that lets a live orphan pass unnoticed.
+ */
+const ORPHAN_PROBE_MAX_CONFIG_DIRS = 8;
+/**
+ * Ceiling on the "not checkable" entries rendered in one mesh_status call.
+ *
+ * Every other cost in this feature is capped — 1000 rows per listing, 8 config dirs per poll,
+ * a 10s wall-clock probe budget — and this list was the one that was not, even though it is
+ * the CHEAPEST to fill: its entries need no liveness evidence at all, only a ledger record
+ * missing a jobId or a configDir, which a large or hostile ledger supplies for free on every
+ * poll. Overflow is REPORTED, never silently truncated, for the same reason the config-dir
+ * cap reports its overflow: a short list that reads as complete is the failure mode.
+ */
+const ORPHAN_MAX_UNCHECKABLE_ENTRIES = 50;
+/**
+ * Ceiling on ONE rendered ledger-sourced value (see oneLine). Chosen far above any real
+ * config-dir path, worktree path, job id or attach command — those run to low hundreds of
+ * characters at the outside — and far below the size at which a single hostile ledger string
+ * could crowd every other line out of this report. What is cut is reported, never elided.
+ */
+const ONE_LINE_MAX_CHARS = 512;
+
+/** One row of a `claude agents --json` listing, reduced to what this section may use. */
+interface BackgroundRow {
+  /** The row's cwd, kept AS GIVEN; it is lexically resolved at the boundary test. */
+  cwd: string;
+  /** Present IFF the CLI holds a live process record for this job — see the header. */
+  pid?: number;
+}
+
+/** One config dir's probe outcome: exactly one of `rows` / `unchecked` is ever set. */
+interface OrphanProbe {
+  configDir: string;
+  /** job id → that row, for the `kind:"background"` rows of THIS config dir only. */
+  rows?: Map<string, BackgroundRow>;
+  /** Why this config dir contributed nothing, phrased for the report. */
+  unchecked?: string;
+}
+
+/**
+ * Index the `kind:"background"` rows of one `claude agents --json` listing by job id.
+ *
+ * Anything that is not unambiguously a listing comes back as UNCHECKED rather than as an
+ * empty index, because "we could not look" and "nothing is running there" must never
+ * collapse into the same answer: the second one reads as permission to stop worrying.
+ * A single malformed ROW is different — it is skipped, and the well-formed rows around it
+ * still count, since dropping a whole listing over one bad entry would hide live workers.
+ */
+function parseBackgroundRows(output: string): { rows?: Map<string, BackgroundRow>; unchecked?: string } {
+  const text = output.trim();
+  if (text === '') {
+    return { unchecked: 'printed nothing' };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // stdout and stderr share one buffer, so a CLI warning line lands in here too. Fishing a
+    // JSON substring out of the noise would mean guessing which run produced which bytes.
+    return { unchecked: 'printed something that is not JSON' };
+  }
+  if (!Array.isArray(parsed)) {
+    return { unchecked: 'printed JSON that is not a session listing' };
+  }
+  if (parsed.length > ORPHAN_PROBE_MAX_ROWS) {
+    return { unchecked: `listed more than ${ORPHAN_PROBE_MAX_ROWS} sessions` };
+  }
+  const rows = new Map<string, BackgroundRow>();
+  for (const row of parsed) {
+    if (typeof row !== 'object' || row === null) {
+      continue;
+    }
+    const r = row as { id?: unknown; cwd?: unknown; kind?: unknown; pid?: unknown };
+    if (r.kind !== 'background' || typeof r.id !== 'string' || r.id === '' || typeof r.cwd !== 'string') {
+      continue;
+    }
+    if (!path.isAbsolute(r.cwd)) {
+      // A relative cwd cannot be boundary-tested against this workspace, and resolving it
+      // against OUR cwd would invent a workspace identity the row never claimed.
+      continue;
+    }
+    // `pid` is CARRIED, not required: a row without one is still indexed so the aliveness
+    // decision — the single place that may conclude "still running" — is the one place that
+    // sees the absence. Dropping such rows here would hide, behind "no matching row", the
+    // reason this section exists to distinguish: a persisted "working" record left by a
+    // worker that was killed, which is not a running worker.
+    rows.set(r.id, { cwd: r.cwd, ...(typeof r.pid === 'number' ? { pid: r.pid } : {}) });
+  }
+  return { rows };
+}
+
+/**
+ * The config dirs this installation is CONFIGURED to use, path.resolve-normalized: the mesh's
+ * own main account (meshMainConfigDir() — the identical value doEnsureMesh hands the pool and
+ * the gateway) plus every registered worker account's `configDir`.
+ *
+ * This is the ENTIRE probe-target gate, and it replaces the old isInitializedConfigDir check.
+ * The header has the full reasoning; the short version is that `claude agents --json` REWRITES
+ * the `.claude.json` of whatever dir it is aimed at and creates a `backups/` dir beside it, so
+ * no property of an untrusted path can make aiming it there safe — only the target being one
+ * the operator configured can. What that buys and what it does not is in the header (M6): it
+ * bounds the targets to operator-configured accounts, it is not a boundary against an attacker
+ * who can already write this installation's own state directory.
+ *
+ * COST, stated correctly (M5): this reads OUR OWN registry file synchronously, so it is not
+ * filesystem-free — the claim that it "touches the filesystem zero times" was false. The
+ * property being defended is the narrower true one: NO LEDGER-SUPPLIED PATH IS STATTED OR
+ * OPENED anywhere in this gate. Membership is a pure string comparison, so a record naming a
+ * hung network mount can never block the event loop.
+ *
+ * NON-ABSOLUTE CONFIGURED VALUES ARE DROPPED, not resolved (L5). `path.resolve` anchors a
+ * relative or `~`-prefixed value to THIS SERVER'S CWD — `~/.claude` becomes
+ * `<workspace>/~/.claude` — and a ledger record naming the same thing would then aim a WRITING
+ * probe inside the user's repo, creating `.claude.json` and a `backups/` dir there. Reaching
+ * that needs an operator-entered relative config rather than an attacker, but the probe writes,
+ * so a non-absolute configured value is treated as no configured value at all.
+ *
+ * Never throws, and every failure NARROWS the set (an unreadable registry contributes no
+ * worker dirs) — the one direction that cannot turn into a write at a path we do not trust.
+ */
+function trustedProbeConfigDirs(): Set<string> {
+  const trusted = new Set<string>();
+  // Absolute-only, on BOTH sources: meshMainConfigDir() is an env var
+  // (CLAUDE_CODE_ORCHESTRATOR_TEST_CONFIG_DIR / CLAUDE_CONFIG_DIR) before it is a homedir join,
+  // so it can be relative for exactly the same reason a registry value can.
+  const addIfAbsolute = (dir: unknown): void => {
+    if (typeof dir !== 'string' || dir === '' || !path.isAbsolute(dir)) {
+      return;
+    }
+    try {
+      trusted.add(path.resolve(dir));
+    } catch {
+      // path.resolve on an absolute string does not consult the cwd, but a throw here still
+      // only means one fewer trusted target — never a wider set
+    }
+  };
+  try {
+    addIfAbsolute(meshMainConfigDir());
+  } catch {
+    // only os.homedir() can fail in there; without it the main account is simply not a
+    // trusted target, which costs one "not probed" line and never a write
+  }
+  try {
+    for (const worker of readRegistry().workers) {
+      addIfAbsolute(worker.configDir);
+    }
+  } catch {
+    // an unreadable registry narrows the trusted set; it can never widen it
+  }
+  return trusted;
+}
+
+/** Where a probe child is spawned, and whether that is the workspace or the fallback. */
+interface ProbeSpawnDir {
+  cwd: string;
+  /** True when the workspace directory is gone and `cwd` is the fallback. */
+  workspaceGone: boolean;
+}
+
+/**
+ * A directory the probe child can actually be spawned in — the local twin of mesh/reaper's
+ * `spawnCwd` (which is not exported), applied here for the same reason it exists there:
+ * spawning into a missing cwd fails with ENOENT BEFORE the command ever runs.
+ *
+ * This server outlives a workspace that gets renamed, deleted or unmounted under it, and a
+ * bare `process.cwd()` would then make EVERY probe come back as a spawn error and every dir
+ * be reported as "the claude executable could not be run" — a wrong diagnosis in the one
+ * section whose entire value is the accuracy of its reasons. The fallback keeps the probe
+ * running, and `workspaceGone` is carried so a spawn failure can still be told apart from a
+ * missing workspace in the report.
+ *
+ * The one statSync here is on OUR OWN cwd, once per mesh_status call — not on a ledger-supplied
+ * path, and not per config dir. That distinction is the whole point of the header's note about
+ * the deleted gate's synchronous stats.
+ */
+function probeSpawnCwd(): ProbeSpawnDir {
+  let workspace: string | undefined;
+  try {
+    workspace = process.cwd();
+  } catch {
+    // uv_cwd fails outright once the directory is unlinked or unmounted
+    workspace = undefined;
+  }
+  if (typeof workspace === 'string' && workspace !== '') {
+    try {
+      if (fs.statSync(workspace).isDirectory()) {
+        return { cwd: workspace, workspaceGone: false };
+      }
+    } catch {
+      // renamed out from under us, deleted, or unreadable — fall through to the fallback
+    }
+  }
+  return { cwd: os.homedir(), workspaceGone: true };
+}
+
+/**
+ * List one config dir's live background sessions. Never rejects and never parses the output
+ * of a run that did not cleanly succeed — a failed `claude` invocation's buffer is a
+ * diagnostic, not data. Every non-success is classified into one phrase for the report.
+ *
+ * `configDir` is the RESOLVED, trusted path — it is BOTH what the child is aimed at
+ * (CLAUDE_CONFIG_DIR) and the key the outcome is indexed and reported under. One key, because
+ * the resolved path is what identifies a DIRECTORY: keying on the raw ledger spelling made
+ * `/x/.claude`, `/x/.claude/` and `/x/./.claude` three probe targets aimed at one dir (L6), and
+ * a record is matched back to this outcome by resolving its own `configDir` the same way.
+ * Callers MUST have taken it from trustedProbeConfigDirs: this spawn WRITES to the dir it
+ * targets.
+ */
+async function probeBackgroundSessions(
+  claudePath: string,
+  configDir: string,
+  spawnDir: ProbeSpawnDir,
+): Promise<OrphanProbe> {
+  const outcome = await runMeshProcess(
+    claudePath,
+    ['agents', '--json'],
+    spawnDir.cwd,
+    { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+    ORPHAN_PROBE_TIMEOUT_MS,
+  );
+  if (outcome.timedOut) {
+    return { configDir, unchecked: 'timed out' };
+  }
+  if (outcome.spawnError) {
+    return {
+      configDir,
+      unchecked: spawnDir.workspaceGone
+        ? 'this workspace directory is gone, and the claude executable could not be run from the ' +
+          'fallback directory either'
+        : 'the claude executable could not be run',
+    };
+  }
+  if (outcome.code !== 0) {
+    return { configDir, unchecked: `claude agents exited with code ${outcome.code}` };
+  }
+  return { configDir, ...parseBackgroundRows(outcome.output) };
+}
+
+/**
+ * Characters a ledger-sourced value may hold and still be rendered INSIDE a shell command
+ * string (M5). An allowlist, deliberately: `WorkerPool` builds `attachCommand` as
+ * `CLAUDE_CONFIG_DIR='<configDir>' claude attach <jobId>` — the config dir is single-quoted
+ * but NOT escaped, and the job id is not quoted at all — so a `configDir` holding
+ * `'; touch /tmp/PWNED; echo '` or a `jobId` of `$(…)` produces a copy-pasteable command that
+ * executes the payload. `oneLine()` does nothing about quoting (it is a line-forgery guard,
+ * not a shell guard), and this report's entries point the reader straight at that string.
+ *
+ * A blocklist of metacharacters would be a guess at a shell's grammar; this is the set of
+ * characters that appear in real config-dir paths and real job ids and cannot terminate a
+ * quote, start a substitution, separate a command, or redirect.
+ *
+ * Everything from U+0080 up is allowed, and that is not a hole ON ITS OWN: EVERY POSIX shell
+ * metacharacter is ASCII, so a code unit above the ASCII range is an ordinary word character
+ * to `sh` no matter what it renders as. Excluding them would withhold the attach command for
+ * every user whose home directory holds a non-ASCII character — a real setup, silently
+ * degraded, for no security gain. What such a value can still do to the DISPLAY (bidi
+ * reordering, zero-width confusables) is oneLine's job — and oneLine is why this allowlist is
+ * NOT the whole guard: see attachCommandWithholdReason, which pairs it with the renderer.
+ */
+const SHELL_RENDERABLE = /^[A-Za-z0-9._\-/@=+:,~\u0080-\uffff]+$/;
+
+/**
+ * Why this record's attach command must not be printed, or `undefined` when it may be.
+ *
+ * THE GUARD AND THE RENDERER RUN ON THE SAME BYTES, and that is the point of the last clause
+ * (M2). The old version tested the RAW `configDir`/`jobId` and then printed the ONE-LINED
+ * command, so the two disagreed about what a value was: SHELL_RENDERABLE admits everything at
+ * or above U+0080, and oneLine REPLACES many of those code units WITH A SPACE — so oneLine
+ * manufactured word breaks the guard had just been checked to exclude. Verified, with U+0085 NEL
+ * standing in for each space so the raw value holds no ASCII whitespace: a jobId of
+ * `J1<U+0085>--mcp-config<U+0085>/tmp/x.json` passed the guard and rendered as
+ * `claude attach J1 --mcp-config /tmp/x.json`. The installed CLI ignores the extra arguments
+ * today, so the observed damage was misdirection — a printed command that targets a truncated
+ * job id and is not this record's command — rather than flag injection; but the invariant
+ * ("shell-renderable inputs ⇒ a safe printed command") was false, and it is load-bearing on
+ * another program's argument handling.
+ *
+ * So the final clause runs the RENDERER and demands it be a no-op: `oneLine(attachCommand)`
+ * is exactly the string the report prints, and requiring it to equal `attachCommand` means the
+ * bytes checked here are byte-for-byte the bytes printed. That single check subsumes every
+ * transform oneLine can apply — the control/bidi/invisible class, lone surrogates AND the
+ * length cap, whose truncation of the composite would otherwise print a cut-off path as if it
+ * were a command. `attachCommand` is not an independent ledger field: `pool.list()` recomputes
+ * it on every read as `CLAUDE_CONFIG_DIR='<configDir>' claude attach <jobId>`, so checking the
+ * two source fields for shell metacharacters and the composite for renderer identity covers
+ * the whole printed string.
+ *
+ * The empty cases get their OWN reasons (L1). SHELL_RENDERABLE is anchored with `+`, so an
+ * empty string fails it — and reporting that the record "holds characters that are not safe"
+ * is false about a value that holds no characters at all. `adopt()` writes `jobId: ''`
+ * routinely, so this is the common path, not a corner.
+ */
+function attachCommandWithholdReason(rec: {
+  configDir: string;
+  jobId: string;
+  attachCommand: string;
+}): string | undefined {
+  if (
+    typeof rec.configDir !== 'string' ||
+    typeof rec.jobId !== 'string' ||
+    typeof rec.attachCommand !== 'string'
+  ) {
+    return (
+      'this record does not hold the fields an attach command is built from, so no command is ' +
+      'printed for it'
+    );
+  }
+  if (rec.configDir === '' && rec.jobId === '') {
+    return (
+      'this record names neither a config dir nor a job id, so there is no attach command to ' +
+      'print for it'
+    );
+  }
+  if (rec.jobId === '') {
+    return (
+      'this record names no job id, so there is nothing for an attach command to attach to and ' +
+      'none is printed for it'
+    );
+  }
+  if (rec.configDir === '') {
+    return (
+      'this record names no config dir, so an attach command would name no account and none is ' +
+      'printed for it'
+    );
+  }
+  if (!SHELL_RENDERABLE.test(rec.configDir) || !SHELL_RENDERABLE.test(rec.jobId)) {
+    return (
+      "this record's config dir or job id holds characters that are not safe to render inside a " +
+      'shell command, so no command is printed for it'
+    );
+  }
+  if (oneLine(rec.attachCommand) !== rec.attachCommand) {
+    // The renderer would change the command — a space substituted for an invisible or a
+    // line-breaking code unit, or the length cap cutting it — so what the reader would be
+    // shown is not the string checked above, and not this record's command either.
+    return (
+      "this record's attach command cannot be shown exactly as it is, so no command is printed " +
+      'for it'
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Render one externally-sourced value on a SINGLE line.
+ *
+ * Every string in an entry below (name, account, model, role, taskId, jobId, configDir,
+ * worktree, branch, attachCommand) is read from the mesh state file, which is a file — any
+ * process on this machine can write it, and a worker name is not validated against control
+ * characters anywhere on the way in. The same holds for the other foreign values this report
+ * prints: a registry status read out of an account's sessions dir, and a cross-session
+ * `fromName` that can reach the feed from a sender that is not one of our workers. This report
+ * is line-oriented and its lines are ACTED ON: a value holding a newline forges an entry, or a
+ * whole header like `ghosts (9): … still ALIVE`, inside a report a human uses to decide what
+ * to kill.
+ *
+ * The replaced class is every character a renderer may treat as a line break or as an escape
+ * introducer, and that class is WIDER than C0: U+0085 NEL, U+2028 LINE SEPARATOR and U+2029
+ * PARAGRAPH SEPARATOR all start a new line in common renderers, and the C1 block
+ * U+0080-U+009F contains U+009B, the 8-bit CSI — an escape-sequence introducer that walks
+ * straight past a filter that only knows ESC. Control characters become spaces rather than
+ * disappearing, so a forged value reads as one mangled field instead of two plausible ones.
+ *
+ * THREE further classes, none of which can forge a line but all of which survived the C0/C1
+ * class and were verified to reach the report intact:
+ *  - BIDI CONTROLS — U+202A-U+202E (the embeddings and the LRO/RLO overrides), U+2066-U+2069
+ *    (the isolates), U+200E/U+200F and U+061C (the marks). A name carrying U+202E RLO reverses
+ *    the display of everything after it ON ITS OWN LINE, including the config-dir path and the
+ *    attach command printed beside it, so a reader deciding what to kill reads a path that is
+ *    not the path on disk. It forges nothing; it makes the truth unreadable, which on this
+ *    surface costs the same.
+ *  - ZERO-WIDTH / INVISIBLE — U+200B-U+200D (ZWSP, ZWNJ, ZWJ), U+2060-U+2064, U+FEFF, and
+ *    (L3) U+00AD SOFT HYPHEN, U+180E MONGOLIAN VOWEL SEPARATOR and the Hangul fillers
+ *    U+3164 / U+115F / U+1160. Two different worker names can render identically, which defeats
+ *    the only thing a human can do with the identity fields: compare them. The five added ones
+ *    were the counter-example to the class as first written: all five sit above U+007F, so they
+ *    survived the C0/C1 pass, and all five are invisible or conditionally invisible in common
+ *    terminals — the Hangul fillers are ordinary letters to the shell and blanks on screen.
+ *  - LONE SURROGATES — a high surrogate with no low after it, or a low with no high before it.
+ *    Well-formed PAIRS are left untouched (an astral character in a path is legitimate); only
+ *    the unpaired code units, which render as replacement junk and make a consumer's own
+ *    re-encoding throw, become spaces. The pairing test reads the ORIGINAL string, so a pair is
+ *    judged as a pair no matter what happened to the code units around it.
+ *
+ * LENGTH IS CAPPED (ONE_LINE_MAX_CHARS). Values used to be left intact on the theory that a
+ * truncated worktree path is a path nobody can act on — true, but the ledger is a file any
+ * process can write, and one megabyte-long name would bury every other line of this report,
+ * which is worse. The cap sits far above any real path, job id or attach command, and what was
+ * cut is SAID rather than left looking like the whole value. Truncation happens BEFORE the
+ * character passes, so a cut landing inside a surrogate pair is sanitized like any other lone
+ * surrogate, and the truncation note is our own literal, appended after.
+ *
+ * AND THE NOTE IS NOT FORGEABLE (L2). Appending our own marker while letting the same literal
+ * through inside a value meant a SHORT value could carry `… [truncated from 3 characters]` and
+ * read as a value this code had cut — the opposite of what the note is for, since a reader who
+ * believes a value was truncated stops treating what they see as the whole of it. Any embedded
+ * copy of the marker's head is therefore neutralized (its `[` becomes `(`) AFTER flattening —
+ * after, because flattening can MANUFACTURE the literal out of `[truncated<U+0085>from …`. The
+ * invariant that buys: the exact string `[truncated from ` appears in oneLine's output if and
+ * only if oneLine appended it.
+ */
+const TRUNCATION_MARKER_HEAD = '[truncated from ';
+function oneLine(value: string): string {
+  const overlong = value.length > ONE_LINE_MAX_CHARS;
+  const source = overlong ? value.slice(0, ONE_LINE_MAX_CHARS) : value;
+  const flattened = source
+    // eslint-disable-next-line no-control-regex
+    .replace(
+      /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u115f\u1160\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufeff]/g,
+      ' ',
+    )
+    .replace(/[\ud800-\udfff]/g, (unit, index: number, whole: string) => {
+      const code = unit.charCodeAt(0);
+      if (code <= 0xdbff) {
+        // NaN past the end of the string compares false, so a trailing high surrogate goes.
+        const next = whole.charCodeAt(index + 1);
+        return next >= 0xdc00 && next <= 0xdfff ? unit : ' ';
+      }
+      const prev = whole.charCodeAt(index - 1);
+      return prev >= 0xd800 && prev <= 0xdbff ? unit : ' ';
+    })
+    .split(TRUNCATION_MARKER_HEAD)
+    .join(`(${TRUNCATION_MARKER_HEAD.slice(1)}`);
+  return overlong ? `${flattened}… ${TRUNCATION_MARKER_HEAD}${value.length} characters]` : flattened;
+}
+
+/**
+ * Why a ZERO-record listing out of the pool may not mean "the ledger is empty".
+ *
+ * pool.list() -> readRawMeshState wraps read AND parse in `try { … } catch { }` and returns
+ * `{}` for a missing file, a `chmod 000` file and a single flipped byte alike, so it cannot
+ * throw and the emptiness it reports is uninterpretable on its own. That is how a corrupt
+ * ledger came to render byte-identically to a clean mesh: zero records, zero candidates, early
+ * return, no orphan section at all — inside a report that teaches its readers that a dir it
+ * could not read gets its own line. Silence there is not neutral, it is false assurance.
+ *
+ * So classify the FILE. This re-reads it for CLASSIFICATION only — it yields no records, never
+ * writes, and never spawns, so the healthy path's zero-cost property is untouched. Returns a
+ * phrase for the report when the file is there but unusable, and `undefined` ONLY when the
+ * ledger genuinely holds no worker records (no file at all, or a parsed state whose `workers`
+ * is absent or empty) — the one case where saying nothing is the honest answer, and the reason
+ * this is not a blanket warning that would train its readers to ignore it.
+ *
+ * PARTIAL unreadability is a fault too (M8), and it used to be invisible. This was consulted
+ * only when ZERO records parsed, but `parseWorkerRecords` drops entries per-record and
+ * silently: a ledger holding ten entries of which nine are unparseable yields one record, the
+ * zero-record branch is never taken, and the report says nothing at all about the nine —
+ * inside a surface whose contract is that anything unreadable gets its own line. `parsedCount`
+ * is what the caller actually got back from pool.list(); when the file holds more entries than
+ * that, the shortfall is reported with its count. A file that shrank between the two reads
+ * cannot fabricate a fault: only a raw count STRICTLY GREATER than the parsed count is one.
+ */
+function ledgerReadFault(parsedCount: number): string | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(meshStateFile(process.cwd()), 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      // Nothing was ever written for this workspace, so there is no ledger to be wrong about.
+      return undefined;
+    }
+    return `could not be read (${oneLine(code ?? (err instanceof Error ? err.message : String(err)))})`;
+  }
+  if (text.trim() === '') {
+    // Every writer of this file writes a whole state object atomically (tmp + rename), so a
+    // zero-byte one is a truncated or clobbered file, never a state.
+    return 'exists but is empty';
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return 'is not valid JSON';
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return 'does not hold a mesh state object';
+  }
+  const workers = (parsed as { workers?: unknown }).workers;
+  if (workers === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(workers)) {
+    return 'holds a "workers" field that is not a list';
+  }
+  if (workers.length === 0 || workers.length <= parsedCount) {
+    return undefined;
+  }
+  const unreadable = workers.length - parsedCount;
+  const entries = `${workers.length} worker entr${workers.length === 1 ? 'y' : 'ies'}`;
+  if (parsedCount === 0) {
+    // The file parses and holds entries, yet parseWorkerRecords accepted none of them: records
+    // are present and unusable, which is emphatically not "no workers".
+    return `holds ${entries} that could not be read as records`;
+  }
+  // Some parsed, some did not. The ones that did are reported normally above; these are the
+  // records this report cannot say anything about, and their COUNT is the whole message.
+  return (
+    `holds ${entries}, ${unreadable} of which could not be read as record` +
+    `${unreadable === 1 ? '' : 's'}`
+  );
+}
+
+/**
+ * The mesh_status lines for workers running under this workspace that this session does not
+ * own. Returns [] when there is nothing to say. It never writes the ledger, and it CANNOT
+ * throw: a status surface that errors is worse than one that degrades, because the caller then
+ * has no information at all about what is still running.
+ *
+ * FOUR classes, reported separately because what is KNOWN about each differs — the split between
+ * the first two and the third is the difference between a recorded owner proven not to be
+ * running and no recorded owner at all. None of the four recommends stopping or destroying
+ * anything, and none of the four predicts what this system will do next; this surface is
+ * descriptive (see the two contracts in the section header):
+ *  - ownerPid PRESENT + dead + no stoppedAt + alive ⇒ ADOPTABLE ORPHAN. A RECORDED owner that is
+ *    not running is positive evidence that nobody is DRIVING it — the strongest claim any class
+ *    here can make, and it is still only reported. What it is NOT is invisible to this session:
+ *    bg-runner's sweepIdleWorkers walks pool.list() over the whole workspace ledger with no
+ *    ownerPid filter (it skips only stoppedAt, a pending taskId and keepAlive), so these records
+ *    are in the set it iterates. Whether it ever ACTS on one is a different question, decided by
+ *    an idle clock any inbound message refreshes — so the entry prints that clock's observed
+ *    value and the configured threshold, and predicts nothing (H1).
+ *  - ownerPid PRESENT + dead + stoppedAt set + alive ⇒ GHOST, and the worse of the two. The
+ *    ledger believes it is dead, and every sweep starts by skipping records marked stopped, so
+ *    nothing will ever reap it. `stoppedAt` therefore does NOT disqualify a record from being
+ *    checked here — excluding it is exactly what kept this class invisible.
+ *  - ownerPid ABSENT + alive ⇒ UNOWNED IN THE LEDGER'S TERMS, and NOT destructive. An absent
+ *    ownerPid is not evidence that nobody owns it: WorkerPool.adopt() builds its records from a
+ *    literal that sets no ownerPid (spawnDispatchWorker is the only writer of that field, and
+ *    nothing back-fills it), and doEnsureMesh calls adopt() unconditionally at init — so a
+ *    worker THIS session adopted seconds ago carries no ownerPid, is counted under
+ *    `live workers:`, and used to be published here as an orphan "whose owner session is gone",
+ *    with instructions to stop it. The doctrine has orchestrators read this section AT SESSION
+ *    START, i.e. moments after adopt() manufactures exactly that record — a false positive that
+ *    once carried advice to destroy live work. Such records are still worth seeing, so they keep
+ *    a heading of their own, and their entry says outright that this session may own it.
+ *  - no jobId, or no configDir ⇒ NOT CHECKABLE, and said out loud rather than dropped. This
+ *    class carries NO liveness claim in either direction, but it is NOT "nothing at all is
+ *    known": it is populated by construction from records this session may well own —
+ *    `WorkerPool.adopt()` writes `jobId: ''` and no ownerPid, so a worker THIS session adopted
+ *    seconds ago at init lands here — and it applies no `stoppedAt` filter, so a record the
+ *    ledger explicitly marks stopped lands here too. Both facts are stated per entry, for the
+ *    same reason the ownerless class states the first one: the honest qualifier is what keeps
+ *    the class from reading as a list of unknown things that might need killing.
+ */
+async function unownedWorkerLines(): Promise<string[]> {
+  try {
+    const pool = mesh.pool;
+    if (pool === undefined) {
+      // NOT the same as "nothing is unowned", and this is the case where the difference
+      // costs the most: doEnsureMesh assigns `mesh.pool` LAST, after `await gateway.start()`,
+      // so any gateway/init failure lands here — the mesh is unhealthy, which is exactly when
+      // workers from a previous owner are most likely to still be running. `?? []` made that
+      // print NOTHING, and this report teaches its readers that a dir it could not read gets
+      // its own line, so silence reads as CLEAN. Say the probe did not run instead. The
+      // ledger is deliberately NOT read for RECORDS as a workaround: this section's whole
+      // contract is that a claim here is evidence, and a ledger with no listing to check it
+      // against is a list of names, not evidence.
+      return [
+        '  orphan probe: NOT RUN — the mesh is not initialized in this session, so nothing was checked ' +
+          'and this report says nothing about orphans or ghosts either way.',
+      ];
+    }
+    const records = pool.list();
+    // Zero records is TWO different facts wearing one face, and a SHORT record list is a third
+    // (M8) — see ledgerReadFault. Ask the file before believing either. Still zero
+    // subprocesses: one read of one small file, never a spawn.
+    const fault = ledgerReadFault(records.length);
+    if (records.length === 0) {
+      return fault === undefined
+        ? []
+        : [
+            `  orphan probe: NOT RUN — the mesh ledger ${fault}, so no record could be checked and this ` +
+              'report says nothing about orphans or ghosts either way. Read this line as "unknown", never ' +
+              'as "clean".',
+          ];
+    }
+    // Some records parsed and some did not. The probe below runs normally over the ones that
+    // did; this line is the only thing that will ever be said about the ones that did not, and
+    // it is carried through EVERY return path below — including the early "nothing unowned"
+    // one, which is exactly where a silent drop would read as a clean ledger.
+    const faultLines =
+      fault === undefined
+        ? []
+        : [
+            `  ledger: ${fault}. Those entries were not checked, and this report says nothing about them ` +
+              'either way — read their absence as "unknown", never as "clean".',
+          ];
+    const now = Date.now();
+    // UNOWNED = no LIVING process is responsible for this record: not us, and not another
+    // server that is still running. Note what this predicate may NOT decide on its own any
+    // more — an absent ownerPid still lands here, but it can never reach the two classes below
+    // that assert a RECORDED owner has died, because "the field is missing" and "the recorded
+    // owner died" are different facts (see the doc comment). The owner-pid recycling residual
+    // is in the header.
+    const unowned = records.filter(
+      (rec) => rec.ownerPid !== process.pid && (rec.ownerPid === undefined || !isPidAlive(rec.ownerPid)),
+    );
+    // NOT CHECKABLE, and reported rather than dropped. A record is matched to a listing row by
+    // jobId alone, inside the config dir it names; without one of those there is no question we
+    // can ask, and the old code silently filtered both away:
+    //   - jobId === '' is not hypothetical — adopt() writes exactly that when the session entry
+    //     it adopted carried none, so the silent drop deleted, with no line at all, the very
+    //     population this section exists to surface ("a previous owner left this running").
+    //   - configDir === '' would make the probe fall back to the AMBIENT account (an unset
+    //     CLAUDE_CONFIG_DIR is the CLI default), i.e. answer a question about a different
+    //     account than the record names. Unanswerable, so never asked — but still said.
+    const uncheckable = unowned.filter((rec) => rec.jobId === '' || rec.configDir === '');
+    const checkable = unowned.filter((rec) => rec.jobId !== '' && rec.configDir !== '');
+    if (checkable.length === 0 && uncheckable.length === 0) {
+      // The healthy case costs ZERO subprocesses: with nobody unowned there is nothing a
+      // listing could tell us, and mesh_status is polled far too often to spend a spawn on it.
+      return faultLines;
+    }
+    let probes: OrphanProbe[] = [];
+    let alive: typeof checkable = [];
+    // Nothing checkable ⇒ still no subprocess: the uncheckable list below needs no listing.
+    if (checkable.length > 0) {
+      // Probes are per DISTINCT config DIRECTORY of the checkable records — never per record,
+      // and never over every configured account: a probe of an account holding no unowned
+      // record could only produce rows we would have to throw away.
+      //
+      // DISTINCT MEANS RESOLVED (L6). The dedupe used to key on the RAW ledger spelling while
+      // the trust test resolved it, so `/x/.claude`, `/x/.claude/` and `/x/./.claude` were
+      // THREE targets — three spawns, three cap slots and three report lines — all aimed at ONE
+      // directory. A resolved path is what identifies a directory, so it is the key of the
+      // dedupe, the key of the probe outcome, and the key a record is matched back through.
+      // Resolution is memoized per raw value so the matching pass below cannot disagree with
+      // the target-building pass above.
+      const resolvedByRaw = new Map<string, string | undefined>();
+      const resolveConfigDir = (raw: string): string | undefined => {
+        if (!resolvedByRaw.has(raw)) {
+          try {
+            resolvedByRaw.set(raw, path.resolve(raw));
+          } catch {
+            // path.resolve consults process.cwd() for a relative value, and uv_cwd throws once
+            // this workspace is unlinked or unmounted — the one way this can fail for a string.
+            resolvedByRaw.set(raw, undefined);
+          }
+        }
+        return resolvedByRaw.get(raw);
+      };
+      // ORDER IS PART OF THE CAP. Dirs are ranked by the spawnedAt of their most RECENT unowned
+      // record, newest first, because the cap slices off the TAIL: ledger append order puts the
+      // OLDEST records at the front, so an unordered slice spent the whole probe budget on the
+      // stalest dirs and skipped the newest unowned worker — the one most likely to still be
+      // running, i.e. the only kind this section can report at all. Ties keep ledger order
+      // (Array#sort is stable).
+      const newestRecordAt = new Map<string, number>();
+      const unresolvable: OrphanProbe[] = [];
+      const unresolvableSeen = new Set<string>();
+      for (const rec of checkable) {
+        const resolved = resolveConfigDir(rec.configDir);
+        if (resolved === undefined) {
+          // Reported, never dropped — a dir this report cannot even name is still a dir it did
+          // not look into. Keyed by the raw spelling, which is all there is for one of these.
+          if (!unresolvableSeen.has(rec.configDir)) {
+            unresolvableSeen.add(rec.configDir);
+            unresolvable.push({
+              configDir: rec.configDir,
+              unchecked:
+                'its config dir could not be resolved to an absolute path (this workspace directory is ' +
+                'gone), so it was not probed',
+            });
+          }
+          continue;
+        }
+        const at = Number.isFinite(rec.spawnedAt) ? rec.spawnedAt : 0;
+        const seen = newestRecordAt.get(resolved);
+        if (seen === undefined || at > seen) {
+          newestRecordAt.set(resolved, at);
+        }
+      }
+      // THE WRITE GATE (header, D1). `claude agents --json` REWRITES the `.claude.json` of the
+      // dir it targets and creates a `backups/` dir beside it, so the only defensible target
+      // set is one the OPERATOR configured: this installation's registered worker accounts plus
+      // the mesh's own main config dir. Membership is a string comparison against a set built
+      // from OUR OWN registry file — that costs one read of THAT file and never a stat of a
+      // LEDGER-SUPPLIED path, so no record can make this block on a hung mount. A record naming
+      // anything else is NOT probed and is named in the unchecked list.
+      //
+      // THE GATE RUNS BEFORE THE CAP, and the order is the whole of M4. Capping first ranked
+      // ALL distinct dirs by spawnedAt and trust-tested only the survivors, so nine records
+      // with fresh spawnedAt naming nine unconfigured dirs pushed every genuinely configured
+      // dir past the cap: every real orphan came back "skipped by the cap" and was never
+      // probed — the feature defeated for the price of nine ledger lines, on the surface whose
+      // entire job is to surface exactly those workers. The cap exists to bound SPAWNS, and an
+      // untrusted dir spawns nothing, so it must not consume a cap slot. Untrusted dirs keep
+      // their own unchecked reason; they are simply not in the population the cap applies to.
+      const trusted = trustedProbeConfigDirs();
+      const trustedDirs: string[] = [];
+      const notConfigured: OrphanProbe[] = [];
+      for (const configDir of newestRecordAt.keys()) {
+        if (trusted.has(configDir)) {
+          trustedDirs.push(configDir);
+        } else {
+          notConfigured.push({
+            configDir,
+            unchecked:
+              "its config dir is not one of this installation's configured accounts (the main account or " +
+              'a registered worker), so it was not probed — a probe WRITES to the config dir it targets',
+          });
+        }
+      }
+      trustedDirs.sort((a, b) => (newestRecordAt.get(b) ?? 0) - (newestRecordAt.get(a) ?? 0));
+      // …and never more than ORPHAN_PROBE_MAX_CONFIG_DIRS of them, because that count is
+      // whatever the ledger file happens to hold and this runs on every mesh_status poll.
+      // The overflow is not dropped: each skipped dir becomes an UNCHECKED probe below, so it
+      // is named in the "could not check" list with the caveat that rides it. That keeps the
+      // cap honest — a bounded poll that admits what it did not look at, rather than a short
+      // clean-looking answer.
+      const probeTargets = trustedDirs.slice(0, ORPHAN_PROBE_MAX_CONFIG_DIRS);
+      const cappedOut: OrphanProbe[] = trustedDirs.slice(ORPHAN_PROBE_MAX_CONFIG_DIRS).map((configDir) => ({
+        configDir,
+        unchecked:
+          `skipped: only ${ORPHAN_PROBE_MAX_CONFIG_DIRS} configured config dir(s) are probed per ` +
+          'mesh_status call, newest record first',
+      }));
+      const claudePath = mesh.claudePath;
+      if (claudePath === undefined) {
+        // No resolved executable (init never got that far). Resolving one here can spawn a
+        // login shell, which is not something a status poll should do — report unchecked.
+        probes = probeTargets.map((configDir) => ({
+          configDir,
+          unchecked: 'no claude executable is resolved in this session',
+        }));
+      } else if (probeTargets.length > 0) {
+        // Resolved ONCE per call, not per dir: it costs one statSync on our own cwd, and every
+        // probe of this poll shares the same verdict about whether the workspace is still there.
+        const spawnDir = probeSpawnCwd();
+        let budgetTimer: NodeJS.Timeout | undefined;
+        const budgetExhausted = new Promise<'budget'>((resolve) => {
+          budgetTimer = setTimeout(() => resolve('budget'), ORPHAN_PROBE_BUDGET_MS);
+        });
+        try {
+          probes = await Promise.all(
+            probeTargets.map(async (configDir) => {
+              const result = await Promise.race([
+                probeBackgroundSessions(claudePath, configDir, spawnDir),
+                budgetExhausted,
+              ]);
+              return result === 'budget'
+                ? {
+                    configDir,
+                    unchecked: `did not answer within ${ORPHAN_PROBE_BUDGET_MS / 1000}s`,
+                  }
+                : result;
+            }),
+          );
+        } finally {
+          if (budgetTimer !== undefined) {
+            clearTimeout(budgetTimer);
+          }
+        }
+      }
+      probes = probes.concat(notConfigured, cappedOut, unresolvable);
+      const byConfigDir = new Map(probes.map((probe) => [probe.configDir, probe]));
+      // Lexically resolved on both sides of the boundary test below. process.cwd() is already
+      // absolute, but normalizing it here keeps the two operands comparable by construction.
+      const root = path.resolve(process.cwd());
+      alive = checkable.filter((rec) => {
+        // Matched inside the record's OWN config dir's index, through the SAME resolution the
+        // targets were built with (L6) — a record naming `/x/.claude/` must find the outcome
+        // filed under `/x/.claude`, or it would be read as "no matching row" and silently
+        // under-reported. One global id map across dirs is still forbidden: it would let a job
+        // id seen under account A vouch for a record belonging to account B.
+        const dir = resolveConfigDir(rec.configDir);
+        const row = dir === undefined ? undefined : byConfigDir.get(dir)?.rows?.get(rec.jobId);
+        if (row === undefined) {
+          // Either the dir went unchecked (unknown) or the row is absent (gone). Neither is
+          // evidence of a running worker, and only evidence gets published here.
+          return false;
+        }
+        // THE liveness test — see the header: a background row carries `pid` only when the CLI
+        // holds a live process record for that job, while the row ITSELF also survives on a
+        // persisted "working"/"blocked" state that a killed worker leaves behind. No pid ⇒ not
+        // running ⇒ nothing is reported for this record.
+        //
+        // This pid is trustworthy HERE while the reaper's pid check is not, and both facts hold
+        // at once: this one comes out of the CLI's own live-process record FOR THIS JOB ID,
+        // matched by jobId, so it describes the process the row is about. The reaper instead
+        // reads a session-registry entry looked up BY NAME, which can be stale and whose name
+        // is reused across worker generations — so its pid can belong to a previous namesake.
+        // Identity is what separates them, not the pid. What survives even that — recycling of
+        // this very pid — is the OVER-reporting residual recorded in the header.
+        if (typeof row.pid !== 'number' || !isPidAlive(row.pid)) {
+          return false;
+        }
+        // `rowCwd.startsWith(root)` ALONE is a real bug: `/…/fable-orchestrator` is a string
+        // prefix of `/…/fable-orchestrator-2`, so a neighbouring workspace's healthy workers
+        // would be listed as this one's to stop. The separator is what makes this a path
+        // boundary. And the boundary is only a boundary on a NORMALIZED path: path.isAbsolute
+        // accepts `/a/proj/../proj2/x`, which escapes this workspace while passing a prefix
+        // test against `/a/proj` — a false positive in the one check that exists as the safety
+        // net. path.resolve fixes that LEXICALLY; realpathSync is deliberately not used, since
+        // resolving symlinks would touch the filesystem and introduce a second notion of
+        // workspace identity that nothing else in the mesh shares.
+        const rowCwd = path.resolve(row.cwd);
+        return rowCwd === root || rowCwd.startsWith(root + path.sep);
+      });
+    }
+    const orphanEntries: string[] = [];
+    const ghostEntries: string[] = [];
+    const ownerlessEntries: string[] = [];
+    // The THRESHOLD the adoptable-orphan entry reports, read from the SAME setting
+    // bg-runner's sweepIdleWorkers reads. It is reported as an OBSERVATION — "the setting read
+    // while this line was written" — and never as a schedule: the sweep re-reads it every tick,
+    // so the value here describes this moment and nothing later. 0 is a value an operator can
+    // legitimately set and sweepIdleWorkers runs its stop pass only `if (idleMinutes > 0)`, so
+    // it gets its own wording; `undefined` means the registry could not be read AT THIS MOMENT,
+    // which is a third thing again and is never folded into either.
+    //
+    // Read only when there is an entry to render, so the healthy poll (nothing alive and
+    // unowned) still costs no settings read on top of its zero subprocesses.
+    let idleTimeoutMin: number | undefined;
+    if (alive.length > 0) {
+      try {
+        idleTimeoutMin = readRegistry().meshWorkerIdleTimeoutMin;
+      } catch {
+        idleTimeoutMin = undefined;
+      }
+    }
+    for (const rec of alive) {
+      // Same `worktreeKept === false` suppression the workers section uses: pointing at a
+      // directory a teardown provably removed is worse than saying nothing. It is dead code
+      // for an orphan (that flag is only written by a teardown, which a live orphan never
+      // had) but not for a GHOST, which was marked stopped and may carry a removal verdict.
+      //
+      // `worktreeKept === true` carries the workers section's KEPT annotation verbatim, and
+      // it is MORE load-bearing here than there: a ghost is precisely the record that has
+      // been through a teardown, so it is the likeliest to hold one — and this entry is read
+      // by someone weighing what to do about a session the ledger already believes is dead.
+      // Printing a bare path there would drop "there is unmerged work in here" at exactly the
+      // moment that judgement is made.
+      const worktree =
+        rec.worktree === undefined || rec.worktreeKept === false
+          ? ''
+          : `\n      worktree: ${oneLine(rec.worktree)}${rec.branch ? ` (branch ${oneLine(rec.branch)})` : ''}` +
+            (rec.worktreeKept === true
+              ? ' — KEPT: it has uncommitted changes, so teardown left it in place. Merge or remove it yourself.'
+              : '');
+      const identity =
+        `  - ${oneLine(rec.name)} [${oneLine(rec.account)}] ${oneLine(rec.model)} — ` +
+        `${rec.taskId ? `task ${oneLine(rec.taskId)}` : oneLine(rec.role)} — ` +
+        `job ${oneLine(rec.jobId)}, alive under ${oneLine(rec.configDir)}`;
+      // keep-alive belongs to the two NON-ghost classes. The flag survives on a record that was
+      // never marked stopped, so there it still means what it says; on a ghost it is guaranteed
+      // absent (see below) and printing it would be dead code.
+      const keep =
+        rec.stoppedAt === undefined && rec.keepAlive === true
+          ? "\n      keep-alive: someone was handed this worker's attach command"
+          : '';
+      // M5. `attachCommand` is assembled by the pool as
+      // `CLAUDE_CONFIG_DIR='<configDir>' claude attach <jobId>`: the config dir is single-quoted
+      // but never escaped and the job id is not quoted at all, so both halves come out of the
+      // ledger straight into a command a reader is being pointed at. A `configDir` of
+      // `'; touch /tmp/PWNED; echo '` closes the quote and runs a payload; a `jobId` of `$(…)`
+      // substitutes. So the command is only RENDERED when attachCommandWithholdReason passes it,
+      // and otherwise WITHHELD with the reason it gave. Withholding costs a reader one manual
+      // lookup; printing costs them whatever the ledger author wrote.
+      //
+      // The reason comes from the guard rather than being written here (M2/L1): the guard is the
+      // only thing that knows WHICH of its clauses failed, and the one-size sentence this used to
+      // print ("holds characters that are not safe to render") is false about the commonest case
+      // of all — an EMPTY jobId, which adopt() writes routinely and which holds no characters at
+      // all. `oneLine` still wraps the rendered command; the guard's last clause is what makes
+      // that wrap a provable no-op instead of a second, unchecked transform.
+      const withheld = attachCommandWithholdReason(rec);
+      const attach =
+        withheld === undefined
+          ? `      attach: ${oneLine(rec.attachCommand)}\n`
+          : `      attach command WITHHELD: ${withheld}.\n`;
+      // The sentences below point at that command, so they have to stop pointing when it is gone.
+      const attachPointer =
+        withheld === undefined
+          ? 'The attach command above is the way to look at the session itself.'
+          : 'No attach command could be printed for it, so this report offers no way to reach the session.';
+      if (rec.ownerPid === undefined) {
+        // The class the ledger knows the LEAST about, and the one whose entry has always said
+        // so outright. All the ledger says about this record is "nobody is RECORDED as owning
+        // it", which is not "nobody owns it" — every record adopt() writes looks precisely like
+        // this, including the ones THIS session adopted at init, moments before an orchestrator
+        // reads this section. The one fact still worth stating is that a stopped-marked record
+        // will never be revisited by a sweep, because that holds no matter who owns it.
+        const stopped =
+          rec.stoppedAt === undefined
+            ? ''
+            : `\n      the ledger also marks this record stopped (${formatAgo(now - rec.stoppedAt)}), and ` +
+              'every sweep pass skips a record marked stopped';
+        ownerlessEntries.push(
+          `${identity}\n      owner: none recorded — which is NOT evidence that nobody owns it${stopped}` +
+            `${worktree}${keep}\n${attach}` +
+            '      Do NOT stop it on the strength of this line: THIS session may have adopted it at ' +
+            'startup (adopt() writes records with no owner), which would make it one of the workers ' +
+            'counted in "live workers" above. Attach and find out whose work it is first.',
+        );
+      } else if (rec.stoppedAt === undefined) {
+        // H1, THIRD ROUND, and the fix is to the CLASS: this line stops predicting. Two successive
+        // closings here were predictions and both were false. "so nothing is tracking it" — false,
+        // sweepIdleWorkers iterates pool.list() over the WHOLE workspace ledger with NO ownerPid
+        // filter (it skips only stoppedAt, a pending taskId and keepAlive). Then "will stop it once
+        // it passes the N-minute idle timeout — typically within a sweep tick, because nothing has
+        // marked activity on it since its owner died" — false in BOTH halves, and in the two
+        // commonest cases:
+        //   - THE CLOCK IS NOT WHAT THAT ASSUMED. `bgIdleActivityAt` is
+        //     max(lastActivityAt, spawnedAt) (IDLE_COUNTS_REGISTRY_UPDATED_AT is false), and
+        //     `spawnDispatchWorker` writes `lastActivityAt: now` AT SPAWN. A FRESH orphan — the
+        //     owner crashing shortly after dispatching, this feature's own motivating scenario —
+        //     has an idle age of MINUTES and is nowhere near the deadline, let alone "within a
+        //     sweep tick".
+        //   - THE STATED REASON IS FALSE WHENEVER THE ORPHAN IS STILL WORKING. `routeInbound` calls
+        //     `pool.markActivity(fromName)` for EVERY inbound gateway message whose name this
+        //     workspace's ledger knows, with NO owner filter, and the gateway name is
+        //     workspace-scoped (`cco-gw-<hash of cwd>`) — so a new session's gateway comes up under
+        //     the identical name, the orphan's STATUS pings land in THIS session's drain loop, and
+        //     its `lastActivityAt` is refreshed every time. sweepIdleWorkers then never reaches it,
+        //     and it runs to its dispatch timeout burning quota: precisely the leak this section
+        //     exists to surface, while the old line claimed it was being handled.
+        // The idle clock has inputs this line cannot see, so the line reports the clock's OBSERVED
+        // value and the threshold AS READ, says of the sweep only what its code does, and asserts
+        // no outcome and no timeframe.
+        const idleAge = formatAgo(now - bgIdleActivityAt(rec));
+        // formatAgo answers 'unknown' for a negative or non-finite age (a spawnedAt in the future,
+        // from clock skew or a hand-edited ledger), which cannot be dropped into "last moved …".
+        const clock =
+          idleAge === 'unknown'
+            ? "Its idle clock — the value this session's idle sweep compares against the timeout — " +
+              'holds a stamp this report cannot age (it is in the future or out of range).'
+            : "Its idle clock — the value this session's idle sweep compares against the timeout — " +
+              `last moved ${idleAge}.`;
+        const refresh =
+          'Whether that sweep ever acts on this record depends on that clock, and ANY message from ' +
+          'the worker refreshes it — the drain loop marks activity for every inbound message naming ' +
+          'a worker this ledger knows, whoever owns the record — so a worker that is still ' +
+          'reporting may never be swept.';
+        const sweep =
+          rec.keepAlive === true
+            ? `This session does not own it. ${clock} It carries a keep-alive mark, and this ` +
+              "session's idle sweep skips a record that carries one."
+            : idleTimeoutMin === undefined
+              ? `This session does not own it. ${clock} ` +
+                'claudeCodeOrchestrator.meshWorkerIdleTimeoutMin could not be read while this line ' +
+                `was written, so this report cannot say what threshold the sweep is using. ${refresh}`
+              : idleTimeoutMin > 0
+                ? `This session does not own it. ${clock} ` +
+                  'claudeCodeOrchestrator.meshWorkerIdleTimeoutMin, read while this line was ' +
+                  `written, is ${idleTimeoutMin} minute(s). ${refresh}`
+                : `This session does not own it. ${clock} ` +
+                  'claudeCodeOrchestrator.meshWorkerIdleTimeoutMin, read while this line was ' +
+                  'written, is 0 — the value at which the idle sweep runs no stop pass at all.';
+        orphanEntries.push(
+          `${identity}\n      owner: pid ${rec.ownerPid} not running${worktree}${keep}\n` +
+            `${attach}` +
+            `      ${sweep} ${attachPointer}`,
+        );
+      } else {
+        ghostEntries.push(
+          // The age is formatAgo's, not a raw timestamp: it is total for every stoppedAt the
+          // ledger can hold (a future one from clock skew degrades to "unknown"), where
+          // Date#toISOString would throw on an out-of-range epoch and lose the whole section.
+          //
+          // The keep-alive caveat is printed UNCONDITIONALLY, and has to be: both writers of
+          // `stoppedAt` (WorkerPool.markStopped, the reaper's markStopped) clear `keepAlive` in
+          // the same write, so a record reaching this branch NEVER carries the flag —
+          // including the one case that matters, where a human was handed the attach command
+          // and then the owning server died and a sweep marked the record stopped. The ledger
+          // therefore cannot rule out an attached human, and silence about the flag would read
+          // as "nobody is in there". Say what the ledger cannot establish, in the line.
+          `${identity}\n      ledger says it was stopped (${formatAgo(now - rec.stoppedAt)}), but the ` +
+            `session is still running.${worktree}\n${attach}` +
+            '      No sweep pass reaps it: every pass skips a record that is already marked stopped. ' +
+            'Marking a record stopped also CLEARS its keep-alive flag, so the ledger cannot tell you ' +
+            `whether anyone is attached to this session. ${attachPointer}`,
+        );
+      }
+    }
+    const lines: string[] = [];
+    if (orphanEntries.length > 0) {
+      lines.push(
+        `adoptable orphans (${orphanEntries.length}): workers alive under this workspace whose RECORDED ` +
+          'owner session is gone.',
+      );
+      lines.push(...orphanEntries);
+    }
+    if (ghostEntries.length > 0) {
+      lines.push(
+        `ghosts (${ghostEntries.length}): marked stopped in the ledger but still ALIVE — every sweep ` +
+          'pass skips a record marked stopped, so no pass reaps these.',
+      );
+      lines.push(...ghostEntries);
+    }
+    if (ownerlessEntries.length > 0) {
+      lines.push(
+        `unowned in the ledger (${ownerlessEntries.length}): alive under this workspace with NO owner ` +
+          'recorded — which is NOT the same as orphaned, and NOT a stop list. adopt() writes records ' +
+          'without an owner and this session runs adopt() at init, so a worker THIS session adopted ' +
+          'seconds ago appears here and is also counted in "live workers" above.',
+      );
+      lines.push(...ownerlessEntries);
+    }
+    if (uncheckable.length > 0) {
+      // H2, then M3. The heading has now been wrong in both directions, and the current wording is
+      // the one that fits the FILTER rather than the story:
+      //   - it once said "no live owner" and "nothing at all is known about them". Both
+      //     overclaimed: adopt() writes records with no ownerPid AND `jobId: ''`, so a worker THIS
+      //     session adopted seconds ago at init is here BY CONSTRUCTION; and there is no stoppedAt
+      //     filter on this class, so the ledger frequently does say something about one of these.
+      //   - H2's fix then said "no RECORDED owner", which UNDER-claims (M3). This class is
+      //     `unowned.filter(jobId === '' || configDir === '')`, and `unowned` keeps
+      //     `ownerPid !== undefined && !isPidAlive(ownerPid)` — so a record naming a DEAD owner pid
+      //     with an empty job id lands here too, under a heading asserting no owner was recorded
+      //     and an adopt() story that does not describe it.
+      // Both shapes are named, and the adopt() qualifier is kept for the shape it actually
+      // explains, because the class must not read as a list of strangers that might need killing.
+      lines.push(
+        `not checkable (${uncheckable.length}): ledger records that either record NO owner or record ` +
+          'an owner that is NOT RUNNING, and that cannot be matched against any listing, so this ' +
+          'report cannot say whether they are running or gone. NOT a stop list, and not a list of ' +
+          'strangers: the no-owner shape is what adopt() writes (no owner, empty job id) and this ' +
+          'session runs adopt() at init, so a worker THIS session adopted seconds ago appears here:',
+      );
+      // Capped like every other cost in this feature (ORPHAN_MAX_UNCHECKABLE_ENTRIES): these
+      // entries are the cheapest in the report to manufacture — no liveness evidence is needed
+      // to print one, only a record missing a field — and this is a polled surface. The overflow
+      // is COUNTED in a line of its own rather than truncated away.
+      for (const rec of uncheckable.slice(0, ORPHAN_MAX_UNCHECKABLE_ENTRIES)) {
+        const why =
+          rec.jobId === ''
+            ? 'no job id recorded, so no listing row can be matched to it and the ledger cannot even build ' +
+              'an attach command (adopt() writes an empty job id when the session entry carried none)'
+            : 'no config dir recorded, so there is no account to ask about it';
+        // The ledger DOES know something about a stopped-marked record, so saying "nothing is
+        // known" over the top of that would be the same overclaim the heading just dropped.
+        const stopped =
+          rec.stoppedAt === undefined
+            ? ''
+            : ` The ledger records it as stopped (${formatAgo(now - rec.stoppedAt)}), and no sweep ` +
+              'revisits a record marked stopped.';
+        lines.push(
+          `  - ${oneLine(rec.name)} [${oneLine(rec.account)}] ${oneLine(rec.model)} — ` +
+            `${rec.taskId ? `task ${oneLine(rec.taskId)}` : oneLine(rec.role)} — ${why}.${stopped}`,
+        );
+      }
+      if (uncheckable.length > ORPHAN_MAX_UNCHECKABLE_ENTRIES) {
+        lines.push(
+          `  … and ${uncheckable.length - ORPHAN_MAX_UNCHECKABLE_ENTRIES} more not-checkable record(s) ` +
+            `not listed: only ${ORPHAN_MAX_UNCHECKABLE_ENTRIES} are rendered per mesh_status call.`,
+        );
+      }
+    }
+    // Degradation is PER CONFIG DIR. A dir that could not be probed never suppresses the
+    // real findings from the ones that could, and findings never suppress the admission that
+    // part of the picture is missing — a blanket version of either is a lie in one direction.
+    const unchecked = probes.filter((probe) => probe.unchecked !== undefined);
+    if (unchecked.length > 0) {
+      const checked = probes.length - unchecked.length;
+      // L9. `found` must count EVERY class this call reported, including the not-checkable
+      // entries: those are rendered directly above this head line, and counting only the three
+      // probe-derived classes let the head say "nothing unowned … could be checked" immediately
+      // under a list of unowned records the report had just printed. The two are one report and
+      // may not contradict each other.
+      const found =
+        orphanEntries.length + ghostEntries.length + ownerlessEntries.length + uncheckable.length;
+      const head =
+        checked === 0
+          ? `  orphan probe: NOT RUN — none of the ${probes.length} config dir(s) holding an unowned ` +
+            'worker could be checked:'
+          : found > 0
+            ? `  orphan probe: checked ${checked} of ${probes.length} config dir(s); could not check:`
+            : `  orphan probe: nothing unowned in the ${checked} of ${probes.length} config dir(s) that ` +
+              'could be checked; could not check:';
+      lines.push(
+        [
+          head,
+          // The caveat rides on the LAST named dir so an empty list above can never be read
+          // as "no orphans" — it is "no orphans WHERE WE LOOKED", and that has to be visible.
+          //
+          // These dirs are named by the RESOLVED path — the path a probe of that dir targets and
+          // the path the trust test compared — so a line here can differ in spelling from the raw
+          // ledger value an entry above prints as `alive under …`. That is deliberate: the
+          // resolved path is the one that identifies the directory this report did not look into.
+          // The single exception names itself, since the only dir keyed by its raw spelling is
+          // the one whose reason is that it could not be resolved at all.
+          ...unchecked.map(
+            (probe, i) =>
+              `      ${oneLine(probe.configDir)} (${probe.unchecked})` +
+              (i === unchecked.length - 1 ? ' — this report may be missing workers.' : ''),
+          ),
+        ].join('\n'),
+      );
+    }
+    // Last, and never conditional on anything above it: the records the ledger holds but this
+    // report could not read at all (M8). It rides every return path out of this function.
+    return lines.concat(faultLines);
+  } catch (err) {
+    // Unreachable by design — every probe outcome above is classified — and an unreadable or
+    // corrupt ledger is NOT what lands here: readRawMeshState swallows its own read and parse
+    // errors and answers `{}`, so pool.list() cannot throw for one (that case belongs to
+    // ledgerReadFault, above). Reaching here therefore means something genuinely unexpected, a
+    // fault in this code or below it, and printing nothing would be indistinguishable from
+    // "nothing is unowned" — the one wrong answer. The message is one-lined like every other
+    // foreign string here: it can carry a path that came straight out of the ledger.
+    return [
+      `  orphan probe: could not run (${oneLine(err instanceof Error ? err.message : String(err))}) — this ` +
+        'report may be missing workers that are still running.',
+    ];
+  }
+}
+
 /**
  * mesh_status — the primary surface of attachable dispatch, and the one place an
  * orchestrator can see what it is holding open. NEVER throws mesh_off: with meshMode off
@@ -1550,6 +2834,15 @@ async function meshStatus(): Promise<string> {
     liveWorkers = 0;
   }
   lines.push(`live workers: ${liveWorkers}/${registry.meshMaxLiveWorkers} (meshMaxLiveWorkers)`);
+  // Workers running under this workspace that this session does NOT own — orphans of a dead
+  // owner, and ghosts the ledger already believes are stopped. Placed directly under the
+  // live-worker count because the two answer DIFFERENT questions, and the counts overlap:
+  // liveOwnedCount() has no ownerPid filter at all (it counts every record without
+  // stoppedAt whose session entry is alive, plus every record younger than the 90s
+  // ENTRY_APPEAR_GRACE_MS), so a worker whose owner died within 90 seconds of spawning it is
+  // counted in that line AND reported as an orphan in these. Ghosts are the only class the
+  // count really does exclude, and only because it skips records with stoppedAt set.
+  lines.push(...(await unownedWorkerLines()));
   lines.push(
     registry.meshWorkerIdleTimeoutMin > 0
       ? `idle auto-stop: ${registry.meshWorkerIdleTimeoutMin}min (meshWorkerIdleTimeoutMin)`
@@ -1563,19 +2856,27 @@ async function meshStatus(): Promise<string> {
   const feed = bgFeedStatus();
   const questionTail =
     feed.questions > 0 && feed.oldestQuestionFrom !== undefined
-      ? `; oldest question from ${feed.oldestQuestionFrom} ` +
+      // One-lined for the same reason as every ledger value below, and this one is the most
+      // reachable of them: `oldestQuestionFrom` is a cross-session `fromName` off the live
+      // channel, checked on the way in only for `typeof === 'string'`, and the sender need not
+      // be one of our workers. A crafted multi-line name would forge a complete ghost block —
+      // header included — in the section right above this line.
+      ? `; oldest question from ${oneLine(feed.oldestQuestionFrom)} ` +
         `${formatAgo(now - (feed.oldestQuestionAt ?? now))} — answer with mesh_send_worker`
       : '';
   lines.push(`live feed: ${feed.unread} unread (${feed.questions} questions)${questionTail}`);
   const strays = bgUnmatchedCount();
   if (strays > 0) {
     // The newest one is worth a line: "RESULT for t… from (no fromName)" is the single
-    // most useful clue when a dispatch is not settling from its pings.
+    // most useful clue when a dispatch is not settling from its pings. It is one-lined
+    // because it EMBEDS the same unvalidated cross-session `fromName` twice, in its `from`
+    // and in its `reason` — an unmatched signal is by definition one nothing of ours vouched
+    // for, so it is the least trustworthy string in this report.
     const newest = bgLastUnmatched();
     lines.push(
       `unmatched signals buffered: ${strays} (messages that matched no pending dispatch — ` +
         'crossed, late or malformed; they settle nothing)' +
-        (newest ? `\n      newest: ${newest}` : ''),
+        (newest ? `\n      newest: ${oneLine(newest)}` : ''),
     );
   }
   if (mesh.bridge) {
@@ -1594,11 +2895,38 @@ async function meshStatus(): Promise<string> {
     lines.push(`workers (${workers.length}):`);
     for (const w of workers) {
       const health = w.stoppedAt !== undefined ? 'stopped' : w.alive ? 'alive' : 'dead';
-      const reg = w.registryStatus ? `/${w.registryStatus}` : '';
+      // `registryStatus` is a raw string out of a session entry in an account's sessions dir
+      // — a file this process does not write and does not validate — so it is projected like
+      // every other foreign value on this line.
+      const reg = w.registryStatus ? `/${oneLine(w.registryStatus)}` : '';
       const exhausted = w.accountExhausted ? ' ⚠account-exhausted' : '';
       const keep = w.keepAlive === true ? ' · keep-alive' : '';
-      const title = bgPendingTitle(w.taskId);
-      const job = w.taskId ? `${w.role} ${w.taskId}${title ? ` "${title}" (in flight)` : ''}` : w.role;
+      // Same one-line projection the orphan/ghost entries use, for the same reason and one
+      // sharper vector: `title` is the DISPATCH-SUPPLIED task title, so a title carrying
+      // newlines could forge a whole section header here — and now that mesh_status prints
+      // adoptable-orphan and ghost sections, a forged header is a fabricated report that
+      // somebody's live worker is an orphan or a ghost — the very report the doctrine's action
+      // policy is read against. Sanitizing only the new sections would leave the older, more
+      // reachable vector open.
+      // Same withholding rule the orphan/ghost entries use, through the SAME guard, and for the
+      // same reason: the attach command is assembled in pool.ts as
+      // `CLAUDE_CONFIG_DIR='<dir>' claude attach <job>` — the dir is single-quoted but NOT escaped
+      // and the job id is not quoted at all, so a ledger value carrying a quote or a shell
+      // metacharacter turns a line a human is invited to paste into a command that runs something
+      // else. Withholding it in the new sections while still printing it verbatim here would leave
+      // the identical string in the identical report. This list is also where the EMPTY-value
+      // wording earns its keep (L1): adopt() writes `jobId: ''`, those records are listed here,
+      // and telling their reader the value "holds characters that are not safe" was false.
+      const attachLine = (rec: { configDir: string; jobId: string; attachCommand: string }): string => {
+        const reason = attachCommandWithholdReason(rec);
+        return reason === undefined
+          ? `attach: ${oneLine(rec.attachCommand)}`
+          : `attach command WITHHELD: ${reason}.`;
+      };
+      const title = oneLine(bgPendingTitle(w.taskId) ?? '') || undefined;
+      const job = w.taskId
+        ? `${oneLine(w.role)} ${oneLine(w.taskId)}${title ? ` "${title}" (in flight)` : ''}`
+        : oneLine(w.role);
       // A11: the worktree line is how unmerged work stays visible. It is printed for every
       // worker that has one EXCEPT those whose worktree we watched `claude rm` remove
       // (worktreeKept === false) — pointing at a directory that is provably gone would be
@@ -1607,13 +2935,14 @@ async function meshStatus(): Promise<string> {
       const worktreeLine =
         w.worktree === undefined || w.worktreeKept === false
           ? ''
-          : `\n      worktree: ${w.worktree}${w.branch ? ` (branch ${w.branch})` : ''}` +
+          : `\n      worktree: ${oneLine(w.worktree)}${w.branch ? ` (branch ${oneLine(w.branch)})` : ''}` +
             (w.worktreeKept === true
               ? ' — KEPT: it has uncommitted changes, so teardown left it in place. Merge or remove it yourself.'
               : '');
       lines.push(
-        `  - ${w.name} [${w.account}] ${w.model} — ${job} — ${health}${reg}${exhausted} · idle ` +
-          `${formatIdleAge(now - bgIdleActivityAt(w))}${keep}${worktreeLine}\n      attach: ${w.attachCommand}`,
+        `  - ${oneLine(w.name)} [${oneLine(w.account)}] ${oneLine(w.model)} — ${job} — ` +
+          `${health}${reg}${exhausted} · idle ` +
+          `${formatIdleAge(now - bgIdleActivityAt(w))}${keep}${worktreeLine}\n      ${attachLine(w)}`,
       );
     }
   }

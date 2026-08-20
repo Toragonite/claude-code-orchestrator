@@ -142,7 +142,7 @@ Unmerged work is never lost: a settled worker's edits are a durable commit on it
 
 | Tool | Purpose |
 |---|---|
-| `mesh_status` | The primary surface: relay health, unread live-feed messages and pending worker questions, how many workers are live against the cap, the idle auto-stop window, and per worker its dispatch task, account, model, alive/dead state, idle age, keep-alive mark, its worktree (marked when kept because it holds uncommitted work), and a copy-pasteable attach command. |
+| `mesh_status` | The primary surface: relay health, unread live-feed messages and pending worker questions, how many workers are live against the cap, the idle auto-stop window, and per worker its dispatch task, account, model, alive/dead state, idle age, keep-alive mark, its worktree (marked when kept because it holds uncommitted work), and a copy-pasteable attach command — plus a report on ledger records with no living owner, cross-checked against `claude agents` and sorted into adoptable orphans, ghosts, unowned records, and not-checkable records (see *Workers the ledger lost track of*, below). |
 | `mesh_send_worker` | Send a live message to one running worker of this workspace: a correction, a discovered constraint, an answer to its question, or an instruction to abandon a wrong path. |
 | `mesh_receive` | Long-poll the live feed of messages from this workspace's workers — progress notes and their `STATUS <id> QUESTION: …` questions, which are highlighted. Result wake-pings are consumed internally and never appear here. |
 | `mesh_stop_worker` | Stop one worker (`claude stop` under its own account, then `claude rm` to clear its background job and remove a clean worktree). |
@@ -151,6 +151,27 @@ Unmerged work is never lost: a settled worker's edits are a durable commit on it
 The v1.4 tools are gone. `mesh_spawn_workers` no longer exists (dispatch spawns the workers), and neither does `mesh_send`, which could address arbitrary peer sessions. `mesh_receive` kept its name but not its meaning: it is the live feed of *this workspace's own dispatch workers*, not a general peer inbox. Worker-to-worker messaging is retired — `mesh_send_worker` refuses any name that is not a live worker of this workspace.
 
 Messages are queued and land at the worker's next turn boundary, so steering never interrupts a tool call in progress. A steer may amend the task, and where it conflicts with the original task text the newer instruction wins — but it cannot widen a worker's file-ownership list, and worker-supplied message content is always treated as data rather than as instructions.
+
+### Workers the ledger lost track of
+
+`mesh_status` also reports on background workers that are still alive while the ledger no longer has a working record of who owns them. When a ledger record has no living recorded owner, the extension asks `claude agents` — run under that record's own account config dir — whether the worker is still alive, and sorts what it finds into four classes, because what's known about each case differs:
+
+| Class | What it means |
+|---|---|
+| adoptable orphans | The ledger records an owner for this record, that owner isn't running, and the worker itself is alive. |
+| ghosts | Same as above, except the ledger already marks the record stopped. Every sweep skips records marked stopped, so a ghost is never reaped on its own. |
+| unowned in the ledger | No owner was ever recorded. Adopting a worker at startup also produces records shaped like this, so one of these may be a worker the current session itself just adopted and already counts as live. |
+| not checkable | Records with no job id or no config dir can never be matched against a `claude agents` listing, so the report can't say whether they're running or gone. |
+
+Liveness is decided by a live process id present in that listing — never by a row merely being present, since a worker that was killed abruptly still leaves a background row behind; presence alone would report every crash victim as still running.
+
+The report is purely descriptive: it says what it observed and what it couldn't observe, never recommends stopping a worker, and never presents a destructive action as the next step — deciding is the orchestrator's job. It also makes no prediction about the idle auto-stop, because that clock is refreshed by any message from the worker, so one that is still reporting in may never be swept.
+
+Only the account config dirs already in the extension's own registry are probed — never a path taken from the ledger — because `claude agents --json` rewrites `.claude.json` and creates a `backups/` folder in the config dir it targets; anything outside the registry is reported as unchecked rather than probed. The probe doesn't run at all when no record qualifies, is capped at eight config dirs per call, is bounded by a per-dir timeout and an overall budget, and reports every dir it couldn't check individually — so one failed dir never reads as "everything is clean".
+
+Worker names, paths and attach commands are flattened before display, in this report and in the existing worker list alike: control, bidirectional and zero-width characters become spaces, and over-long values are truncated with a count. An attach command is single-quoted but not escaped, so if a config dir or job id wouldn't survive flattening intact, the command is withheld with a reason instead of printed.
+
+This release makes the problem visible; it does not repair the cause. The session-end reaper (see *Teardown*, above) still judges a background worker's liveness by a name lookup and a process id — neither valid for a background worker — which is exactly how a live worker ends up marked stopped and then skipped forever; that fix is for a later release. Separately, `mesh_stop_worker` resolves by name, and names are reused across generations, so a name can match a different record than the one shown here — confirm a name matches exactly one record (by job id) before acting on it.
 
 ### Two channels: files carry results, messages carry steering
 

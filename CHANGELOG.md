@@ -4,6 +4,24 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] — 2026-08-20
+
+`mesh_status` now reports background workers that are still ALIVE while this workspace's ledger has lost track of them — including the ones nothing will ever reap. Second of the three-way split that began with 1.5.2. With Mesh Mode **off**, dispatch is unchanged (`src/mcp/task-runner.ts` untouched).
+
+### Added
+- **Unowned-worker visibility in `mesh_status`.** When a ledger record has no living recorded owner, the extension asks `claude agents` — under that record's own account config dir — whether the worker is still alive, and reports what it finds in four separately-headed classes, because what is KNOWN about each differs: **adoptable orphans** (a recorded owner that is not running, worker alive); **ghosts** (the same, but the ledger already marks the record stopped — so every sweep skips it and nothing will ever reap it); **unowned in the ledger** (no owner recorded at all, which is also what adopting a worker at startup produces, so it may be one this session itself adopted); and **not checkable** (records that can never be matched against a listing). Liveness is proven by a live process id in the listing, never by a row merely being present — a background row is emitted for a worker killed abruptly, so presence alone would have reported every crash victim as running.
+- **Orphan-handling doctrine** for the orchestrator: read the report at session start and before teardown; a worker alive with no living owner is yours to adopt or stop; mark keep-alive *first* if you intend to adopt; a ghost cannot be steered; and absence from the report is not proof a worker is gone, because retention deletes a stopped record while its session may still be running.
+
+### Changed
+- **`mesh_status` is descriptive by contract.** It reports what it observed and what it could not observe, and never recommends stopping a worker or presents a destructive action as the next step — action policy lives in the orchestrator doctrine. Misreading a status line should cost a wrong line, not somebody's running work. For the same reason it makes no predictions about what the idle sweep will do: that clock is refreshed by any message from the worker, so a worker that is still reporting may never be swept.
+- **Every config dir the probe touches now comes from your configured accounts**, never from the ledger. `claude agents --json` writes to the config dir it targets (it rewrites `.claude.json` and creates `backups/`), so the target set is restricted to the accounts in the registry; anything else is reported as unchecked rather than probed. The probe never runs when no record qualifies, is bounded per config dir and by an overall budget, is capped at eight config dirs per call, and reports every dir it could not check — separately, per dir, so one failure can never render as "clean".
+- **Worker names, paths and attach commands are flattened before display** in both the new report and the existing worker list: control, bidi and zero-width characters become spaces and over-long values are truncated with a count, so a ledger value cannot forge a section header or make two different workers render identically. An attach command whose config dir or job id would not survive that flattening intact is withheld with a reason rather than printed, because the command is single-quoted but not escaped.
+
+### Notes
+- Experimental Mesh Mode; mesh-off dispatch is byte-identical to 1.5.2.
+- This release makes the problem VISIBLE; it does not repair the sweep that causes it. The session-end reaper still judges a background worker's liveness by a name lookup and a process id, neither of which is valid for a background worker, which is how a live worker comes to be marked stopped and then skipped forever. That fix, along with durable dispatch reconcile, is the third release of the split.
+- Stopping a worker still resolves by NAME, and worker names are reused across generations, so a name can match a different record than the one displayed. The report identifies workers by job id; confirm a name matches exactly one record before acting on it.
+
 ## [1.5.2] — 2026-08-19
 
 Worktree durability + ghost cleanup, driven by real 1.5.1 usage. A mesh worker's edits are now committed to its branch when the dispatch settles — so they survive as a mergeable commit instead of being discarded — and stale "kept worktree" records no longer haunt the history view. With Mesh Mode **off**, dispatch is unchanged (`src/mcp/task-runner.ts` untouched). First of a split; orphan visibility and a durable dispatch-reconcile engine follow in later releases.
