@@ -1,0 +1,291 @@
+# 2.0.0 additions, part A. Format: see build-l10n.cjs. Terms follow the existing bundles:
+# ko 워커 / 세션 워커 / 디스패치 / 레지스트리 / 작업 로그 / 과금 가드 / 플랜 윈도우 / 메시 모드 / 체크인;
+# zh worker / 会话 worker / 分发 / 注册表 / 任务日志 / 计费防护 / 套餐窗口 / Mesh 模式 / 签到.
+
+@ (unnamed entry)
+ko: (이름 없는 항목)
+zh: （未命名条目）
+
+@ 5h
+ko: 5시간
+zh: 5小时
+
+@ 7d
+ko: 7일
+zh: 7天
+
+@ A newer version of the extension may have written it. Removing deletes the entry from the registry file shared by every editor on this machine. Its account directory and login are not touched. This cannot be undone.
+ko: 더 새로운 버전의 확장이 기록했을 수 있습니다. 제거하면 이 컴퓨터의 모든 에디터가 공유하는 레지스트리 파일에서 이 항목이 삭제됩니다. 해당 계정 디렉터리와 로그인은 건드리지 않습니다. 이 작업은 되돌릴 수 없습니다.
+zh: 它可能是更新版本的扩展写入的。移除会从本机所有编辑器共用的注册表文件中删除该条目。其账号目录和登录信息不会被改动。此操作无法撤销。
+
+@ A second account: {0} points the CLI at a home directory of its own.
+ko: 두 번째 계정: {0}(으)로 CLI가 전용 홈 디렉터리를 사용하게 합니다.
+zh: 第二个账号：通过 {0} 让 CLI 使用独立的主目录。
+
+@ Allow Extra-Usage Billing
+ko: 추가 사용량 과금 허용
+zh: 允许额外用量计费
+
+@ Allow Frontier Dispatches
+ko: 프런티어 디스패치 허용
+zh: 允许前沿分发
+
+@ Allow dispatches that bill past a used-up plan window?
+ko: 소진된 플랜 윈도우를 넘어 과금되는 디스패치를 허용할까요?
+zh: 允许在套餐窗口用完后仍继续计费的分发？
+
+@ Allow dispatches to frontier-tier models?
+ko: 프런티어 등급 모델로의 디스패치를 허용할까요?
+zh: 允许分发到前沿层级模型？
+
+@ Any {0} model id — the CLI decides whether it exists.
+ko: 모든 {0} 모델 ID를 입력할 수 있습니다 — 실제로 존재하는지는 CLI가 판단합니다.
+zh: 任意 {0} 模型 ID — 是否存在由 CLI 判断。
+
+@ Branch {0}
+ko: 브랜치 {0}
+zh: 分支 {0}
+
+@ Branch {0} (unmerged — worktree on disk)
+ko: 브랜치 {0} (미병합 — worktree가 디스크에 있음)
+zh: 分支 {0}（未合并 — worktree 仍在磁盘上）
+
+@ Claude Assets: several actions were asked for at once — only the first was carried out.
+ko: Claude 에셋: 여러 동작이 한꺼번에 요청되어 첫 번째 동작만 수행했습니다.
+zh: Claude 资源：同时收到了多个操作请求 — 只执行了第一个。
+
+@ Claude Code Orchestrator could not read its worker registry {0}: {1}. No worker account is used and nothing can be saved until the file is fixed or deleted. The file was not changed.
+ko: Claude Code Orchestrator가 워커 레지스트리 {0}을(를) 읽지 못했습니다: {1}. 파일을 고치거나 삭제하기 전까지 워커 계정은 사용되지 않으며 아무것도 저장할 수 없습니다. 파일은 변경하지 않았습니다.
+zh: Claude Code Orchestrator 无法读取其 worker 注册表 {0}：{1}。在修复或删除该文件之前，不会使用任何 worker 账号，也无法保存任何内容。该文件未被更改。
+
+@ Claude Code Orchestrator ignores these settings because they are not in your User settings: {0}, and {1} more. Since 2.0 its settings are read from your User settings only — move them there, or remove them.
+ko: 다음 설정은 사용자 설정에 있지 않아 Claude Code Orchestrator가 무시합니다: {0} 외 {1}개. 2.0부터 이 확장의 설정은 사용자 설정에서만 읽습니다 — 해당 설정을 사용자 설정으로 옮기거나 삭제하세요.
+zh: 以下设置不在你的用户设置中，因此 Claude Code Orchestrator 会忽略它们：{0}，另有 {1} 项。自 2.0 起，其设置只从你的用户设置中读取 — 请把它们移到用户设置中，或将其删除。
+
+@ Claude Code Orchestrator ignores these settings because they are not in your User settings: {0}. Since 2.0 its settings are read from your User settings only — move them there, or remove them.
+ko: 다음 설정은 사용자 설정에 있지 않아 Claude Code Orchestrator가 무시합니다: {0}. 2.0부터 이 확장의 설정은 사용자 설정에서만 읽습니다 — 해당 설정을 사용자 설정으로 옮기거나 삭제하세요.
+zh: 以下设置不在你的用户设置中，因此 Claude Code Orchestrator 会忽略它们：{0}。自 2.0 起，其设置只从你的用户设置中读取 — 请把它们移到用户设置中，或将其删除。
+
+@ Claude Code Orchestrator {0}: a Team view of live sessions across accounts, a redesigned dashboard, session workers your own session messages directly with SendMessage, and worker accounts on Codex, Cursor and Antigravity. Session workers need Claude Code {1} or newer.
+ko: Claude Code Orchestrator {0}: 여러 계정의 라이브 세션을 보여 주는 팀 뷰, 새로 설계한 대시보드, 내 세션에서 SendMessage로 직접 메시지를 보내는 세션 워커, 그리고 Codex·Cursor·Antigravity 워커 계정을 지원합니다. 세션 워커에는 Claude Code {1} 이상이 필요합니다.
+zh: Claude Code Orchestrator {0}：跨账号显示活动会话的“团队”视图、重新设计的仪表板、可由你自己的会话通过 SendMessage 直接发消息的会话 worker，以及运行在 Codex、Cursor 和 Antigravity 上的 worker 账号。会话 worker 需要 Claude Code {1} 或更高版本。
+
+@ Completed {0}
+ko: 완료 {0}
+zh: 完成于 {0}
+
+@ Config directory {0} already belongs to worker "{1}". A worker keeps its original directory when renamed, so this name would silently share that worker's login. Pick a different name, or remove/rename "{1}" first.
+ko: 설정 디렉터리 {0}은(는) 이미 워커 "{1}"의 것입니다. 워커는 이름을 바꿔도 원래 디렉터리를 유지하므로, 이 이름을 쓰면 그 워커의 로그인을 모르는 사이에 공유하게 됩니다. 다른 이름을 선택하거나 먼저 "{1}"을(를) 제거하거나 이름을 바꾸세요.
+zh: 配置目录 {0} 已属于 worker "{1}"。worker 重命名后仍保留原目录，因此使用此名称会在不知不觉中共用该 worker 的登录。请换一个名称，或先移除 / 重命名 "{1}"。
+
+@ Detached (supervised)
+ko: 분리 실행 (감독됨)
+zh: 分离运行（受监督）
+
+@ Detached (supervised) — {0}
+ko: 분리 실행 (감독됨) — {0}
+zh: 分离运行（受监督）— {0}
+
+@ Dispatch · All time
+ko: 디스패치 · 전체 기간
+zh: 分发 · 全部时间
+
+@ Dispatch · Session (5h)
+ko: 디스패치 · 세션 (5시간)
+zh: 分发 · 会话（5小时）
+
+@ Dispatch · Weekly (7d)
+ko: 디스패치 · 주간 (7일)
+zh: 分发 · 每周（7天）
+
+@ Dispatched task cancelled here, but its session worker was not stopped: {0}. If it is still running, stop it from the Team view.
+ko: 디스패치된 작업은 여기에서 취소되었지만 세션 워커는 중지되지 않았습니다: {0}. 아직 실행 중이면 팀 뷰에서 중지하세요.
+zh: 已在此处取消该分发任务，但其会话 worker 未被停止：{0}。如果它仍在运行，请在“团队”视图中停止它。
+
+@ Dispatched task cancelled here; the session itself was not stopped. {0}
+ko: 디스패치된 작업은 여기에서 취소되었지만 세션 자체는 중지되지 않았습니다. {0}
+zh: 已在此处取消该分发任务，但会话本身未被停止。{0}
+
+@ Dispatches sent by this extension in the last 5 hours. Counts only this extension's traffic, not the account's overall consumption.
+ko: 최근 5시간 동안 이 확장이 보낸 디스패치입니다. 계정의 전체 사용량이 아니라 이 확장이 보낸 트래픽만 집계합니다.
+zh: 本扩展在最近 5 小时内发出的分发。只统计本扩展发出的流量，不是账号的总消耗。
+
+@ Dispatches sent by this extension in the last 7 days. Counts only this extension's traffic, not the account's overall consumption.
+ko: 최근 7일 동안 이 확장이 보낸 디스패치입니다. 계정의 전체 사용량이 아니라 이 확장이 보낸 트래픽만 집계합니다.
+zh: 本扩展在最近 7 天内发出的分发。只统计本扩展发出的流量，不是账号的总消耗。
+
+@ Ended {0}
+ko: 종료 {0}
+zh: 结束于 {0}
+
+@ Every dispatch this extension has ever sent to this worker. Counts only this extension's traffic, not the account's overall consumption.
+ko: 이 확장이 이 워커에 지금까지 보낸 모든 디스패치입니다. 계정의 전체 사용량이 아니라 이 확장이 보낸 트래픽만 집계합니다.
+zh: 本扩展至今发给此 worker 的所有分发。只统计本扩展发出的流量，不是账号的总消耗。
+
+@ Fable
+ko: Fable
+zh: Fable
+
+@ Forgets which model orchestrates this workspace. Use it after switching the main account. Asks first.
+ko: 이 워크스페이스를 오케스트레이션하는 모델 기록을 지웁니다. 메인 계정을 바꾼 뒤에 사용하세요. 실행 전에 확인합니다.
+zh: 清除此工作区由哪个模型编排的记录。请在切换主账号后使用。执行前会先询问。
+
+@ Frontier-tier models draw on a scarce separate quota or are billed per use, depending on the plan. With this guard off, an unattended dispatch can ask for one and spend that quota or money without asking you. The setting applies to every workspace on this machine until you change it.
+ko: 프런티어 등급 모델은 플랜에 따라 한정된 별도 쿼터에서 차감되거나 사용량당 과금됩니다. 이 가드를 끄면 무인 디스패치가 해당 모델을 요청해, 묻지 않고 그 쿼터나 비용을 소모할 수 있습니다. 이 설정은 변경하기 전까지 이 컴퓨터의 모든 워크스페이스에 적용됩니다.
+zh: 前沿层级模型会占用稀缺的独立配额，或按使用量计费（取决于套餐）。关闭此防护后，无人值守的分发可以请求这类模型，并在不询问你的情况下消耗该配额或产生费用。该设置在你更改之前，对本机上的所有工作区都有效。
+
+@ In bypassPermissions mode a dispatched one-shot worker runs any command and changes any file on this machine without asking, and nobody is watching it. The mode applies to every Claude Code worker account, in every workspace, until you change it.
+ko: bypassPermissions 모드에서는 디스패치된 일회성 워커가 이 컴퓨터에서 묻지 않고 모든 명령을 실행하고 모든 파일을 변경하며, 이를 지켜보는 사람도 없습니다. 이 모드는 변경하기 전까지 모든 워크스페이스의 모든 Claude Code 워커 계정에 적용됩니다.
+zh: 在 bypassPermissions 模式下，已分发的一次性 worker 会在本机上不经询问地运行任何命令、修改任何文件，而且没有人在旁监看。该模式在你更改之前，对所有工作区中的每个 Claude Code worker 账号都有效。
+
+@ Let every Claude Code worker skip permission checks?
+ko: 모든 Claude Code 워커가 권한 검사를 건너뛰게 할까요?
+zh: 让所有 Claude Code worker 跳过权限检查？
+
+@ Login expired — run "Re-login Account" (right-click) to restore dispatches.
+ko: 로그인 만료 — 디스패치를 복구하려면 "계정 재로그인"(우클릭)을 실행하세요.
+zh: 登录已过期 — 请运行“重新登录账号”（右键）以恢复分发。
+
+@ Mesh — attachable claude --bg (worker {0})
+ko: 메시 — 연결 가능한 claude --bg (워커 {0})
+zh: Mesh — 可连接的 claude --bg（worker {0}）
+
+@ Model {0} · Account {1}
+ko: 모델 {0} · 계정 {1}
+zh: 模型 {0} · 账号 {1}
+
+@ More entries this version cannot use
+ko: 이 버전에서 사용할 수 없는 항목 더 있음
+zh: 更多此版本无法使用的条目
+
+@ No cached reading yet — the background refresher will populate this shortly.
+ko: 아직 캐시된 조회 값이 없습니다 — 백그라운드 새로 고침이 곧 채웁니다.
+zh: 尚无缓存的读数 — 后台刷新稍后会填充此处。
+
+@ No default is stored: a dispatch that names no model runs on the `{0}` CLI's own.
+ko: 저장된 기본값이 없습니다. 모델을 지정하지 않은 디스패치는 `{0}` CLI 자체 기본값으로 실행됩니다.
+zh: 未保存默认值：未指定模型的分发将使用 `{0}` CLI 自身的默认模型。
+
+@ Nothing was typed into the terminal: the argument "{0}" cannot be written safely for this shell ({1}).
+ko: 터미널에 아무것도 입력하지 않았습니다: 인수 "{0}"은(는) 이 셸({1})에서 안전하게 쓸 수 없습니다.
+zh: 未向终端输入任何内容：参数 "{0}" 无法为此 shell（{1}）安全地写出。
+
+@ Nothing was typed into the terminal: the command "{0}" cannot be written safely for this shell ({1}).
+ko: 터미널에 아무것도 입력하지 않았습니다: 명령 "{0}"은(는) 이 셸({1})에서 안전하게 쓸 수 없습니다.
+zh: 未向终端输入任何内容：命令 "{0}" 无法为此 shell（{1}）安全地写出。
+
+@ ON
+ko: 켜짐
+zh: 已开启
+
+@ ON · {0}
+ko: 켜짐 · {0}
+zh: 已开启 · {0}
+
+@ ON · {0} · {1}% of cap
+ko: 켜짐 · {0} · 한도의 {1}%
+zh: 已开启 · {0} · 上限的 {1}%
+
+@ ON · {0}% of cap
+ko: 켜짐 · 한도의 {0}%
+zh: 已开启 · 上限的 {0}%
+
+@ Older tasks — open the dashboard
+ko: 이전 작업 — 대시보드 열기
+zh: 较早的任务 — 打开仪表板
+
+@ One-shot (claude -p)
+ko: 일회성 (claude -p)
+zh: 一次性（claude -p）
+
+@ One-shot — {0}
+ko: 일회성 — {0}
+zh: 一次性 — {0}
+
+@ Open Dashboard
+ko: 대시보드 열기
+zh: 打开仪表板
+
+@ Open File
+ko: 파일 열기
+zh: 打开文件
+
+@ Open Workspace Settings
+ko: 워크스페이스 설정 열기
+zh: 打开工作区设置
+
+@ Overage billing is ON: dispatching past a plan window bills money against this account's monthly cap instead of being blocked.
+ko: 초과 사용 과금이 켜져 있습니다: 플랜 윈도우를 넘어 디스패치하면 차단되는 대신 이 계정의 월 한도에서 비용이 청구됩니다.
+zh: 超额计费已开启：在超出套餐窗口后继续分发时，不会被阻止，而是从该账号的每月上限中扣费。
+
+@ Overage billing is off: exhausting a plan window blocks work until it resets — no money is spent. Turn it on to bill past the limit against a monthly cap.
+ko: 초과 사용 과금이 꺼져 있습니다: 플랜 윈도우를 모두 소진하면 재설정될 때까지 작업이 차단되며 비용은 발생하지 않습니다. 켜면 한도를 넘는 사용분이 월 한도에서 과금됩니다.
+zh: 超额计费已关闭：用完某个套餐窗口后，工作会被阻止，直到它重置 — 不会产生费用。开启后，超出限制的部分会从每月上限中计费。
+
+@ Plan quota
+ko: 플랜 쿼터
+zh: 套餐配额
+
+@ Plan quota — login expired
+ko: 플랜 쿼터 — 로그인 만료
+zh: 套餐配额 — 登录已过期
+
+@ Plan quota — no plan limits (token/non-subscription login)
+ko: 플랜 쿼터 — 플랜 한도 없음 (토큰/비구독 로그인)
+zh: 套餐配额 — 无套餐限制（令牌/非订阅登录）
+
+@ Plan quota — no rate-limit windows reported
+ko: 플랜 쿼터 — 보고된 속도 제한 윈도우 없음
+zh: 套餐配额 — 未报告速率限制窗口
+
+@ Plan quota — subscription
+ko: 플랜 쿼터 — 구독
+zh: 套餐配额 — 订阅
+
+@ Plan quota — temporarily unavailable: upstream returned no data. Last good reading {0}.
+ko: 플랜 쿼터 — 일시적으로 확인할 수 없음: 업스트림이 데이터를 반환하지 않았습니다. 마지막 정상 조회: {0}.
+zh: 套餐配额 — 暂时不可用：上游未返回数据。上次正常读数：{0}。
+
+@ Plan quota — usage unavailable
+ko: 플랜 쿼터 — 사용량 확인 불가
+zh: 套餐配额 — 用量不可用
+
+@ Plan quota — usage: — (refreshing)
+ko: 플랜 쿼터 — 사용량: — (새로 고치는 중)
+zh: 套餐配额 — 用量：—（正在刷新）
+
+@ Plan quota — {0}
+ko: 플랜 쿼터 — {0}
+zh: 套餐配额 — {0}
+
+@ Plan · (stale)
+ko: 플랜 · (이전 값)
+zh: 套餐 ·（非最新）
+
+@ Plan · Extra usage
+ko: 플랜 · 추가 사용량
+zh: 套餐 · 额外用量
+
+@ Plan · {0}
+ko: 플랜 · {0}
+zh: 套餐 · {0}
+
+@ Primary limit
+ko: 기본 한도
+zh: 主要上限
+
+@ Real plan usage ({0}) — {1}: {2} — resets {3}
+ko: 실제 플랜 사용량 ({0}) — {1}: {2} — 재설정: {3}
+zh: 实际套餐用量（{0}）— {1}：{2} — 重置：{3}
+
+@ Real plan usage ({0}) — {1}: {2} ⚠ {3} — resets {4}
+ko: 실제 플랜 사용량 ({0}) — {1}: {2} ⚠ {3} — 재설정: {4}
+zh: 实际套餐用量（{0}）— {1}：{2} ⚠ {3} — 重置：{4}
+
+@ Real plan usage — {0}: {1} — resets {2}
+ko: 실제 플랜 사용량 — {0}: {1} — 재설정: {2}
+zh: 实际套餐用量 — {0}：{1} — 重置：{2}
+
+@ Real plan usage — {0}: {1} ⚠ {2} — resets {3}
+ko: 실제 플랜 사용량 — {0}: {1} ⚠ {2} — 재설정: {3}
+zh: 实际套餐用量 — {0}：{1} ⚠ {2} — 重置：{3}

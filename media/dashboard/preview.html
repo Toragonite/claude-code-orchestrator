@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<!--
+  Browser preview of the dashboard page. NOT loaded by the extension and excluded from the
+  package. Open this file directly (file://...) in a browser: no server, no build step.
+
+  It stands in for the extension host:
+    - defines representative --vscode-* theme variables (dark, light, high contrast);
+    - stubs acquireVsCodeApi() and answers the page's messages the way the host would
+      (ready -> model, setSetting -> settingResult - after settingPending and a pause for a
+      value the host confirms in a dialog -, setScope -> model, a default model or a
+      permission mode picked in a card menu -> the account in the next model, ...);
+    - feeds the fixture models from fixtures.js.
+
+  Deep links, for screenshots:  preview.html?fixture=rich&theme=dark&bar=0
+    fixture = rich | claude-only | empty | all-logins-expired | hostile | no-workspace |
+              old-cli-and-broken-log | unsupported-entries | registry-unreadable |
+              first-load | unknown-schema
+              (rich mixes accounts of all four CLIs; claude-only is the same page without them)
+    theme   = dark | light | hc
+    bar     = 0 hides the preview bar
+    drawer  = 1 opens the settings drawer after load
+    confirm = accept | cancel   how the stand-in answers a setting the host asks about first
+                                (bypassPermissions, a billing guard set to Allow); default accept
+    confirmMs = <n>             how long that "dialog" stays open, in ms; default 2500
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard preview</title>
+<link rel="stylesheet" href="dashboard.css">
+<style>
+  /* Preview chrome only. Nothing here is part of the product. */
+  #pv-bar {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    padding: 6px 12px;
+    background: #2b2140; color: #f1ecff;
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    border-bottom: 1px solid #5b4a8a;
+  }
+  #pv-bar strong { letter-spacing: .08em; text-transform: uppercase; font-size: 10.5px; opacity: .8; }
+  #pv-bar label { display: inline-flex; align-items: center; gap: 6px; }
+  #pv-bar select, #pv-bar button {
+    font: inherit; color: inherit; background: #3d2f5e; border: 1px solid #6c5aa3; border-radius: 3px; padding: 2px 8px; cursor: pointer;
+  }
+  #pv-bar button[aria-pressed='true'] { background: #f1ecff; color: #2b2140; font-weight: 600; }
+  #pv-probe[data-state='clean'] { color: #9be7a8; }
+  #pv-probe[data-state='fired'] { color: #fff; background: #c72e0f; padding: 1px 8px; border-radius: 3px; font-weight: 700; }
+  #pv-missing:not(:empty) { color: #ffd166; }
+  #pv-log {
+    flex: 1 1 260px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: Menlo, Consolas, monospace; font-size: 11px; opacity: .85;
+  }
+  body.pv-nobar #pv-bar { display: none; }
+</style>
+</head>
+<body class="vscode-dark">
+<div id="pv-bar">
+  <strong>Preview</strong>
+  <label>Fixture <select id="pv-fixture" autocomplete="off"></select></label>
+  <span role="group" aria-label="Theme">
+    <button type="button" data-theme="dark">Dark</button>
+    <button type="button" data-theme="light">Light</button>
+    <button type="button" data-theme="hc">High contrast</button>
+  </span>
+  <span id="pv-probe" data-state="clean">markup probe: clean</span>
+  <span id="pv-missing"></span>
+  <span id="pv-log" title="Last message the page posted to the host">page -&gt; host: (nothing yet)</span>
+</div>
+
+<div id="app" aria-busy="true"><p class="boot">Loading the dashboard...</p></div>
+
+<script src="fixtures.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------------------------------------------------------- themes */
+
+  var COMMON = {
+    'font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    'font-size': '13px',
+    'editor-font-family': "Menlo, Monaco, 'Courier New', monospace",
+  };
+  var THEMES = {
+    dark: {
+      bodyClass: 'vscode-dark',
+      vars: {
+        'foreground': '#cccccc', 'descriptionForeground': '#9d9d9d', 'errorForeground': '#f85149',
+        'editor-background': '#1f1f1f', 'sideBar-background': '#181818', 'focusBorder': '#0078d4',
+        'button-background': '#0078d4', 'button-foreground': '#ffffff', 'button-hoverBackground': '#026ec1',
+        'input-background': '#313131', 'input-foreground': '#cccccc', 'input-border': '#3c3c3c', 'input-placeholderForeground': '#989898',
+        'dropdown-background': '#313131', 'dropdown-foreground': '#cccccc',
+        'textLink-foreground': '#4daafc', 'list-hoverBackground': '#2a2d2e', 'toolbar-hoverBackground': 'rgba(90, 93, 94, 0.31)',
+        'menu-background': '#1f1f1f', 'menu-foreground': '#cccccc', 'menu-border': '#454545',
+        'menu-selectionBackground': '#0078d4', 'menu-selectionForeground': '#ffffff',
+        'inputValidation-errorBackground': '#5a1d1d', 'inputValidation-errorBorder': '#be1100',
+        'inputValidation-warningBackground': '#352a05', 'inputValidation-warningBorder': '#b89500',
+        'charts-green': '#89d185', 'charts-blue': '#3794ff', 'charts-red': '#f14c4c', 'charts-yellow': '#cca700',
+        'charts-orange': '#d18616', 'charts-purple': '#b180d7', 'testing-iconPassed': '#73c991',
+        'editorWarning-foreground': '#cca700', 'editorError-foreground': '#f14c4c',
+        'widget-shadow': 'rgba(0, 0, 0, 0.36)', 'notifications-background': '#1f1f1f', 'notifications-foreground': '#cccccc',
+        'statusBarItem-errorBackground': '#b91007', 'statusBarItem-errorForeground': '#ffffff',
+      },
+    },
+    light: {
+      bodyClass: 'vscode-light',
+      vars: {
+        'foreground': '#3b3b3b', 'descriptionForeground': '#6b6b6b', 'errorForeground': '#b01011',
+        'editor-background': '#ffffff', 'sideBar-background': '#f8f8f8', 'focusBorder': '#005fb8',
+        'button-background': '#005fb8', 'button-foreground': '#ffffff', 'button-hoverBackground': '#0258a8',
+        'input-background': '#ffffff', 'input-foreground': '#3b3b3b', 'input-border': '#cecece', 'input-placeholderForeground': '#767676',
+        'dropdown-background': '#ffffff', 'dropdown-foreground': '#3b3b3b',
+        'textLink-foreground': '#005fb8', 'list-hoverBackground': '#f2f2f2', 'toolbar-hoverBackground': 'rgba(184, 184, 184, 0.31)',
+        'menu-background': '#ffffff', 'menu-foreground': '#3b3b3b', 'menu-border': '#cecece',
+        'menu-selectionBackground': '#005fb8', 'menu-selectionForeground': '#ffffff',
+        'inputValidation-errorBackground': '#f2dede', 'inputValidation-errorBorder': '#be1100',
+        'inputValidation-warningBackground': '#f6f5d2', 'inputValidation-warningBorder': '#b89500',
+        'charts-green': '#388a34', 'charts-blue': '#1a85ff', 'charts-red': '#e51400', 'charts-yellow': '#bf8803',
+        'charts-orange': '#d18616', 'charts-purple': '#652d90', 'testing-iconPassed': '#388a34',
+        'editorWarning-foreground': '#bf8803', 'editorError-foreground': '#e51400',
+        'widget-shadow': 'rgba(0, 0, 0, 0.16)', 'notifications-background': '#ffffff', 'notifications-foreground': '#3b3b3b',
+        'statusBarItem-errorBackground': '#c72e0f', 'statusBarItem-errorForeground': '#ffffff',
+      },
+    },
+    // High Contrast (dark). Left undefined on purpose, as in the real theme: button and menu
+    // selection backgrounds, list hover - the stylesheet must cope with their absence.
+    hc: {
+      bodyClass: 'vscode-high-contrast',
+      vars: {
+        'foreground': '#ffffff', 'descriptionForeground': 'rgba(255, 255, 255, 0.7)', 'errorForeground': '#f48771',
+        'editor-background': '#000000', 'sideBar-background': '#000000', 'focusBorder': '#f38518',
+        'contrastBorder': '#6fc3df', 'contrastActiveBorder': '#f38518',
+        'button-foreground': '#ffffff', 'button-border': '#6fc3df',
+        'input-background': '#000000', 'input-foreground': '#ffffff', 'input-border': '#6fc3df', 'input-placeholderForeground': 'rgba(255, 255, 255, 0.7)',
+        'dropdown-background': '#000000', 'dropdown-foreground': '#ffffff',
+        'textLink-foreground': '#21a6ff',
+        'menu-background': '#000000', 'menu-foreground': '#ffffff', 'menu-border': '#6fc3df',
+        'inputValidation-errorBackground': '#000000', 'inputValidation-errorBorder': '#be1100',
+        'inputValidation-warningBackground': '#000000', 'inputValidation-warningBorder': '#b89500',
+        'charts-green': '#89d185', 'charts-blue': '#3794ff', 'charts-red': '#f14c4c', 'charts-yellow': '#cca700',
+        'charts-orange': '#d18616', 'charts-purple': '#b180d7', 'testing-iconPassed': '#73c991',
+        'editorWarning-foreground': '#cca700', 'editorError-foreground': '#f48771',
+        'notifications-background': '#000000', 'notifications-foreground': '#ffffff',
+      },
+    },
+  };
+
+  var applied = [];
+  function applyTheme(name) {
+    var theme = THEMES[name] || THEMES.dark;
+    var root = document.documentElement;
+    applied.forEach(function (prop) { root.style.removeProperty(prop); });
+    applied = [];
+    [COMMON, theme.vars].forEach(function (set) {
+      Object.keys(set).forEach(function (key) {
+        root.style.setProperty('--vscode-' + key, set[key]);
+        applied.push('--vscode-' + key);
+      });
+    });
+    document.body.classList.remove('vscode-dark', 'vscode-light', 'vscode-high-contrast');
+    document.body.classList.add(theme.bodyClass);
+    document.querySelectorAll('#pv-bar [data-theme]').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-theme') === name));
+    });
+  }
+
+  /* ----------------------------------------------------------------- state */
+
+  var params = new URLSearchParams(location.search);
+  var fixtures = window.__CCO_FIXTURES__;
+  var fixtureName = fixtures[params.get('fixture')] ? params.get('fixture') : 'rich';
+  var themeName = THEMES[params.get('theme')] ? params.get('theme') : 'dark';
+  if (params.get('bar') === '0') { document.body.classList.add('pv-nobar'); }
+
+  var picker = document.getElementById('pv-fixture');
+  Object.keys(fixtures).forEach(function (name) {
+    var option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    picker.appendChild(option);
+  });
+  picker.value = fixtureName;
+  // Switching fixture or theme reloads with the choice in the URL, so every state is linkable
+  // and the page always boots the way it does in the editor.
+  function go(next) {
+    var q = new URLSearchParams(location.search);
+    Object.keys(next).forEach(function (k) { q.set(k, next[k]); });
+    if (q.toString() !== new URLSearchParams(location.search).toString()) {
+      location.search = q.toString();
+    }
+  }
+  picker.addEventListener('change', function () { go({ fixture: picker.value }); });
+  document.querySelectorAll('#pv-bar [data-theme]').forEach(function (b) {
+    b.addEventListener('click', function () { go({ theme: b.getAttribute('data-theme') }); });
+  });
+  applyTheme(themeName);
+
+  /* ---- report every string key the page asks for that fixtures.js lacks ---- */
+
+  var missing = [];
+  var table = window.__CCO_STRINGS__;
+  if (typeof Proxy === 'function') {
+    window.__CCO_STRINGS__ = new Proxy(table, {
+      get: function (target, key) {
+        if (typeof key === 'string' && !(key in target) && missing.indexOf(key) === -1) {
+          missing.push(key);
+          document.getElementById('pv-missing').textContent = 'strings missing from fixtures.js: ' + missing.join(', ');
+        }
+        return target[key];
+      },
+    });
+  }
+
+  /* ------------------------------------------------------- the host stand-in */
+
+  var model = fixtures[fixtureName]();
+  var logEl = document.getElementById('pv-log');
+  var probeEl = document.getElementById('pv-probe');
+  window.__CCO_POSTED__ = [];
+
+  function send(message) {
+    // Asynchronous and structured-cloned, like the real channel (NaN and Infinity survive it).
+    window.postMessage(message, '*');
+  }
+  function sendModel() {
+    if (model !== null && typeof model === 'object') {
+      model.generatedAt = typeof model.generatedAt === 'number' ? Date.now() : model.generatedAt;
+      send({ type: 'model', model: model });
+    }
+  }
+
+  var RANGES = { quotaCooldownMinutes: [1, 1440], workerTimeoutMinutes: [1, 480], meshMaxLiveWorkers: [1, 64], meshHistoryLimit: [1, 1000] };
+  function validate(key, value) {
+    if (RANGES[key]) {
+      return Number.isInteger(value) && value >= RANGES[key][0] && value <= RANGES[key][1]
+        ? null : 'must be a whole number from ' + RANGES[key][0] + ' to ' + RANGES[key][1];
+    }
+    if (key === 'meshMode' || key === 'sessionKeepalive' || key === 'providerUsagePolling') { return typeof value === 'boolean' ? null : 'must be true or false'; }
+    if (key === 'frontierWorkerDispatch' || key === 'overageWorkerDispatch') { return value === 'block' || value === 'allow' ? null : 'must be block or allow'; }
+    if (key === 'workerPermissionMode') { return typeof value === 'string' ? null : 'unknown permission mode'; }
+    if (key === 'claudePath') {
+      if (typeof value !== 'string' || value.trim() === '') { return 'must be a path'; }
+      // Type a path containing "missing" to see a host-side failure.
+      return value.indexOf('missing') !== -1 ? 'no executable at that path' : null;
+    }
+    return 'unknown setting';
+  }
+  function currentSetting(key) {
+    var s = model && model.settings ? model.settings[key] : undefined;
+    return s && typeof s === 'object' ? s.value : s;
+  }
+
+  function onPageMessage(msg) {
+    window.__CCO_POSTED__.push(msg);
+    logEl.textContent = 'page -> host: ' + JSON.stringify(msg);
+    if (!msg || typeof msg !== 'object') { return; }
+    if (msg.type === 'ready') {
+      if (model !== 'never') { setTimeout(sendModel, 120); }
+      if (params.get('drawer') === '1') {
+        setTimeout(function () {
+          var gear = document.querySelector('.btn-settings');
+          if (gear) { gear.click(); }
+        }, 500);
+      }
+    } else if (msg.type === 'setScope' && model && typeof model === 'object') {
+      model.scope = msg.scope;
+      setTimeout(sendModel, 80);
+    } else if (msg.type === 'setSetting' && model && typeof model === 'object' && model.settings) {
+      var problem = validate(msg.key, msg.value);
+      // The values the real host puts to the user in a dialog before it stores them. It tells
+      // the page at once that it is asking, and answers when the dialog closes.
+      var asks = problem === null && (
+        (msg.key === 'workerPermissionMode' && msg.value === 'bypassPermissions') ||
+        ((msg.key === 'frontierWorkerDispatch' || msg.key === 'overageWorkerDispatch') && msg.value === 'allow'));
+      var wait = 350;
+      if (asks) {
+        send({ type: 'settingPending', key: msg.key });
+        wait = /^\d{1,7}$/.test(params.get('confirmMs') || '') ? Number(params.get('confirmMs')) : 2500;
+        if (params.get('confirm') === 'cancel') { problem = 'the change was not confirmed, so the previous value stays in effect.'; }
+      }
+      setTimeout(function () {
+        if (problem === null) {
+          var slot = model.settings[msg.key];
+          if (slot && typeof slot === 'object') { slot.value = msg.value; slot.effective = msg.value; slot.setBy = null; } else { model.settings[msg.key] = msg.value; }
+        }
+        send({ type: 'settingResult', key: msg.key, ok: problem === null, value: currentSetting(msg.key), error: problem });
+        sendModel();
+      }, wait);
+    } else if (msg.type === 'command' && msg.id === 'refreshUsage' && model && typeof model === 'object' && Array.isArray(model.accounts)) {
+      setTimeout(function () {
+        model.accounts.forEach(function (a) { if (a && typeof a === 'object') { a.usageFetchedAt = Date.now(); } });
+        sendModel();
+      }, 1800);
+    } else if (msg.type === 'command' || msg.type === 'session' || msg.type === 'account' || msg.type === 'openTask' || msg.type === 'cancelTask' || msg.type === 'openRegistryFile') {
+      send({ type: 'notice', level: 'info', text: 'Preview: the host would now handle ' + JSON.stringify(msg) });
+      // A model or a mode picked in a card menu, and the preferred mark: applied to the
+      // fixture so the menu shows the new choice. ("Other..." carries no value: the real host
+      // command asks for the model itself.)
+      if (msg.type === 'account' && model && typeof model === 'object' && Array.isArray(model.accounts)) {
+        var target = model.accounts.filter(function (a) { return a && typeof a === 'object' && a.key === msg.account; })[0];
+        if (target && msg.action === 'setModel' && (typeof msg.value === 'string' || msg.value === null)) { target.defaultModel = msg.value; }
+        if (target && msg.action === 'setPermissionMode' && (typeof msg.value === 'string' || msg.value === null)) { target.permissionMode = msg.value; }
+        if (target && msg.action === 'togglePreferred') { target.preferred = !target.preferred; }
+        setTimeout(sendModel, 200);
+      }
+    }
+  }
+
+  var savedState = null;
+  window.acquireVsCodeApi = function () {
+    return {
+      postMessage: onPageMessage,
+      getState: function () { return savedState; },
+      setState: function (s) { savedState = s; },
+    };
+  };
+
+  // The hostile fixture's payloads set this flag if any of them is ever executed.
+  setInterval(function () {
+    if (window.__CCO_XSS__) {
+      probeEl.setAttribute('data-state', 'fired');
+      probeEl.textContent = 'MARKUP PROBE FIRED - a fixture string was executed';
+    }
+  }, 300);
+})();
+</script>
+<script src="dashboard.js"></script>
+</body>
+</html>

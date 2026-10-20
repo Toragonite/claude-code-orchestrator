@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "%extension.description%",
-  "version": "1.5.3",
+  "version": "2.0.0",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -72,6 +72,11 @@
           "icon": "$(server-process)"
         },
         {
+          "id": "claudeCodeOrchestrator.team",
+          "name": "%view.team.name%",
+          "icon": "$(broadcast)"
+        },
+        {
           "id": "claudeCodeOrchestrator.tasks",
           "name": "%view.tasks.name%",
           "icon": "$(checklist)"
@@ -103,10 +108,28 @@
         "icon": "$(trash)"
       },
       {
+        "command": "claudeCodeOrchestrator.removeUnsupportedEntry",
+        "title": "%command.removeUnsupportedEntry.title%",
+        "category": "%command.category%",
+        "icon": "$(trash)"
+      },
+      {
         "command": "claudeCodeOrchestrator.renameWorker",
-        "title": "Rename Worker Account",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.renameWorker.title%",
+        "category": "%command.category%",
         "icon": "$(edit)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.setWorkerModel",
+        "title": "%command.setWorkerModel.title%",
+        "category": "%command.category%",
+        "icon": "$(symbol-enum)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.setWorkerPermissionMode",
+        "title": "%command.setWorkerPermissionMode.title%",
+        "category": "%command.category%",
+        "icon": "$(shield)"
       },
       {
         "command": "claudeCodeOrchestrator.loginWorker",
@@ -116,9 +139,21 @@
       },
       {
         "command": "claudeCodeOrchestrator.reloginWorker",
-        "title": "Re-login Account (opens `claude auth login`)",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.reloginWorker.title%",
+        "category": "%command.category%",
         "icon": "$(sign-in)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.checkLoginNow",
+        "title": "%command.checkLoginNow.title%",
+        "category": "%command.category%",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.showLoginDiagnostics",
+        "title": "%command.showLoginDiagnostics.title%",
+        "category": "%command.category%",
+        "icon": "$(output)"
       },
       {
         "command": "claudeCodeOrchestrator.openWorkerSession",
@@ -127,15 +162,49 @@
         "icon": "$(terminal)"
       },
       {
+        "command": "claudeCodeOrchestrator.togglePreferred",
+        "title": "%command.togglePreferred.title%",
+        "category": "%command.category%",
+        "icon": "$(star)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.accountAction",
+        "title": "%command.accountAction.title%",
+        "category": "%command.category%"
+      },
+      {
         "command": "claudeCodeOrchestrator.installMcp",
         "title": "%command.installMcp.title%",
         "category": "%command.category%",
         "icon": "$(plug)"
       },
       {
+        "command": "claudeCodeOrchestrator.addDispatchPolicy",
+        "title": "%command.addDispatchPolicy.title%",
+        "category": "%command.category%",
+        "icon": "$(book)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.installTeamAgent",
+        "title": "%command.installTeamAgent.title%",
+        "category": "%command.category%",
+        "icon": "$(person-add)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.updateWorkspaceSetup",
+        "title": "%command.updateWorkspaceSetup.title%",
+        "category": "%command.category%",
+        "icon": "$(sync)"
+      },
+      {
         "command": "claudeCodeOrchestrator.showTaskOutput",
         "title": "%command.showTaskOutput.title%",
-        "category": "Claude Code Orchestrator"
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.openTaskOutput",
+        "title": "%command.openTaskOutput.title%",
+        "category": "%command.category%"
       },
       {
         "command": "claudeCodeOrchestrator.clearTasks",
@@ -145,21 +214,15 @@
       },
       {
         "command": "claudeCodeOrchestrator.cancelTask",
-        "title": "Cancel Dispatched Task",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.cancelTask.title%",
+        "category": "%command.category%",
         "icon": "$(stop-circle)"
       },
       {
         "command": "claudeCodeOrchestrator.cancelAllTasks",
-        "title": "Cancel All Running Dispatches",
-        "category": "Claude Code Orchestrator",
-        "icon": "$(stop)"
-      },
-      {
-        "command": "claudeCodeOrchestrator.togglePreferred",
-        "title": "%command.togglePreferred.title%",
+        "title": "%command.cancelAllTasks.title%",
         "category": "%command.category%",
-        "icon": "$(star)"
+        "icon": "$(stop)"
       },
       {
         "command": "claudeCodeOrchestrator.toggleTaskScope",
@@ -174,16 +237,28 @@
         "icon": "$(dashboard)"
       },
       {
-        "command": "claudeCodeOrchestrator.addDispatchPolicy",
-        "title": "%command.addDispatchPolicy.title%",
+        "command": "claudeCodeOrchestrator.openSettings",
+        "title": "%command.openSettings.title%",
         "category": "%command.category%",
-        "icon": "$(book)"
+        "icon": "$(gear)"
       },
       {
         "command": "claudeCodeOrchestrator.refreshUsage",
-        "title": "Refresh Account Usage",
-        "category": "Claude Code Orchestrator",
+        "title": "%command.refreshUsage.title%",
+        "category": "%command.category%",
         "icon": "$(sync)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.resetCheckin",
+        "title": "%command.resetCheckin.title%",
+        "category": "%command.category%",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.cleanSessionLitter",
+        "title": "%command.cleanSessionLitter.title%",
+        "category": "%command.category%",
+        "icon": "$(trash)"
       },
       {
         "command": "claudeCodeOrchestrator.openAssetManager",
@@ -210,28 +285,173 @@
         "icon": "$(discard)"
       },
       {
-        "command": "claudeCodeOrchestrator.attachMeshWorker",
-        "title": "%command.attachMeshWorker.title%",
+        "command": "claudeCodeOrchestrator.sessionAction",
+        "title": "%command.sessionAction.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.attachSession",
+        "title": "%command.attachSession.title%",
         "category": "%command.category%",
         "icon": "$(terminal)"
       },
       {
-        "command": "claudeCodeOrchestrator.meshWorkerLogs",
-        "title": "%command.meshWorkerLogs.title%",
+        "command": "claudeCodeOrchestrator.sessionLogs",
+        "title": "%command.sessionLogs.title%",
         "category": "%command.category%",
         "icon": "$(output)"
       },
       {
-        "command": "claudeCodeOrchestrator.stopMeshWorker",
-        "title": "%command.stopMeshWorker.title%",
+        "command": "claudeCodeOrchestrator.stopSession",
+        "title": "%command.stopSession.title%",
         "category": "%command.category%",
         "icon": "$(stop-circle)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.openSessionDiff",
+        "title": "%command.openSessionDiff.title%",
+        "category": "%command.category%",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.copySessionName",
+        "title": "%command.copySessionName.title%",
+        "category": "%command.category%",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.refreshTeam",
+        "title": "%command.refreshTeam.title%",
+        "category": "%command.category%",
+        "icon": "$(refresh)"
       },
       {
         "command": "claudeCodeOrchestrator.clearStoppedWorkers",
         "title": "%command.clearStoppedWorkers.title%",
         "category": "%command.category%",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamSendMessage",
+        "title": "%command.teamSendMessage.title%",
+        "category": "%command.category%",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamSendToAll",
+        "title": "%command.teamSendToAll.title%",
+        "category": "%command.category%",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamInterrupt",
+        "title": "%command.teamInterrupt.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamTakeOver",
+        "title": "%command.teamTakeOver.title%",
+        "category": "%command.category%",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamRelease",
+        "title": "%command.teamRelease.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamStopMember",
+        "title": "%command.teamStopMember.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamRestartMember",
+        "title": "%command.teamRestartMember.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamPauseMember",
+        "title": "%command.teamPauseMember.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamUnpauseMember",
+        "title": "%command.teamUnpauseMember.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamShowActivity",
+        "title": "%command.teamShowActivity.title%",
+        "category": "%command.category%",
+        "icon": "$(output)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamShowChanges",
+        "title": "%command.teamShowChanges.title%",
+        "category": "%command.category%",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamCopyBranch",
+        "title": "%command.teamCopyBranch.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamCopyMergeCommand",
+        "title": "%command.teamCopyMergeCommand.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamOpenWorktree",
+        "title": "%command.teamOpenWorktree.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamEnd",
+        "title": "%command.teamEnd.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamAddTask",
+        "title": "%command.teamAddTask.title%",
+        "category": "%command.category%",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamAssignTask",
+        "title": "%command.teamAssignTask.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamTaskDone",
+        "title": "%command.teamTaskDone.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamTaskRework",
+        "title": "%command.teamTaskRework.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamTaskCancel",
+        "title": "%command.teamTaskCancel.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamTaskReopen",
+        "title": "%command.teamTaskReopen.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamModeTurnOn",
+        "title": "%command.teamModeTurnOn.title%",
+        "category": "%command.category%",
+        "icon": "$(broadcast)"
+      },
+      {
+        "command": "claudeCodeOrchestrator.teamModeTurnOff",
+        "title": "%command.teamModeTurnOff.title%",
+        "category": "%command.category%"
       }
     ],
     "menus": {
@@ -267,6 +487,41 @@
           "group": "navigation@5"
         },
         {
+          "command": "claudeCodeOrchestrator.cleanSessionLitter",
+          "when": "view == claudeCodeOrchestrator.workers",
+          "group": "1_maintenance@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.refreshTeam",
+          "when": "view == claudeCodeOrchestrator.team",
+          "group": "navigation@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.openDashboard",
+          "when": "view == claudeCodeOrchestrator.team",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamModeTurnOn",
+          "when": "view == claudeCodeOrchestrator.team && !claudeCodeOrchestrator.teamModeOn",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeCodeOrchestrator.installTeamAgent",
+          "when": "view == claudeCodeOrchestrator.team",
+          "group": "1_setup@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.openSettings",
+          "when": "view == claudeCodeOrchestrator.team",
+          "group": "1_setup@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.cleanSessionLitter",
+          "when": "view == claudeCodeOrchestrator.team",
+          "group": "2_maintenance@0"
+        },
+        {
           "command": "claudeCodeOrchestrator.cancelAllTasks",
           "when": "view == claudeCodeOrchestrator.tasks",
           "group": "navigation@0"
@@ -285,6 +540,11 @@
           "command": "claudeCodeOrchestrator.clearTasks",
           "when": "view == claudeCodeOrchestrator.tasks",
           "group": "navigation@3"
+        },
+        {
+          "command": "claudeCodeOrchestrator.clearStoppedWorkers",
+          "when": "view == claudeCodeOrchestrator.workerHistory",
+          "group": "navigation@0"
         }
       ],
       "view/item/context": [
@@ -295,56 +555,364 @@
         },
         {
           "command": "claudeCodeOrchestrator.openWorkerSession",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\./",
           "group": "inline"
         },
         {
           "command": "claudeCodeOrchestrator.togglePreferred",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\./",
           "group": "1_manage@0"
         },
         {
-          "command": "claudeCodeOrchestrator.renameWorker",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
+          "command": "claudeCodeOrchestrator.setWorkerModel",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\./",
           "group": "1_manage@1"
         },
         {
-          "command": "claudeCodeOrchestrator.loginWorker",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
+          "command": "claudeCodeOrchestrator.setWorkerPermissionMode",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\..*\\.permission/",
           "group": "1_manage@2"
         },
         {
-          "command": "claudeCodeOrchestrator.reloginWorker",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
+          "command": "claudeCodeOrchestrator.renameWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\./",
           "group": "1_manage@3"
         },
         {
-          "command": "claudeCodeOrchestrator.removeWorker",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == worker",
-          "group": "1_manage@4"
+          "command": "claudeCodeOrchestrator.loginWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\.claude(\\.loggedOut)?$/",
+          "group": "2_login@0"
         },
         {
-          "command": "claudeCodeOrchestrator.attachMeshWorker",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == meshWorker",
+          "command": "claudeCodeOrchestrator.reloginWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\.(?!claude)|^worker\\.claude\\.loggedOut$/",
+          "group": "2_login@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.checkLoginNow",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\.claude/",
+          "group": "2_login@2"
+        },
+        {
+          "command": "claudeCodeOrchestrator.removeWorker",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem =~ /^worker\\./",
+          "group": "9_remove@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.removeUnsupportedEntry",
+          "when": "view == claudeCodeOrchestrator.workers && viewItem == unsupportedWorker",
+          "group": "9_remove@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.attachSession",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /\\.attachable/",
           "group": "inline@0"
         },
         {
-          "command": "claudeCodeOrchestrator.meshWorkerLogs",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == meshWorker",
+          "command": "claudeCodeOrchestrator.sessionLogs",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /\\.attachable/",
           "group": "inline@1"
         },
         {
-          "command": "claudeCodeOrchestrator.stopMeshWorker",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == meshWorker",
-          "group": "1_manage@0"
+          "command": "claudeCodeOrchestrator.attachSession",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /\\.attachable/",
+          "group": "1_session@0"
         },
         {
-          "command": "claudeCodeOrchestrator.clearStoppedWorkers",
-          "when": "view == claudeCodeOrchestrator.workers && viewItem == meshGroup",
+          "command": "claudeCodeOrchestrator.sessionLogs",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /\\.attachable/",
+          "group": "1_session@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.openSessionDiff",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /\\.branch/",
+          "group": "1_session@2"
+        },
+        {
+          "command": "claudeCodeOrchestrator.copySessionName",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^session\\./",
+          "group": "2_copy@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.stopSession",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /\\.stoppable/",
+          "group": "9_stop@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamSendMessage",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live\\.active/",
           "group": "inline@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamSendMessage",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live\\.active/",
+          "group": "1_message@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamInterrupt",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live\\.active/",
+          "group": "2_turn@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamPauseMember",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live\\.active(?!.*\\.paused)/",
+          "group": "2_turn@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamUnpauseMember",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live.*\\.paused/",
+          "group": "2_turn@2"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTakeOver",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live.*\\.claude/",
+          "group": "3_takeover@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamRelease",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live.*\\.attached/",
+          "group": "3_takeover@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamShowActivity",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live/",
+          "group": "4_view@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamShowChanges",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member.*\\.branch/",
+          "group": "4_view@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamOpenWorktree",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member.*\\.branch/",
+          "group": "4_view@2"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamCopyBranch",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member.*\\.branch/",
+          "group": "5_copy@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamCopyMergeCommand",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member.*\\.branch/",
+          "group": "5_copy@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamStopMember",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live\\.active/",
+          "group": "9_stop@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamRestartMember",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.member\\.live/",
+          "group": "9_stop@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamSendToAll",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.team\\.live(?!.*\\.ended)/",
+          "group": "1_message@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamAddTask",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.(team|board)\\.live(?!.*\\.ended)/",
+          "group": "2_board@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamAddTask",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.board\\.live/",
+          "group": "inline@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamEnd",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.team\\.live(?!.*\\.ended)/",
+          "group": "9_end@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamAssignTask",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.task\\.(open|claimed|blocked|review)\\.live/",
+          "group": "1_task@0"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskDone",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.task\\.(open|claimed|blocked|review)\\.live/",
+          "group": "1_task@1"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskRework",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.task\\.review\\.live/",
+          "group": "1_task@2"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskReopen",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.task\\.done\\.live/",
+          "group": "1_task@3"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskCancel",
+          "when": "view == claudeCodeOrchestrator.team && viewItem =~ /^ccoTeam\\.task\\.(open|claimed|blocked|review|done)\\.live/",
+          "group": "9_task@0"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "claudeCodeOrchestrator.showTaskOutput",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.openTaskOutput",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.accountAction",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.sessionAction",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.attachSession",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.sessionLogs",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.stopSession",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.openSessionDiff",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.copySessionName",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.removeUnsupportedEntry",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamSendMessage",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamSendToAll",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamInterrupt",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTakeOver",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamRelease",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamStopMember",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamRestartMember",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamPauseMember",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamUnpauseMember",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamShowActivity",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamShowChanges",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamCopyBranch",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamCopyMergeCommand",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamOpenWorktree",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamEnd",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamAddTask",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamAssignTask",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskDone",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskRework",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskCancel",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamTaskReopen",
+          "when": "false"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamModeTurnOn",
+          "when": "!claudeCodeOrchestrator.teamModeOn"
+        },
+        {
+          "command": "claudeCodeOrchestrator.teamModeTurnOff",
+          "when": "claudeCodeOrchestrator.teamModeOn"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "claudeCodeOrchestrator.workers",
+        "contents": "%viewsWelcome.workers%"
+      },
+      {
+        "view": "claudeCodeOrchestrator.team",
+        "contents": "%viewsWelcome.team.off%",
+        "when": "!claudeCodeOrchestrator.teamModeOn"
+      },
+      {
+        "view": "claudeCodeOrchestrator.team",
+        "contents": "%viewsWelcome.team.on%",
+        "when": "claudeCodeOrchestrator.teamModeOn"
+      },
+      {
+        "view": "claudeCodeOrchestrator.tasks",
+        "contents": "%viewsWelcome.tasks%"
+      },
+      {
+        "view": "claudeCodeOrchestrator.workerHistory",
+        "contents": "%viewsWelcome.workerHistory%"
+      }
+    ],
     "walkthroughs": [
       {
         "id": "claudeCodeOrchestrator.gettingStarted",
@@ -364,14 +932,14 @@
             ]
           },
           {
-            "id": "registerMcp",
-            "title": "%walkthrough.step.registerMcp.title%",
-            "description": "%walkthrough.step.registerMcp.description%",
+            "id": "setupWorkspace",
+            "title": "%walkthrough.step.setupWorkspace.title%",
+            "description": "%walkthrough.step.setupWorkspace.description%",
             "media": {
-              "markdown": "media/walkthrough/register-mcp.md"
+              "markdown": "media/walkthrough/setup-workspace.md"
             },
             "completionEvents": [
-              "onCommand:claudeCodeOrchestrator.installMcp"
+              "onCommand:claudeCodeOrchestrator.updateWorkspaceSetup"
             ]
           },
           {
@@ -400,27 +968,43 @@
       "title": "%configuration.title%",
       "properties": {
         "claudeCodeOrchestrator.workerPermissionMode": {
+          "scope": "machine",
           "type": "string",
           "default": "acceptEdits",
           "enum": [
-            "default",
             "acceptEdits",
+            "auto",
+            "dontAsk",
             "plan",
+            "default",
             "bypassPermissions"
+          ],
+          "enumDescriptions": [
+            "%config.workerPermissionMode.enumDescription.acceptEdits%",
+            "%config.workerPermissionMode.enumDescription.auto%",
+            "%config.workerPermissionMode.enumDescription.dontAsk%",
+            "%config.workerPermissionMode.enumDescription.plan%",
+            "%config.workerPermissionMode.enumDescription.default%",
+            "%config.workerPermissionMode.enumDescription.bypassPermissions%"
           ],
           "description": "%config.workerPermissionMode.description%"
         },
         "claudeCodeOrchestrator.claudePath": {
+          "scope": "machine",
           "type": "string",
           "default": "claude",
           "description": "%config.claudePath.description%"
         },
         "claudeCodeOrchestrator.quotaCooldownMinutes": {
+          "scope": "machine",
           "type": "number",
           "default": 30,
+          "minimum": 1,
+          "maximum": 1440,
           "description": "%config.quotaCooldownMinutes.description%"
         },
         "claudeCodeOrchestrator.workerTimeoutMinutes": {
+          "scope": "machine",
           "type": "number",
           "default": 45,
           "minimum": 1,
@@ -428,6 +1012,7 @@
           "description": "%config.workerTimeoutMinutes.description%"
         },
         "claudeCodeOrchestrator.assetPacks": {
+          "scope": "machine",
           "type": "array",
           "items": {
             "type": "string"
@@ -436,11 +1021,13 @@
           "description": "%config.assetPacks.description%"
         },
         "claudeCodeOrchestrator.assetAutoSync": {
+          "scope": "machine",
           "type": "boolean",
           "default": true,
           "description": "%config.assetAutoSync.description%"
         },
         "claudeCodeOrchestrator.frontierWorkerDispatch": {
+          "scope": "machine",
           "type": "string",
           "default": "block",
           "enum": [
@@ -454,6 +1041,7 @@
           "description": "%config.frontierWorkerDispatch.description%"
         },
         "claudeCodeOrchestrator.overageWorkerDispatch": {
+          "scope": "machine",
           "type": "string",
           "default": "block",
           "enum": [
@@ -461,42 +1049,31 @@
             "allow"
           ],
           "enumDescriptions": [
-            "Never assign work to a quota-exhausted worker, even when that account has extra usage enabled — dispatch never spends money past a plan window.",
-            "Exhausted workers with extra usage enabled may be used as a last resort. Those dispatches bill real money against the account's monthly cap."
+            "%config.overageWorkerDispatch.enumDescription.block%",
+            "%config.overageWorkerDispatch.enumDescription.allow%"
           ],
-          "description": "Billing guard for overage (extra-credit) dispatches. 'block' (default): the dispatch server never assigns work to a quota-exhausted worker, even when that account has extra usage enabled — dispatch never spends money past a plan window. 'allow': exhausted workers with extra usage enabled may be used as a last resort; those dispatches bill real money against the account's monthly cap. Independent of frontierWorkerDispatch, which only controls the claude-fable-5 model."
+          "description": "%config.overageWorkerDispatch.description%"
         },
         "claudeCodeOrchestrator.sessionKeepalive": {
+          "scope": "machine",
           "type": "boolean",
           "default": false,
-          "description": "Send one minimal Claude request (haiku model) per subscription account per 24h to keep OAuth sessions fresh. Spends a negligible amount of plan usage. Off by default; recovery from an already-expired login is the Re-login command."
+          "description": "%config.sessionKeepalive.description%"
+        },
+        "claudeCodeOrchestrator.providerUsagePolling": {
+          "scope": "machine",
+          "type": "boolean",
+          "default": true,
+          "description": "%config.providerUsagePolling.description%"
         },
         "claudeCodeOrchestrator.meshMode": {
+          "scope": "machine",
           "type": "boolean",
           "default": false,
           "description": "%config.meshMode.description%"
         },
-        "claudeCodeOrchestrator.meshGatewayModel": {
-          "type": "string",
-          "default": "haiku",
-          "enum": [
-            "haiku",
-            "sonnet"
-          ],
-          "enumDescriptions": [
-            "%config.meshGatewayModel.enumDescription.haiku%",
-            "%config.meshGatewayModel.enumDescription.sonnet%"
-          ],
-          "description": "%config.meshGatewayModel.description%"
-        },
-        "claudeCodeOrchestrator.meshWorkerIdleTimeoutMin": {
-          "type": "number",
-          "default": 15,
-          "minimum": 0,
-          "maximum": 1440,
-          "description": "%config.meshWorkerIdleTimeoutMin.description%"
-        },
         "claudeCodeOrchestrator.meshMaxLiveWorkers": {
+          "scope": "machine",
           "type": "number",
           "default": 8,
           "minimum": 1,
@@ -504,20 +1081,82 @@
           "description": "%config.meshMaxLiveWorkers.description%"
         },
         "claudeCodeOrchestrator.meshHistoryLimit": {
+          "scope": "machine",
           "type": "integer",
           "default": 50,
           "minimum": 1,
           "maximum": 1000,
           "description": "%config.meshHistoryLimit.description%"
+        },
+        "claudeCodeOrchestrator.teamMode": {
+          "scope": "machine",
+          "type": "boolean",
+          "default": false,
+          "description": "%config.teamMode.description%"
+        },
+        "claudeCodeOrchestrator.teamMaxMembers": {
+          "scope": "machine",
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "%config.teamMaxMembers.description%"
+        },
+        "claudeCodeOrchestrator.teamMaxRunningTurns": {
+          "scope": "machine",
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 16,
+          "description": "%config.teamMaxRunningTurns.description%"
+        },
+        "claudeCodeOrchestrator.teamTurnTimeoutMinutes": {
+          "scope": "machine",
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 5,
+          "maximum": 240,
+          "description": "%config.teamTurnTimeoutMinutes.description%"
+        },
+        "claudeCodeOrchestrator.teamTurnsPerMemberPerHour": {
+          "scope": "machine",
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 240,
+          "description": "%config.teamTurnsPerMemberPerHour.description%"
+        },
+        "claudeCodeOrchestrator.teamTurnsPerDay": {
+          "scope": "machine",
+          "type": "number",
+          "default": 300,
+          "minimum": 10,
+          "maximum": 5000,
+          "description": "%config.teamTurnsPerDay.description%"
+        },
+        "claudeCodeOrchestrator.teamCursorForce": {
+          "scope": "machine",
+          "type": "boolean",
+          "default": false,
+          "description": "%config.teamCursorForce.description%"
+        },
+        "claudeCodeOrchestrator.teamAgySkipPermissions": {
+          "scope": "machine",
+          "type": "boolean",
+          "default": false,
+          "description": "%config.teamAgySkipPermissions.description%"
         }
       }
     }
   },
   "scripts": {
     "compile": "tsc -p ./ && npm run bundle-server",
-    "bundle-server": "esbuild src/mcp/server.ts --bundle --platform=node --target=node18 --outfile=out/mcp/server.js && esbuild src/mcp/run-task.ts --bundle --platform=node --target=node18 --outfile=out/mcp/run-task.js",
+    "bundle-server": "esbuild src/mcp/server.ts --bundle --platform=node --target=node18 --outfile=out/mcp/server.js && esbuild src/mcp/run-task.ts --bundle --platform=node --target=node18 --outfile=out/mcp/run-task.js && esbuild src/mcp/provider-cli.ts --bundle --platform=node --target=node18 --outfile=out/mcp/provider-cli.js && esbuild src/mcp/cli.ts --bundle --platform=node --target=node18 --outfile=out/mcp/cli.js",
     "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\" && npm run compile",
     "package": "vsce package",
     "publish": "vsce publish",
     "publish:ovsx": "ovsx publish",
@@ -534,5 +1173,12 @@
   "galleryBanner": {
     "color": "#1b1b2f",
     "theme": "dark"
+  },
+  "dependencies": {
+    "@toragonite/agent-mesh": "0.1.3",
+    "@toragonite/agent-mesh-claude": "0.1.3",
+    "@toragonite/agent-mesh-codex": "0.1.3",
+    "@toragonite/agent-mesh-cursor": "0.1.3",
+    "@toragonite/agent-mesh-gemini": "0.1.3"
   }
 }

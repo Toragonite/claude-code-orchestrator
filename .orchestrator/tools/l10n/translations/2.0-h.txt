@@ -1,0 +1,13 @@
+# 2.0.0 round 6: Cursor plan-usage meter names.
+
+@ API usage
+ko: API 사용량
+zh: API 用量
+
+@ Auto + Composer
+ko: Auto + Composer
+zh: Auto + Composer
+
+@ Total usage
+ko: 전체 사용량
+zh: 总用量

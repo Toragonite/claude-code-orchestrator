@@ -1,0 +1,55 @@
+# 2.0.0 second round: strings changed or added by the final fix wave. Format: see build-l10n.cjs.
+# Adapted from retired keys: keychain line, "Worker Accounts view" (was "Workers view"), "last reading",
+# "next dispatch". The view is quoted by the title the user sees: 「워커 계정」 / “Worker 账号”.
+
+@ Changes take effect at the next dispatch.
+ko: 변경 사항은 다음 디스패치부터 적용됩니다.
+zh: 更改会在下一次分发时生效。
+
+@ Completed at an unknown time — the task log records a time in the future
+ko: 완료 시각을 알 수 없음 — 작업 로그에 미래의 시각이 기록되어 있음
+zh: 完成于未知时间 — 任务日志中记录的是未来的时间
+
+@ Ended at an unknown time — the task log records a time in the future
+ko: 종료 시각을 알 수 없음 — 작업 로그에 미래의 시각이 기록되어 있음
+zh: 结束于未知时间 — 任务日志中记录的是未来的时间
+
+@ Started at an unknown time — the task log records a time in the future
+ko: 시작 시각을 알 수 없음 — 작업 로그에 미래의 시각이 기록되어 있음
+zh: 开始于未知时间 — 任务日志中记录的是未来的时间
+
+@ Name for the worker account in {0} — the directory's own name cannot be used ({1}). Press Escape to skip this directory.
+ko: {0}에 있는 워커 계정의 이름 — 디렉터리 자체의 이름은 사용할 수 없습니다 ({1}). 이 디렉터리를 건너뛰려면 Esc를 누르세요.
+zh: 为 {0} 中的 worker 账号命名 — 无法使用该目录自身的名称（{1}）。按 Esc 可跳过此目录。
+
+@ The MCP server was not registered: its copy at {0} could not be written ({1}), so that path does not hold the server. Nothing was changed. Remove what is in the way, then run "Register MCP Server" again.
+ko: MCP 서버가 등록되지 않았습니다: {0}에 서버 사본을 쓸 수 없었으며 ({1}), 따라서 그 경로에는 서버가 없습니다. 아무것도 변경하지 않았습니다. 방해가 되는 것을 제거한 뒤 "MCP 서버 등록"을 다시 실행하세요.
+zh: 未注册 MCP 服务器：无法写入位于 {0} 的服务器副本（{1}），因此该路径下没有服务器。未做任何更改。请移除挡在那里的内容，然后再次运行“注册 MCP 服务器”。
+
+@ The dispatch policy was not written: {0} changed while it was being updated. Nothing was written — run the command again.
+ko: 디스패치 정책을 기록하지 않았습니다: {0}이(가) 업데이트하는 도중 변경되었습니다. 아무것도 쓰지 않았습니다 — 명령을 다시 실행하세요.
+zh: 未写入分发策略：{0} 在更新过程中发生了变化。未写入任何内容 — 请再次运行该命令。
+
+@ The registry already holds an entry named "{0}" that this version cannot use. Choose another name, or remove that entry in the Worker Accounts view first.
+ko: 이 버전에서 사용할 수 없는 "{0}"(이)라는 이름의 항목이 레지스트리에 이미 있습니다. 다른 이름을 선택하거나, 먼저 "워커 계정" 뷰에서 그 항목을 제거하세요.
+zh: 注册表中已有一个名为 "{0}" 的条目，且此版本无法使用它。请选择其他名称，或先在“Worker 账号”视图中移除该条目。
+
+@ The sign-in is kept in the OS keychain; no token file is written to the account folder.
+ko: 로그인은 OS 키체인에 보관되며, 계정 폴더에는 토큰 파일이 만들어지지 않습니다.
+zh: 登录信息保存在操作系统的钥匙串中，不会在账号文件夹中写入令牌文件。
+
+@ This version of the extension cannot use these entries and leaves them in the registry untouched. A newer version may have written them. To delete one, use "Remove Registry Entry…" on its row in the Worker Accounts view.
+ko: 이 확장 버전은 이 항목들을 사용할 수 없으며 레지스트리에 그대로 둡니다. 더 새로운 버전이 기록했을 수 있습니다. 항목을 삭제하려면 "워커 계정" 뷰에서 해당 행의 "레지스트리 항목 제거…"를 사용하세요.
+zh: 此版本的扩展无法使用这些条目，会将它们原样保留在注册表中。它们可能是更新版本写入的。若要删除某个条目，请在“Worker 账号”视图中对其所在行使用“移除注册表条目…”。
+
+@ Use at most {0} characters.
+ko: 최대 {0}자까지 사용할 수 있습니다.
+zh: 最多使用 {0} 个字符。
+
+@ Worker "{0}" was not renamed: the registry also holds a worker named "{1}", and the task log writes a failover from one worker to another as names joined by commas — renaming "{0}" would rewrite the tasks of "{1}" as well. Rename "{1}" to a name without a comma first.
+ko: 워커 "{0}"의 이름을 바꾸지 않았습니다: 레지스트리에 "{1}"(이)라는 워커도 있는데, 작업 로그는 한 워커에서 다른 워커로의 페일오버를 쉼표로 이은 이름으로 기록하므로 "{0}"의 이름을 바꾸면 "{1}"의 작업까지 다시 쓰게 됩니다. 먼저 "{1}"의 이름을 쉼표 없는 이름으로 바꾸세요.
+zh: worker "{0}" 未被重命名：注册表中还有一个名为 "{1}" 的 worker，而任务日志会把从一个 worker 切换到另一个 worker 的故障转移记录为用逗号连接的名称 — 重命名 "{0}" 会把 "{1}" 的任务也一并改写。请先把 "{1}" 重命名为不含逗号的名称。
+
+@ plan usage unavailable (last reading {0})
+ko: 플랜 사용량 확인 불가 (마지막 조회: {0})
+zh: 套餐用量不可用（上次读数：{0}）

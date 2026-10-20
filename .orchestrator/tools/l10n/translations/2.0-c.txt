@@ -1,0 +1,221 @@
+# 2.0.0 additions, part C (tree-row labels, relative times, dashboard fragments, odds and ends). Format: see build-l10n.cjs.
+
+@ branch {0}
+ko: 브랜치 {0}
+zh: 分支 {0}
+
+@ cancelled
+ko: 취소됨
+zh: 已取消
+
+@ critical
+ko: 심각
+zh: 严重
+
+@ cwd {0}
+ko: 작업 디렉터리 {0}
+zh: 工作目录 {0}
+
+@ cwd {0} · worktree {1}
+ko: 작업 디렉터리 {0} · worktree {1}
+zh: 工作目录 {0} · worktree {1}
+
+@ cwd {0} · worktree {1} (branch {2})
+ko: 작업 디렉터리 {0} · worktree {1} (브랜치 {2})
+zh: 工作目录 {0} · worktree {1}（分支 {2}）
+
+@ done
+ko: 완료
+zh: 已完成
+
+@ duplicate name
+ko: 중복된 이름
+zh: 名称重复
+
+@ error
+ko: 오류
+zh: 错误
+
+@ get_usage is intermittently returning no rate-limit data for this account — a known upstream flakiness. The last good reading was {0}. This is unrelated to the account having no plan (that state reads 'no plan limits'); the numbers return on their own once upstream reports windows again.
+ko: get_usage가 이 계정에 대해 간헐적으로 속도 제한 데이터를 반환하지 않습니다 — 업스트림의 알려진 불안정입니다. 마지막 정상 조회는 {0}입니다. 이는 계정에 플랜이 없는 경우('플랜 한도 없음'으로 표시되는 상태)와는 무관하며, 업스트림이 다시 윈도우를 보고하면 숫자는 저절로 돌아옵니다.
+zh: get_usage 对此账号间歇性地不返回速率限制数据 — 这是已知的上游不稳定问题。上一次正常读数是 {0}。这与账号没有套餐无关（那种状态显示为“无套餐限制”）；上游再次报告窗口后，数字会自行恢复。
+
+@ in {0}d {1}h
+ko: {0}일 {1}시간 후
+zh: {0}天{1}小时后
+
+@ in {0}h {1}m
+ko: {0}시간 {1}분 후
+zh: {0}小时{1}分钟后
+
+@ in {0}m
+ko: {0}분 후
+zh: {0}分钟后
+
+@ incomplete entry
+ko: 불완전한 항목
+zh: 条目不完整
+
+@ logged out — the last run failed on login
+ko: 로그아웃됨 — 마지막 실행이 로그인에서 실패함
+zh: 已登出 — 上次运行在登录时失败
+
+@ login expired
+ko: 로그인 만료
+zh: 登录已过期
+
+@ login expired — re-login needed
+ko: 로그인 만료 — 재로그인 필요
+zh: 登录已过期 — 需要重新登录
+
+@ no dispatches yet
+ko: 아직 디스패치 없음
+zh: 尚无分发
+
+@ no plan limits (token/non-subscription login)
+ko: 플랜 한도 없음 (토큰/비구독 로그인)
+zh: 无套餐限制（令牌/非订阅登录）
+
+@ no plan-usage reading
+ko: 플랜 사용량 정보 없음
+zh: 无套餐用量读数
+
+@ no rate-limit windows reported
+ko: 보고된 속도 제한 윈도우 없음
+zh: 未报告速率限制窗口
+
+@ now
+ko: 지금
+zh: 现在
+
+@ off · plan limits block instead of billing
+ko: 꺼짐 · 플랜 한도에 도달하면 과금하지 않고 차단
+zh: 已关闭 · 达到套餐限制时将阻止，而不是计费
+
+@ orphaned
+ko: 고아
+zh: 已孤立
+
+@ plan usage readable
+ko: 플랜 사용량 읽기 가능
+zh: 可读取套餐用量
+
+@ running
+ko: 실행 중
+zh: 运行中
+
+@ showing last reading from {0} — upstream returned no data
+ko: 마지막 조회 값 표시 중 ({0}) — 업스트림이 데이터를 반환하지 않음
+zh: 显示上次读数（{0}）— 上游未返回数据
+
+@ task log unreadable
+ko: 작업 로그를 읽을 수 없음
+zh: 任务日志无法读取
+
+@ temporarily unavailable — last good reading {0}
+ko: 일시적으로 확인 불가 — 마지막 정상 조회: {0}
+zh: 暂时不可用 — 上次正常读数：{0}
+
+@ the Claude path must be a command name such as "claude" or an absolute path.
+ko: Claude 경로는 "claude" 같은 명령 이름이거나 절대 경로여야 합니다.
+zh: Claude 路径必须是 "claude" 之类的命令名，或绝对路径。
+
+@ the change was not confirmed, so the previous value stays in effect.
+ko: 변경이 확인되지 않아 이전 값이 그대로 적용됩니다.
+zh: 更改未获确认，因此仍沿用之前的值。
+
+@ the shared registry could not be written, so dispatch keeps the previous value. {0}
+ko: 공유 레지스트리에 쓸 수 없어 디스패치는 이전 값을 그대로 사용합니다. {0}
+zh: 无法写入共享注册表，因此分发仍沿用之前的值。{0}
+
+@ too many confirmations were asked for at once — wait a moment, then try again.
+ko: 확인 요청이 한꺼번에 너무 많이 들어왔습니다 — 잠시 기다린 뒤 다시 시도하세요.
+zh: 同时发出的确认请求过多 — 请稍候再试。
+
+@ unknown provider "{0}"
+ko: 알 수 없는 프로바이더 "{0}"
+zh: 未知提供商 "{0}"
+
+@ usage: — (refreshing)
+ko: 사용량: — (새로 고치는 중)
+zh: 用量：—（正在刷新）
+
+@ warning
+ko: 경고
+zh: 警告
+
+@ {0} (settings of folder "{1}")
+ko: {0} (폴더 "{1}"의 설정)
+zh: {0}（文件夹 "{1}" 的设置）
+
+@ {0} (workspace settings)
+ko: {0} (워크스페이스 설정)
+zh: {0}（工作区设置）
+
+@ {0} changed while it was being written, so nothing was written. Run this command again.
+ko: {0}이(가) 쓰는 도중 변경되어 아무것도 쓰지 않았습니다. 이 명령을 다시 실행하세요.
+zh: {0} 在写入过程中发生了变化，因此未写入任何内容。请再次运行此命令。
+
+@ {0} is a symbolic link, and this command does not write through one — nothing was changed. Replace the link with a regular file or remove it, then run this command again.
+ko: {0}은(는) 심볼릭 링크이며, 이 명령은 심볼릭 링크를 통해 쓰지 않습니다 — 아무것도 변경하지 않았습니다. 링크를 일반 파일로 바꾸거나 제거한 뒤 이 명령을 다시 실행하세요.
+zh: {0} 是符号链接，此命令不会通过符号链接写入 — 未做任何更改。请把该链接替换为常规文件或将其删除，然后再次运行此命令。
+
+@ {0} not listed
+ko: {0}개 표시 안 됨
+zh: 还有 {0} 个未列出
+
+@ {0} of those dispatch(es) are cancelled here only — their sessions were not stopped: their account is no longer registered as a Claude Code account, so each has to be stopped from a terminal with `claude stop <job id>` under that account. Job ids: {1}
+ko: 그중 디스패치 {0}개는 여기에서만 취소되었고 세션은 중지되지 않았습니다. 해당 계정이 더 이상 Claude Code 계정으로 등록되어 있지 않으므로, 각 세션은 터미널에서 그 계정으로 `claude stop <job id>` 명령을 실행해 중지해야 합니다. job ID: {1}
+zh: 其中 {0} 个分发仅在此处被取消 — 它们的会话并未停止：其账号已不再注册为 Claude Code 账号，因此每个会话都必须在终端中以该账号运行 `claude stop <job id>` 来停止。作业 ID：{1}
+
+@ {0} of {1}
+ko: {1}개 중 {0}번째
+zh: 第 {0} 个，共 {1} 个
+
+@ {0} tasks · {1} in / {2} out · ~${3}
+ko: 작업 {0}개 · 입력 {1} / 출력 {2} · ~${3}
+zh: {0} 个任务 · {1} 输入 / {2} 输出 · ~${3}
+
+@ {0} · attachable sessions
+ko: {0} · 연결 가능한 세션
+zh: {0} · 可连接的会话
+
+@ {0} · one-shot only
+ko: {0} · 일회성 전용
+zh: {0} · 仅一次性
+
+@ {0}: {1} — resets {2}
+ko: {0}: {1} — 재설정: {2}
+zh: {0}：{1} — 重置：{2}
+
+@ {0}: {1} ⚠ {2} — resets {3}
+ko: {0}: {1} ⚠ {2} — 재설정: {3}
+zh: {0}：{1} ⚠ {2} — 重置：{3}
+
+@ {0}d ago
+ko: {0}일 전
+zh: {0}天前
+
+@ {0}h ago
+ko: {0}시간 전
+zh: {0}小时前
+
+@ {0}m ago
+ko: {0}분 전
+zh: {0}分钟前
+
+@ ⏱ plan usage {0}
+ko: ⏱ 플랜 사용량 {0}
+zh: ⏱ 套餐用量 {0}
+
+@ ⚠ Not verified for {0}: a new home ({1}) may NOT give a second login.
+ko: ⚠ {0}에서는 검증되지 않음: 새 홈({1})을 써도 두 번째 로그인이 만들어지지 않을 수 있습니다.
+zh: ⚠ 对 {0} 未经验证：新的主目录（{1}）未必能提供第二个登录。
+
+@ ⚠ unmerged branch {0}
+ko: ⚠ 미병합 브랜치 {0}
+zh: ⚠ 未合并分支 {0}
+
+@ ⚠overage
+ko: ⚠초과 사용
+zh: ⚠超额

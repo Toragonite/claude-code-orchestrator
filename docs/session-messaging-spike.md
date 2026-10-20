@@ -1,5 +1,7 @@
 # Cross-Session Messaging Spike — Verification Evidence
 
+> **Historical record.** These probes were run on Claude Code 2.1.226. The gateway design that followed from finding P7 (the IDE panel session could not exchange messages) was removed in 2.0.0: on Claude Code 2.1.283 the panel session is a full messaging peer, and the `mesh_send` / `mesh_receive` tools named below no longer exist. See the README for current behaviour.
+
 **Date:** 2026-08-10
 **Claude Code version under test:** 2.1.226 (macOS, darwin-arm64, VS Code extension native binary)
 **Question:** Can the orchestrator replace/augment MCP `dispatch_task` with the new

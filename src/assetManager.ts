@@ -2,27 +2,38 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {
+  AssetState,
+  AssetStateUnreadableError,
   AssetType,
   assetFiles,
   assetStatus,
   createAssetTemplate,
+  isSafeRel,
   orphanedAssets,
   PackAsset,
   readAssetState,
   relOwners,
   setAssetEnabled,
+  SyncReport,
   syncWorkspace,
 } from './assets';
+import { flattenOneLine, sliceOneLine } from './displayText';
 import { PackSource, resolvePackSources } from './packSources';
+import { CONFIG_SECTION, userSetting } from './settings';
 import { describeSyncReport } from './syncReport';
-import { jsonForScript } from './webviewUtil';
+import { createPageActionLimiter, escapeHtml, jsonForScript, makeNonce } from './webviewUtil';
+import { pickText } from './views';
 
 /**
  * Asset Manager — a dedicated webview panel for managing which Claude assets
  * (skills, agents, commands, output styles) are installed in the current
  * workspace's .claude/. Shows pack sources, per-asset sync status, per-file
  * detail with diff for customized copies, and pack-source administration.
- * Follows the dashboard's conventions: 2s data push, theme-var styling.
+ * Follows the dashboard's conventions: 2s data push, theme-var styling, a document whose
+ * policy admits one nonce'd script and one nonce'd stylesheet, a page that builds its rows
+ * from elements and text — a pack's name is whatever its `pack.json` says and a file's name is
+ * whatever is on disk, so neither is ever parsed as markup — and a host that checks every
+ * message of the page by value before it acts on it.
  */
 
 const ASSET_TYPES: AssetType[] = ['skill', 'agent', 'command', 'output-style', 'hook'];
@@ -58,6 +69,167 @@ function noteReport(prefix: string, summary: string): void {
   lastReport = `${new Date().toLocaleTimeString()} · ${prefix}: ${summary}`;
 }
 
+/**
+ * Tell the user that an asset action did nothing because the workspace's asset ledger could
+ * not be understood (`AssetStateUnreadableError`: the file is left exactly as it is), and
+ * offer to open the file. Shared with the asset commands in extension.ts.
+ */
+export function showAssetStateProblem(err: AssetStateUnreadableError): void {
+  const openLabel = vscode.l10n.t('Open File');
+  void vscode.window
+    .showErrorMessage(vscode.l10n.t('The workspace assets were not changed. {0}', err.message), openLabel)
+    .then(
+      async (choice) => {
+        if (choice === openLabel) {
+          try {
+            await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(err.file)));
+          } catch {
+            // the message already names the file
+          }
+        }
+      },
+      () => undefined,
+    );
+}
+
+/** What one kind of message from the Asset Manager page must carry, and how it is bounded. */
+interface PageMessageSpec {
+  /** It names an asset by `key`. */
+  key?: true;
+  /** It names a file by `rel`, its install path relative to `.claude/`. */
+  rel?: true;
+  /** It carries a true / false under this name. */
+  flag?: 'enabled' | 'value';
+  /** It names a pack directory under this name: an entry of the setting, or a resolved root. */
+  dir?: 'entry' | 'root';
+  /**
+   * It ends in a dialog or starts a program: the lane it is bounded in (see
+   * `createPageActionLimiter`) — one a second per lane, and for an exclusive lane nothing more
+   * while a dialog this panel opened is still being answered.
+   */
+  bound?: { lane: string; exclusive: boolean };
+}
+
+const DIALOG = { lane: 'dialog', exclusive: true } as const;
+
+/**
+ * Every message the page may send. A message of any other type, or one that lacks a field its
+ * type names here, has no effect at all. The table is asked with an own-key test, so
+ * `toString` is not a message.
+ */
+const PAGE_MESSAGES: Readonly<Record<string, PageMessageSpec>> = {
+  refresh: {},
+  syncNow: {},
+  toggle: { key: true, flag: 'enabled' },
+  reset: { key: true, bound: DIALOG },
+  resetFile: { key: true, rel: true, bound: DIALOG },
+  disableOrphan: { key: true, bound: DIALOG },
+  openInstalled: { rel: true },
+  openSource: { key: true, rel: true },
+  diff: { key: true, rel: true },
+  addPack: { bound: DIALOG },
+  removePack: { dir: 'entry' },
+  // Starts the operating system's file manager.
+  revealPack: { dir: 'root', bound: { lane: 'reveal', exclusive: false } },
+  setAutoSync: { flag: 'value' },
+  newAsset: { bound: DIALOG },
+};
+
+/** An asset key is `<pack>:<type-dir>/<id>`; nothing the host lists comes near this. */
+const PAGE_KEY_MAX = 1024;
+/** A path a message names: a pack directory, or a file's install path. */
+const PAGE_PATH_MAX = 4096;
+
+interface PageMessage {
+  type: string;
+  spec: PageMessageSpec;
+  /** '' when the type names no asset. */
+  key: string;
+  /** '' when the type names no file. */
+  rel: string;
+  /** '' when the type names no directory. */
+  dir: string;
+  /** false when the type carries no flag. */
+  flag: boolean;
+}
+
+/**
+ * A message of the page, checked by SHAPE: an object whose `type` is one of PAGE_MESSAGES, and
+ * whose fields — exactly the ones that type names — are a non-empty string within its bound, a
+ * relative path that stays inside `.claude/`, or a real boolean (a missing or misspelled flag
+ * is not "off": acting on it would uninstall an asset). Undefined for anything else. Whether
+ * the asset, the file or the directory it names is one the host itself lists is asked later,
+ * against the packs as they are then. Never throws.
+ */
+function checkPageMessage(raw: unknown): PageMessage | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const msg = raw as Record<string, unknown>;
+  const type = msg.type;
+  if (typeof type !== 'string' || !Object.prototype.hasOwnProperty.call(PAGE_MESSAGES, type)) {
+    return undefined;
+  }
+  const spec = PAGE_MESSAGES[type];
+  const text = (value: unknown, max: number): string | undefined =>
+    typeof value === 'string' && value !== '' && value.length <= max ? value : undefined;
+  const key = spec.key ? text(msg.key, PAGE_KEY_MAX) : '';
+  const rel = spec.rel ? text(msg.rel, PAGE_PATH_MAX) : '';
+  const dir = spec.dir ? text(msg[spec.dir], PAGE_PATH_MAX) : '';
+  const flag: unknown = spec.flag ? msg[spec.flag] : false;
+  if (key === undefined || rel === undefined || dir === undefined || typeof flag !== 'boolean') {
+    return undefined;
+  }
+  if (spec.rel && !isSafeRel(rel)) {
+    return undefined;
+  }
+  return { type, spec, key, rel, dir, flag };
+}
+
+/** A pack's or a file's name as a dialog shows it: one display-safe line, capped. */
+function shownName(value: string): string {
+  return sliceOneLine(flattenOneLine(value), 200);
+}
+
+/** Files named in one summary of a sync; past this it says how many more there are. */
+const BLOCKED_FILES_SHOWN = 5;
+
+/**
+ * One-line summary of a sync run, for the user: `describeSyncReport`'s list, and — when sync
+ * had to leave files alone because it could not safely read, write or remove them
+ * (`SyncReport.blocked`) — how many, which file of which asset, and why. A run that left
+ * files alone is never summed up as "everything up to date".
+ *
+ * An asset's key and a file's name come from a pack's `pack.json` and from directory names:
+ * each is shown as one display-safe line. The reason is the sync engine's own English, made
+ * of fixed words, byte counts and error codes.
+ *
+ * Shared with the asset commands in extension.ts.
+ */
+export function describeSync(report: SyncReport): string {
+  const blocked = Array.isArray(report.blocked) ? report.blocked : [];
+  if (blocked.length === 0) {
+    return describeSyncReport(report);
+  }
+  const named = blocked
+    .slice(0, BLOCKED_FILES_SHOWN)
+    .map((b) => (b.rel === '' ? `${shownName(b.asset)}: ${b.reason}` : `${shownName(b.asset)} — ${shownName(b.rel)}: ${b.reason}`))
+    .join('; ');
+  const notSynced =
+    blocked.length > BLOCKED_FILES_SHOWN
+      ? vscode.l10n.t('{0} file(s) not synced ({1}; and {2} more)', blocked.length, named, blocked.length - BLOCKED_FILES_SHOWN)
+      : vscode.l10n.t('{0} file(s) not synced ({1})', blocked.length, named);
+  const nothingElse =
+    report.installed.length +
+      report.updated.length +
+      report.removed.length +
+      report.customized.length +
+      report.orphaned.length +
+      report.conflicts.length ===
+    0;
+  return nothingElse ? notSynced : `${describeSyncReport(report)}, ${notSynced}`;
+}
+
 export function openAssetManager(context: vscode.ExtensionContext): void {
   if (panel) {
     panel.reveal();
@@ -67,55 +239,93 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
     enableScripts: true,
     retainContextWhenHidden: true,
   });
-  panel.webview.html = assetManagerHtml(assetManagerStrings());
+  panel.webview.html = assetManagerHtml(assetManagerStrings(), makeNonce());
 
-  const cfg = () => vscode.workspace.getConfiguration('claudeCodeOrchestrator');
+  // Written to the user's settings, and read back from them alone (`userSetting`).
+  const cfg = () => vscode.workspace.getConfiguration(CONFIG_SECTION);
 
+  const limiter = createPageActionLimiter({
+    intervalMs: 1_000,
+    onBurst: () => {
+      vscode.window.setStatusBarMessage(
+        vscode.l10n.t('Claude Assets: several actions were asked for at once — only the first was carried out.'),
+        5000,
+      );
+    },
+  });
+
+  /** The ledger problem last shown, so the 2-second refresh says it once, not every tick. */
+  let stateProblemShown: string | undefined;
+
+  /**
+   * Post the current state to the page. Display only — nothing is written from here — and
+   * total: it runs on a timer and after every message, where nothing catches. A failure
+   * leaves the page on what it last showed, and the next tick tries again.
+   */
   const send = () => {
     if (!panel) {
       return;
     }
-    const ws = workspaceRoot();
-    const sources = resolvePackSources(context);
-    const packs = sources.flatMap((s) => (s.pack ? [s.pack] : []));
-    const assets = collectAssets(sources);
-    const state = ws ? readAssetState(ws) : { version: 1 as const, assets: {} };
-    const owners = relOwners(assets, state);
-    void panel.webview.postMessage({
-      type: 'data',
-      workspace: ws ?? null,
-      autoSync: cfg().get<boolean>('assetAutoSync', true),
-      lastReport,
-      sources: sources.map((s) => ({
-        entry: s.entry,
-        root: s.root,
-        kind: s.kind,
-        ok: Boolean(s.pack),
-        name: s.pack?.name ?? null,
-        assetCount: s.pack?.assets.length ?? 0,
-      })),
-      assets: ws
-        ? assets.map((asset) => ({
-            key: asset.key,
-            pack: asset.pack,
-            type: asset.type,
-            id: asset.id,
-            description: asset.description ?? null,
-            enabled: state.assets[asset.key]?.enabled === true,
-            status: assetStatus(asset, state, ws, owners),
-            conflictWith:
-              Object.keys(asset.files)
-                .map((rel) => owners.get(rel))
-                .find((owner) => owner && owner !== asset.key) ?? null,
-            files: assetFiles(asset, state, ws).map((f) => ({
-              rel: f.rel,
-              state: f.state,
-              installed: f.installed,
-            })),
-          }))
-        : [],
-      orphans: ws ? orphanedAssets(packs, ws) : [],
-    });
+    try {
+      const ws = workspaceRoot();
+      const sources = resolvePackSources(context);
+      const packs = sources.flatMap((s) => (s.pack ? [s.pack] : []));
+      const assets = collectAssets(sources);
+      // A ledger that cannot be understood is shown as an empty one — this is display only, and
+      // nothing is written from here — and said once. Every action that would write it refuses.
+      let state: AssetState = { version: 1, assets: {} };
+      let stateProblem: string | null = null;
+      if (ws) {
+        try {
+          state = readAssetState(ws);
+          stateProblemShown = undefined;
+        } catch (err) {
+          stateProblem = err instanceof Error ? err.message : String(err);
+          if (err instanceof AssetStateUnreadableError && stateProblemShown !== stateProblem) {
+            stateProblemShown = stateProblem;
+            showAssetStateProblem(err);
+          }
+        }
+      }
+      const owners = relOwners(assets, state);
+      void panel.webview.postMessage({
+        type: 'data',
+        workspace: ws ?? null,
+        autoSync: userSetting('assetAutoSync'),
+        lastReport: stateProblem ?? lastReport,
+        sources: sources.map((s) => ({
+          entry: s.entry,
+          root: s.root,
+          kind: s.kind,
+          ok: Boolean(s.pack),
+          name: s.pack?.name ?? null,
+          assetCount: s.pack?.assets.length ?? 0,
+        })),
+        assets: ws
+          ? assets.map((asset) => ({
+              key: asset.key,
+              pack: asset.pack,
+              type: asset.type,
+              id: asset.id,
+              description: asset.description ?? null,
+              enabled: state.assets[asset.key]?.enabled === true,
+              status: assetStatus(asset, state, ws, owners),
+              conflictWith:
+                Object.keys(asset.files)
+                  .map((rel) => owners.get(rel))
+                  .find((owner) => owner && owner !== asset.key) ?? null,
+              files: assetFiles(asset, state, ws).map((f) => ({
+                rel: f.rel,
+                state: f.state,
+                installed: f.installed,
+              })),
+            }))
+          : [],
+        orphans: ws && stateProblem === null ? orphanedAssets(packs, ws) : [],
+      });
+    } catch {
+      // a pack directory or the ledger changed under the read; the next tick shows the result
+    }
   };
 
   // Poll only while visible — every tick re-hashes pack + installed files,
@@ -135,24 +345,42 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
     panel = undefined;
   });
 
-  panel.webview.onDidReceiveMessage(async (msg: { type: string; [k: string]: unknown }) => {
-    const ws = workspaceRoot();
-    const sources = () => resolvePackSources(context);
-    const packs = () => sources().flatMap((s) => (s.pack ? [s.pack] : []));
-    const key = typeof msg.key === 'string' ? msg.key : '';
-    const rel = typeof msg.rel === 'string' ? msg.rel : '';
+  panel.webview.onDidReceiveMessage(async (raw: unknown) => {
+    // A message is whatever the page sent. It is checked by shape before a field of it is
+    // used; what it NAMES — an asset, one of its files, a pack directory — is then looked up
+    // among the things this side lists right now, and a name that is not among them does
+    // nothing. Nothing the page says is used as a path or shown in a dialog as it came.
+    const msg = checkPageMessage(raw);
+    if (msg === undefined) {
+      return;
+    }
+    const finished =
+      msg.spec.bound === undefined ? () => undefined : limiter.admit(msg.spec.bound.lane, msg.spec.bound.exclusive);
+    if (finished === undefined) {
+      return;
+    }
     try {
+      const ws = workspaceRoot();
+      const sources = () => resolvePackSources(context);
+      const packs = () => sources().flatMap((s) => (s.pack ? [s.pack] : []));
+      /** The asset `msg.key` names, when the packs hold one of exactly that key. */
+      const namedAsset = (): PackAsset | undefined =>
+        msg.key === '' ? undefined : collectAssets(sources()).find((a) => a.key === msg.key);
+      /** The pack file behind `msg.rel` of `asset` — an OWN entry of its file table. */
+      const sourceOf = (asset: PackAsset): string | undefined =>
+        Object.prototype.hasOwnProperty.call(asset.files, msg.rel) ? asset.files[msg.rel] : undefined;
       switch (msg.type) {
         case 'refresh':
           break;
         case 'toggle': {
-          if (!ws || !key) {
+          const asset = ws ? namedAsset() : undefined;
+          if (!ws || !asset) {
             break;
           }
-          setAssetEnabled(ws, key, msg.enabled === true);
+          setAssetEnabled(ws, asset.key, msg.flag);
           noteReport(
-            msg.enabled === true ? vscode.l10n.t('enabled') : vscode.l10n.t('disabled'),
-            describeSyncReport(syncWorkspace(packs(), ws)),
+            msg.flag ? vscode.l10n.t('enabled') : vscode.l10n.t('disabled'),
+            describeSync(syncWorkspace(packs(), ws)),
           );
           break;
         }
@@ -160,65 +388,73 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
           if (!ws) {
             break;
           }
-          noteReport(vscode.l10n.t('sync'), describeSyncReport(syncWorkspace(packs(), ws)));
+          noteReport(vscode.l10n.t('sync'), describeSync(syncWorkspace(packs(), ws)));
           break;
         }
         case 'reset': {
-          if (!ws || !key) {
+          const asset = ws ? namedAsset() : undefined;
+          if (!ws || !asset) {
             break;
           }
-          const asset = collectAssets(sources()).find((a) => a.key === key);
-          const customized = asset
-            ? assetFiles(asset, readAssetState(ws), ws)
-                .filter((f) => f.state === 'customized')
-                .map((f) => f.rel)
-            : [];
+          const customized = assetFiles(asset, readAssetState(ws), ws)
+            .filter((f) => f.state === 'customized')
+            .map((f) => f.rel);
           const overwriteLabel = vscode.l10n.t('Overwrite');
           const choice = await vscode.window.showWarningMessage(
-            vscode.l10n.t('Overwrite your local edits of "{0}" with the pack version? This cannot be undone.', key),
+            vscode.l10n.t(
+              'Overwrite your local edits of "{0}" with the pack version? This cannot be undone.',
+              shownName(asset.key),
+            ),
             {
               modal: true,
               detail: customized.length
-                ? vscode.l10n.t('Files to overwrite:\n{0}', customized.join('\n'))
+                ? vscode.l10n.t('Files to overwrite:\n{0}', customized.map(shownName).join('\n'))
                 : undefined,
             },
             overwriteLabel,
           );
           if (choice === overwriteLabel) {
-            noteReport(vscode.l10n.t('reset'), describeSyncReport(syncWorkspace(packs(), ws, new Set([key]))));
+            noteReport(
+              vscode.l10n.t('reset'),
+              describeSync(syncWorkspace(packs(), ws, new Set([asset.key]))),
+            );
           }
           break;
         }
         case 'resetFile': {
-          if (!ws || !key || !rel) {
+          const asset = ws ? namedAsset() : undefined;
+          if (!ws || !asset || sourceOf(asset) === undefined) {
             break;
           }
           const overwriteLabel = vscode.l10n.t('Overwrite');
           const choice = await vscode.window.showWarningMessage(
-            vscode.l10n.t('Overwrite your local edits of "{0}" with the pack version? This cannot be undone.', rel),
+            vscode.l10n.t(
+              'Overwrite your local edits of "{0}" with the pack version? This cannot be undone.',
+              shownName(msg.rel),
+            ),
             { modal: true },
             overwriteLabel,
           );
           if (choice === overwriteLabel) {
             noteReport(
               vscode.l10n.t('reset file'),
-              describeSyncReport(syncWorkspace(packs(), ws, new Set(), new Set([`${key}\0${rel}`]))),
+              describeSync(syncWorkspace(packs(), ws, new Set(), new Set([`${asset.key}\0${msg.rel}`]))),
             );
           }
           break;
         }
         case 'disableOrphan': {
-          if (!ws || !key) {
+          // Only an asset the ledger holds as enabled while no pack provides it.
+          const orphan = ws ? orphanedAssets(packs(), ws).find((o) => o.key === msg.key) : undefined;
+          if (!ws || !orphan) {
             break;
           }
-          const record = readAssetState(ws).assets[key];
-          const count = record ? Object.keys(record.files).length : 0;
           const disableCleanLabel = vscode.l10n.t('Disable & clean');
           const choice = await vscode.window.showWarningMessage(
             vscode.l10n.t(
               'Disable "{0}" and delete its {1} unmodified installed file(s)? Files you edited are kept. If the pack is only missing on this machine, re-add its directory instead — nothing is lost by waiting.',
-              key,
-              count,
+              shownName(orphan.key),
+              orphan.files.length,
             ),
             { modal: true },
             disableCleanLabel,
@@ -226,12 +462,16 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
           if (choice !== disableCleanLabel) {
             break;
           }
-          setAssetEnabled(ws, key, false);
-          noteReport(vscode.l10n.t('cleaned orphan'), describeSyncReport(syncWorkspace(packs(), ws)));
+          setAssetEnabled(ws, orphan.key, false);
+          noteReport(vscode.l10n.t('cleaned orphan'), describeSync(syncWorkspace(packs(), ws)));
           break;
         }
         case 'openInstalled': {
-          const target = ws && rel ? safeInstalledPath(ws, rel) : undefined;
+          // A file some listed asset installs — not any path under `.claude/` the page names.
+          const listed = collectAssets(sources()).some((a) =>
+            Object.prototype.hasOwnProperty.call(a.files, msg.rel),
+          );
+          const target = ws && listed ? safeInstalledPath(ws, msg.rel) : undefined;
           if (target && fs.existsSync(target)) {
             await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(target), {
               preview: true,
@@ -241,9 +481,9 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
         }
         case 'openSource':
         case 'diff': {
-          const asset = collectAssets(sources()).find((a) => a.key === key);
-          const source = asset?.files[rel];
-          if (!asset || !source) {
+          const asset = namedAsset();
+          const source = asset ? sourceOf(asset) : undefined;
+          if (!asset || source === undefined) {
             break;
           }
           if (msg.type === 'openSource') {
@@ -252,13 +492,13 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
             });
             break;
           }
-          const target = ws ? safeInstalledPath(ws, rel) : undefined;
+          const target = ws ? safeInstalledPath(ws, msg.rel) : undefined;
           if (target && fs.existsSync(target)) {
             await vscode.commands.executeCommand(
               'vscode.diff',
               vscode.Uri.file(source),
               vscode.Uri.file(target),
-              vscode.l10n.t('{0} — pack ↔ installed', rel),
+              vscode.l10n.t('{0} — pack ↔ installed', shownName(msg.rel)),
             );
           }
           break;
@@ -273,7 +513,9 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
           });
           const dir = picked?.[0]?.fsPath;
           if (dir) {
-            const current = cfg().get<string[]>('assetPacks', []);
+            // The user's own list is what is extended and written back — never the merged
+            // value, which would copy a workspace's entries into the user's settings.
+            const current = userSetting('assetPacks');
             if (!current.includes(dir)) {
               await cfg().update('assetPacks', [...current, dir], vscode.ConfigurationTarget.Global);
             }
@@ -281,26 +523,27 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
           break;
         }
         case 'removePack': {
-          const entry = typeof msg.entry === 'string' ? msg.entry : '';
-          const current = cfg().get<string[]>('assetPacks', []);
-          if (entry && current.includes(entry)) {
+          // Only an entry the user's own list holds, spelled as it is there.
+          const current = userSetting('assetPacks');
+          if (current.includes(msg.dir)) {
             await cfg().update(
               'assetPacks',
-              current.filter((e) => e !== entry),
+              current.filter((e) => e !== msg.dir),
               vscode.ConfigurationTarget.Global,
             );
           }
           break;
         }
         case 'revealPack': {
-          const root = typeof msg.root === 'string' ? msg.root : '';
-          if (root && sources().some((s) => s.root === root)) {
-            await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(root));
+          // Only a directory this side itself lists as a pack source.
+          const source = sources().find((s) => s.root === msg.dir);
+          if (source) {
+            await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(source.root));
           }
           break;
         }
         case 'setAutoSync': {
-          await cfg().update('assetAutoSync', msg.value === true, vscode.ConfigurationTarget.Global);
+          await cfg().update('assetAutoSync', msg.flag, vscode.ConfigurationTarget.Global);
           break;
         }
         case 'newAsset': {
@@ -309,7 +552,13 @@ export function openAssetManager(context: vscode.ExtensionContext): void {
         }
       }
     } catch (err) {
-      void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      if (err instanceof AssetStateUnreadableError) {
+        showAssetStateProblem(err);
+      } else {
+        void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      finished();
     }
     send();
   });
@@ -336,7 +585,8 @@ async function createNewAsset(sources: PackSource[]): Promise<void> {
     writable.length === 1
       ? { source: writable[0] }
       : await vscode.window.showQuickPick(
-          writable.map((source) => ({ label: source.pack!.name, description: source.root, source })),
+          // A pack's name comes from its own manifest: inert where the picker draws `$(icon)`.
+          writable.map((source) => ({ label: pickText(source.pack!.name, 80), description: pickText(source.root, 1024), source })),
           { placeHolder: vscode.l10n.t('Pack to create the asset in') },
         );
   if (!packPick) {
@@ -470,18 +720,27 @@ export function assetManagerStrings(): AssetManagerStrings {
   };
 }
 
-/** HTML-escape for static-body interpolation (localized strings are untrusted). */
-const HTML_ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-const escHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => HTML_ESC[c]);
-
-/** Pure: same strings in, same HTML out. Exported for headless rendering tests. */
-export function assetManagerHtml(s: AssetManagerStrings): string {
+/**
+ * The Asset Manager's document. Pure: same strings and nonce in, same HTML out. Exported for
+ * headless rendering tests.
+ *
+ * The policy allows exactly the one script and the one stylesheet below, by this render's
+ * nonce: no inline handler, no `style` attribute, no network. The body is static — localized
+ * strings, escaped — and everything that depends on data is built by the script from elements
+ * and text (`el`): a pack's name, an asset's id or description, a file's path can hold any
+ * character, and none of it is ever handed to an HTML parser.
+ */
+export function assetManagerHtml(s: AssetManagerStrings, nonce: string): string {
+  // A nonce is written into the policy and into two attributes; anything but the plain token
+  // `makeNonce` produces is replaced rather than escaped.
+  const token = /^[A-Za-z0-9]{16,128}$/.test(nonce) ? nonce : makeNonce();
+  const csp = [`default-src 'none'`, `style-src 'nonce-${token}'`, `script-src 'nonce-${token}'`].join('; ');
   return /* html */ `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
-<style>
+<meta http-equiv="Content-Security-Policy" content="${escapeHtml(csp)};">
+<style nonce="${token}">
   :root {
     --c-muted: var(--vscode-descriptionForeground);
     --card-bg: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
@@ -491,11 +750,16 @@ export function assetManagerHtml(s: AssetManagerStrings): string {
     --err: var(--vscode-charts-red, #f14c4c);
     --info: var(--vscode-charts-blue, #3794ff);
   }
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 14px 18px 40px; }
+  [hidden] { display: none !important; }
+  /* Size, weight and margin are the editor's own defaults for a webview body, stated here so
+     that the page reads the same whether or not the editor's default sheet applies under this
+     policy. */
+  body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size, 13px); font-weight: var(--vscode-font-weight, normal); color: var(--vscode-foreground); margin: 0; padding: 14px 18px 40px; }
   h1 { font-size: 1.15em; margin: 0 0 2px; }
   #meta { color: var(--c-muted); font-size: 0.88em; margin: 0 0 14px; }
   .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin-bottom: 12px; }
   .card h2 { font-size: 0.82em; font-weight: 600; color: var(--c-muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 8px; }
+  #summary { font-weight: 400; text-transform: none; letter-spacing: 0; }
   .toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 12px; }
   .toolbar .spacer { flex: 1; }
   button { background: var(--vscode-button-secondaryBackground, var(--card-bg)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--border); border-radius: 3px; padding: 4px 10px; cursor: pointer; font-family: inherit; }
@@ -507,6 +771,7 @@ export function assetManagerHtml(s: AssetManagerStrings): string {
   tr:last-child td { border-bottom: none; }
   th { color: var(--c-muted); font-weight: 600; white-space: nowrap; }
   .muted { color: var(--c-muted); }
+  .orphans-help { font-size: 0.85em; margin: 0 0 6px; }
   .badge { border: 1px solid var(--border); border-radius: 8px; padding: 0 7px; font-size: 0.82em; white-space: nowrap; }
   .badge.synced { color: var(--ok); border-color: var(--ok); }
   .badge.update { color: var(--info); border-color: var(--info); }
@@ -516,11 +781,13 @@ export function assetManagerHtml(s: AssetManagerStrings): string {
   .type { font-size: 0.8em; color: var(--c-muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; white-space: nowrap; }
   .asset-name { font-weight: 600; }
   .desc { color: var(--c-muted); font-size: 0.85em; margin-top: 1px; max-width: 60ch; }
+  .desc.conflict { color: var(--err); }
   a.action { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; margin-right: 8px; white-space: nowrap; }
   a.action:hover { text-decoration: underline; }
   details { margin-top: 3px; }
   summary { cursor: pointer; color: var(--c-muted); font-size: 0.85em; }
   .file-row { font-size: 0.85em; margin: 2px 0 0 14px; display: flex; gap: 8px; align-items: baseline; }
+  .file-row.flush { margin-left: 0; }
   .file-state { font-size: 0.9em; }
   .file-state.customized { color: var(--warn); }
   .file-state.writable { color: var(--info); }
@@ -531,187 +798,268 @@ export function assetManagerHtml(s: AssetManagerStrings): string {
 </style>
 </head>
 <body>
-  <h1>${escHtml(s.title)}</h1>
+  <h1>${escapeHtml(s.title)}</h1>
   <p id="meta"></p>
 
   <div class="toolbar">
-    <button class="primary" data-act="syncNow">${escHtml(s.btnSyncNow)}</button>
-    <button data-act="newAsset">${escHtml(s.btnNewAsset)}</button>
-    <button data-act="addPack">${escHtml(s.btnAddPack)}</button>
-    <label class="inline"><input type="checkbox" id="autosync"> ${escHtml(s.autoSyncLabel)}</label>
+    <button class="primary" data-act="syncNow">${escapeHtml(s.btnSyncNow)}</button>
+    <button data-act="newAsset">${escapeHtml(s.btnNewAsset)}</button>
+    <button data-act="addPack">${escapeHtml(s.btnAddPack)}</button>
+    <label class="inline"><input type="checkbox" id="autosync"> ${escapeHtml(s.autoSyncLabel)}</label>
     <span class="spacer"></span>
-    <input type="text" id="filter" placeholder="${escHtml(s.filterPlaceholder)}" spellcheck="false">
+    <input type="text" id="filter" placeholder="${escapeHtml(s.filterPlaceholder)}" spellcheck="false">
   </div>
 
   <div class="card">
-    <h2>${escHtml(s.sourcesTitle)}</h2>
+    <h2>${escapeHtml(s.sourcesTitle)}</h2>
     <div id="sources"></div>
   </div>
 
   <div class="card">
-    <h2>${escHtml(s.assetsTitle)}<span id="summary" style="font-weight:400;text-transform:none;letter-spacing:0"></span></h2>
+    <h2>${escapeHtml(s.assetsTitle)}<span id="summary"></span></h2>
     <table id="assets"><thead><tr>
-      <th title="${escHtml(s.thOnTip)}">${escHtml(s.thOn)}</th><th>${escHtml(s.thAsset)}</th><th>${escHtml(s.thPack)}</th><th>${escHtml(s.thType)}</th><th>${escHtml(s.thStatus)}</th><th>${escHtml(s.thActions)}</th>
-    </tr></thead><tbody></tbody></table>
+      <th title="${escapeHtml(s.thOnTip)}">${escapeHtml(s.thOn)}</th><th>${escapeHtml(s.thAsset)}</th><th>${escapeHtml(s.thPack)}</th><th>${escapeHtml(s.thType)}</th><th>${escapeHtml(s.thStatus)}</th><th>${escapeHtml(s.thActions)}</th>
+    </tr></thead><tbody id="assets-body"></tbody></table>
   </div>
 
-  <div class="card" id="orphans-card" style="display:none">
-    <h2>${escHtml(s.orphansTitle)}</h2>
-    <p class="muted" style="font-size:0.85em;margin:0 0 6px">
-      ${escHtml(s.orphansHelp)}
+  <div class="card" id="orphans-card" hidden>
+    <h2>${escapeHtml(s.orphansTitle)}</h2>
+    <p class="muted orphans-help">
+      ${escapeHtml(s.orphansHelp)}
     </p>
     <div id="orphans"></div>
   </div>
 
-<script>
+<script nonce="${token}">
+(function () {
+  'use strict';
   const vscode = acquireVsCodeApi();
   const S = ${jsonForScript(s)};
-  const fmt = (s, ...a) => String(s).replace(/\\{(\\d+)\\}/g, (_, i) => a[i]);
+  const fmt = (template, ...args) => String(template).replace(/\\{(\\d+)\\}/g, (_m, i) => String(args[i]));
+  const post = (message) => vscode.postMessage(message);
+  const byId = (id) => document.getElementById(id);
+  const items = (value) => (Array.isArray(value) ? value : []);
+  const text = (value) => (typeof value === 'string' ? value : value === null || value === undefined ? '' : String(value));
+
+  // Every element that shows data is made here: a tag, a class written in this file, and TEXT.
+  // Nothing that arrives in a message is ever parsed as markup or set as an attribute name.
+  function el(tag, cls, content) {
+    const node = document.createElement(tag);
+    if (cls) {
+      node.className = cls;
+    }
+    if (content !== undefined) {
+      node.textContent = text(content);
+    }
+    return node;
+  }
+  function clear(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
+  function action(label, run) {
+    const node = el('a', 'action', label);
+    node.addEventListener('click', run);
+    return node;
+  }
+
   let data = null;
   let lastSig = '';
+  /** Keys of the assets whose file list is unfolded; a re-render keeps them unfolded. */
+  const openKeys = new Set();
 
-  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const post = (m) => vscode.postMessage(m);
-
-  window.addEventListener('message', (e) => {
-    if (e.data.type !== 'data') return;
-    const sig = JSON.stringify(e.data);
-    if (sig === lastSig) return;
+  window.addEventListener('message', (event) => {
+    const incoming = event.data;
+    if (typeof incoming !== 'object' || incoming === null || incoming.type !== 'data') {
+      return;
+    }
+    const sig = JSON.stringify(incoming);
+    if (sig === lastSig) {
+      return;
+    }
     lastSig = sig;
-    data = e.data;
+    data = incoming;
     render();
   });
 
-  for (const b of document.querySelectorAll('button[data-act]')) {
-    b.addEventListener('click', () => post({ type: b.dataset.act }));
+  for (const button of document.querySelectorAll('button[data-act]')) {
+    button.addEventListener('click', () => post({ type: button.getAttribute('data-act') }));
   }
-  document.getElementById('autosync').addEventListener('change', (e) => post({ type: 'setAutoSync', value: e.target.checked }));
-  document.getElementById('filter').addEventListener('input', renderAssets);
+  byId('autosync').addEventListener('change', (event) => post({ type: 'setAutoSync', value: event.target.checked === true }));
+  byId('filter').addEventListener('input', renderAssets);
 
-  const STATUS_BADGE = {
-    'synced': ['synced', S.statusSynced],
-    'update-available': ['update', S.statusUpdateAvailable],
-    'customized': ['customized', S.statusCustomized],
-    'not-installed': ['off', S.statusNotInstalled],
-    'conflict': ['orphan', S.statusConflict],
-  };
-  const FILE_STATE_LABEL = { 'in-sync': '', 'writable': S.fileUpdatePending, 'customized': S.fileCustomized, 'missing-source': S.fileSourceUnreadable };
+  // status -> [badge class, label]; file state -> [class, label]. Maps, so a status that is
+  // not one of these finds nothing rather than something inherited.
+  const STATUS_BADGE = new Map([
+    ['synced', ['synced', S.statusSynced]],
+    ['update-available', ['update', S.statusUpdateAvailable]],
+    ['customized', ['customized', S.statusCustomized]],
+    ['not-installed', ['off', S.statusNotInstalled]],
+    ['conflict', ['orphan', S.statusConflict]],
+  ]);
+  const FILE_STATE = new Map([
+    ['writable', ['writable', S.fileUpdatePending]],
+    ['customized', ['customized', S.fileCustomized]],
+    ['missing-source', ['missing-source', S.fileSourceUnreadable]],
+  ]);
 
   function render() {
-    if (!data) return;
-    document.getElementById('meta').textContent =
+    if (!data) {
+      return;
+    }
+    byId('meta').textContent =
       (data.workspace ? fmt(S.metaWorkspace, data.workspace) : S.metaNoWorkspace) +
-      (data.lastReport ? '   |   ' + data.lastReport : '');
-    document.getElementById('autosync').checked = data.autoSync;
+      (data.lastReport ? '   |   ' + text(data.lastReport) : '');
+    byId('autosync').checked = data.autoSync === true;
 
-    document.getElementById('sources').innerHTML = data.sources.map((s) => {
-      const status = s.ok
-        ? '<span class="badge synced">' + esc(fmt(S.sourceAssetCount, s.assetCount)) + '</span>'
-        : '<span class="badge orphan">' + esc(S.dirMissing) + '</span>';
-      const remove = s.kind === 'setting'
-        ? '<a class="action" data-remove="' + esc(s.entry) + '">' + esc(S.actionRemove) + '</a>' : '';
-      const reveal = s.ok ? '<a class="action" data-reveal="' + esc(s.root) + '">' + esc(S.actionReveal) + '</a>' : '';
-      return '<div class="file-row" style="margin-left:0">' +
-        '<b>' + esc(s.name ?? s.entry) + '</b>' +
-        '<span class="src-path muted">' + esc(s.kind === 'bundled' ? S.bundledLabel : s.root) + '</span>' +
-        status + reveal + remove + '</div>';
-    }).join('');
-    for (const a of document.querySelectorAll('[data-remove]')) a.onclick = () => post({ type: 'removePack', entry: a.dataset.remove });
-    for (const a of document.querySelectorAll('[data-reveal]')) a.onclick = () => post({ type: 'revealPack', root: a.dataset.reveal });
+    const sources = byId('sources');
+    clear(sources);
+    for (const source of items(data.sources)) {
+      const row = el('div', 'file-row flush');
+      row.appendChild(el('b', '', source.name === null || source.name === undefined ? source.entry : source.name));
+      row.appendChild(el('span', 'src-path muted', source.kind === 'bundled' ? S.bundledLabel : source.root));
+      row.appendChild(
+        source.ok ? el('span', 'badge synced', fmt(S.sourceAssetCount, source.assetCount)) : el('span', 'badge orphan', S.dirMissing),
+      );
+      if (source.ok) {
+        row.appendChild(action(S.actionReveal, () => post({ type: 'revealPack', root: source.root })));
+      }
+      if (source.kind === 'setting') {
+        row.appendChild(action(S.actionRemove, () => post({ type: 'removePack', entry: source.entry })));
+      }
+      sources.appendChild(row);
+    }
 
     renderAssets();
 
-    const orphansCard = document.getElementById('orphans-card');
-    if (data.orphans.length) {
-      orphansCard.style.display = '';
-      document.getElementById('orphans').innerHTML = data.orphans.map((o) =>
-        '<div class="file-row" style="margin-left:0"><b>' + esc(o.key) + '</b>' +
-        '<span class="muted">' + esc(fmt(S.orphanFilesKept, o.files.length)) + '</span>' +
-        '<a class="action" data-orphan="' + esc(o.key) + '">' + esc(S.actionDisableClean) + '</a></div>'
-      ).join('');
-      for (const a of document.querySelectorAll('[data-orphan]')) a.onclick = () => post({ type: 'disableOrphan', key: a.dataset.orphan });
-    } else {
-      orphansCard.style.display = 'none';
+    const orphans = items(data.orphans);
+    const list = byId('orphans');
+    clear(list);
+    for (const orphan of orphans) {
+      const row = el('div', 'file-row flush');
+      row.appendChild(el('b', '', orphan.key));
+      row.appendChild(el('span', 'muted', fmt(S.orphanFilesKept, items(orphan.files).length)));
+      row.appendChild(action(S.actionDisableClean, () => post({ type: 'disableOrphan', key: orphan.key })));
+      list.appendChild(row);
     }
+    byId('orphans-card').hidden = orphans.length === 0;
+  }
+
+  function fileRow(key, file) {
+    const rel = text(file.rel);
+    const row = el('div', 'file-row');
+    row.appendChild(el('span', 'src-path', rel));
+    const state = FILE_STATE.get(file.state);
+    if (state) {
+      row.appendChild(el('span', 'file-state ' + state[0], state[1]));
+    }
+    if (file.installed) {
+      row.appendChild(action(S.actionOpen, () => post({ type: 'openInstalled', rel: rel })));
+    }
+    row.appendChild(action(S.actionPackVersion, () => post({ type: 'openSource', key: key, rel: rel })));
+    if (file.installed && file.state !== 'in-sync') {
+      row.appendChild(action(S.actionDiff, () => post({ type: 'diff', key: key, rel: rel })));
+    }
+    if (file.installed && file.state === 'customized') {
+      row.appendChild(action(S.actionResetFile, () => post({ type: 'resetFile', key: key, rel: rel })));
+    }
+    return row;
+  }
+
+  function assetRow(asset) {
+    const key = text(asset.key);
+    const badge = STATUS_BADGE.get(asset.status) || ['off', text(asset.status)];
+    const row = el('tr');
+
+    const toggleCell = el('td');
+    const toggle = el('input');
+    toggle.type = 'checkbox';
+    toggle.title = S.toggleTip;
+    toggle.checked = asset.enabled === true;
+    toggle.addEventListener('change', () => post({ type: 'toggle', key: key, enabled: toggle.checked }));
+    toggleCell.appendChild(toggle);
+    row.appendChild(toggleCell);
+
+    const nameCell = el('td');
+    nameCell.appendChild(el('span', 'asset-name', asset.id));
+    if (asset.description) {
+      nameCell.appendChild(el('div', 'desc', asset.description));
+    }
+    if (asset.status === 'conflict' && asset.conflictWith) {
+      nameCell.appendChild(el('div', 'desc conflict', fmt(S.conflictNote, asset.conflictWith)));
+    }
+    const files = items(asset.files);
+    const details = el('details');
+    details.open = openKeys.has(key);
+    details.addEventListener('toggle', () => {
+      if (details.open) {
+        openKeys.add(key);
+      } else {
+        openKeys.delete(key);
+      }
+    });
+    details.appendChild(el('summary', '', fmt(S.detailsFiles, files.length)));
+    for (const file of files) {
+      details.appendChild(fileRow(key, file));
+    }
+    nameCell.appendChild(details);
+    row.appendChild(nameCell);
+
+    row.appendChild(el('td', 'muted', asset.pack));
+    const typeCell = el('td');
+    typeCell.appendChild(el('span', 'type', asset.type));
+    row.appendChild(typeCell);
+    const statusCell = el('td');
+    statusCell.appendChild(el('span', 'badge ' + badge[0], badge[1]));
+    row.appendChild(statusCell);
+    const actionsCell = el('td');
+    if (asset.status === 'customized') {
+      actionsCell.appendChild(action(S.actionResetToPack, () => post({ type: 'reset', key: key })));
+    }
+    row.appendChild(actionsCell);
+    return row;
   }
 
   function renderAssets() {
-    if (!data) return;
-    const counts = { enabled: 0, update: 0, customized: 0, conflict: 0 };
-    for (const a of data.assets) {
-      if (a.enabled) counts.enabled++;
-      if (a.status === 'update-available') counts.update++;
-      if (a.status === 'customized') counts.customized++;
-      if (a.status === 'conflict') counts.conflict++;
+    if (!data) {
+      return;
     }
-    document.getElementById('summary').textContent = counts.enabled || data.assets.length
-      ? ' — ' + fmt(S.summaryEnabled, counts.enabled, data.assets.length) +
+    const assets = items(data.assets);
+    const counts = { enabled: 0, update: 0, customized: 0, conflict: 0 };
+    for (const asset of assets) {
+      if (asset.enabled) counts.enabled++;
+      if (asset.status === 'update-available') counts.update++;
+      if (asset.status === 'customized') counts.customized++;
+      if (asset.status === 'conflict') counts.conflict++;
+    }
+    byId('summary').textContent = counts.enabled || assets.length
+      ? ' — ' + fmt(S.summaryEnabled, counts.enabled, assets.length) +
         (counts.update ? ' · ' + fmt(S.summaryUpdate, counts.update) : '') +
         (counts.customized ? ' · ' + fmt(S.summaryCustomized, counts.customized) : '') +
         (counts.conflict ? ' · ' + fmt(S.summaryConflict, counts.conflict) : '')
       : '';
 
-    const openKeys = new Set([...document.querySelectorAll('#assets details[open]')].map((d) => d.dataset.key));
-    const q = document.getElementById('filter').value.trim().toLowerCase();
-    const rows = data.assets.filter((a) =>
-      !q || (a.id + ' ' + a.pack + ' ' + a.type + ' ' + (a.description || '') + ' ' + a.status + ' ' +
-        (STATUS_BADGE[a.status] || ['', ''])[1] + (a.enabled ? ' enabled installed' : ' disabled')).toLowerCase().includes(q));
-    document.querySelector('#assets tbody').innerHTML = rows.map((a) => {
-      const [cls, label] = STATUS_BADGE[a.status] || ['off', a.status];
-      const files = a.files.map((f) => {
-        const state = FILE_STATE_LABEL[f.state] || '';
-        const links =
-          (f.installed ? '<a class="action" data-open="' + esc(f.rel) + '">' + esc(S.actionOpen) + '</a>' : '') +
-          '<a class="action" data-src="' + esc(a.key) + '|' + esc(f.rel) + '">' + esc(S.actionPackVersion) + '</a>' +
-          (f.installed && f.state !== 'in-sync' ? '<a class="action" data-diff="' + esc(a.key) + '|' + esc(f.rel) + '">' + esc(S.actionDiff) + '</a>' : '') +
-          (f.installed && f.state === 'customized' ? '<a class="action" data-resetfile="' + esc(a.key) + '|' + esc(f.rel) + '">' + esc(S.actionResetFile) + '</a>' : '');
-        return '<div class="file-row"><span class="src-path">' + esc(f.rel) + '</span>' +
-          (state ? '<span class="file-state ' + esc(f.state) + '">' + esc(state) + '</span>' : '') + links + '</div>';
-      }).join('');
-      const details = '<details data-key="' + esc(a.key) + '"' + (openKeys.has(a.key) ? ' open' : '') + '><summary>' +
-        esc(fmt(S.detailsFiles, a.files.length)) + '</summary>' + files + '</details>';
-      const reset = a.status === 'customized'
-        ? '<a class="action" data-reset="' + esc(a.key) + '">' + esc(S.actionResetToPack) + '</a>' : '';
-      const conflictNote = a.status === 'conflict' && a.conflictWith
-        ? '<div class="desc" style="color:var(--err)">' + esc(fmt(S.conflictNote, a.conflictWith)) + '</div>'
-        : '';
-      return '<tr>' +
-        '<td><input type="checkbox" title="' + esc(S.toggleTip) + '" data-toggle="' + esc(a.key) + '"' + (a.enabled ? ' checked' : '') + '></td>' +
-        '<td><span class="asset-name">' + esc(a.id) + '</span>' +
-          (a.description ? '<div class="desc">' + esc(a.description) + '</div>' : '') + conflictNote + details + '</td>' +
-        '<td class="muted">' + esc(a.pack) + '</td>' +
-        '<td><span class="type">' + esc(a.type) + '</span></td>' +
-        '<td><span class="badge ' + cls + '">' + esc(label) + '</span></td>' +
-        '<td>' + reset + '</td></tr>';
-    }).join('') || '<tr><td colspan="6" class="empty">' +
-      esc(data.assets.length ? S.emptyFilter :
-        (data.workspace ? S.emptyNoAssets : S.emptyNoWorkspace)) +
-      '</td></tr>';
-
-    for (const el of document.querySelectorAll('[data-toggle]'))
-      el.onchange = () => post({ type: 'toggle', key: el.dataset.toggle, enabled: el.checked });
-    for (const el of document.querySelectorAll('[data-reset]'))
-      el.onclick = () => post({ type: 'reset', key: el.dataset.reset });
-    for (const el of document.querySelectorAll('[data-open]'))
-      el.onclick = () => post({ type: 'openInstalled', rel: el.dataset.open });
-    for (const el of document.querySelectorAll('[data-src]')) {
-      el.onclick = () => { const [key, rel] = splitOnce(el.dataset.src); post({ type: 'openSource', key, rel }); };
+    const query = byId('filter').value.trim().toLowerCase();
+    const rows = assets.filter((asset) =>
+      !query || (text(asset.id) + ' ' + text(asset.pack) + ' ' + text(asset.type) + ' ' + text(asset.description) + ' ' + text(asset.status) + ' ' +
+        (STATUS_BADGE.get(asset.status) || ['', ''])[1] + (asset.enabled ? ' enabled installed' : ' disabled')).toLowerCase().includes(query));
+    const body = byId('assets-body');
+    clear(body);
+    for (const asset of rows) {
+      body.appendChild(assetRow(asset));
     }
-    for (const el of document.querySelectorAll('[data-diff]')) {
-      el.onclick = () => { const [key, rel] = splitOnce(el.dataset.diff); post({ type: 'diff', key, rel }); };
+    if (rows.length === 0) {
+      const row = el('tr');
+      const cell = el('td', 'empty', assets.length ? S.emptyFilter : data.workspace ? S.emptyNoAssets : S.emptyNoWorkspace);
+      cell.colSpan = 6;
+      row.appendChild(cell);
+      body.appendChild(row);
     }
-    for (const el of document.querySelectorAll('[data-resetfile]')) {
-      el.onclick = () => { const [key, rel] = splitOnce(el.dataset.resetfile); post({ type: 'resetFile', key, rel }); };
-    }
-  }
-
-  // Asset keys contain no '|'; rels may, so split on the first one only.
-  function splitOnce(s) {
-    const i = s.indexOf('|');
-    return [s.slice(0, i), s.slice(i + 1)];
   }
 
   post({ type: 'refresh' });
+})();
 </script>
 </body>
 </html>`;

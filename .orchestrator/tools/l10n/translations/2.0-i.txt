@@ -1,0 +1,49 @@
+# 2.0.0 round 7: pinned models, same claude.ai account notes.
+
+@ "{0}" now defaults to {1} for dispatches that name no model — pinned: the CLI runs exactly this model, whatever is newest.
+ko: 이제 "{0}"은(는) 모델을 지정하지 않은 디스패치에 {1}을(를) 기본으로 사용합니다 — 고정됨: 최신 모델이 무엇이든 CLI는 정확히 이 모델로 실행합니다.
+zh: 对于未指定模型的分发，"{0}" 现在默认使用 {1} — 已固定：无论最新的是哪个模型，CLI 都会严格运行这个模型。
+
+@ Reasoning efforts: {0}
+ko: 추론 강도: {0}
+zh: 推理强度：{0}
+
+@ Same claude.ai account as {0} — one plan's limits for all of them
+ko: {0}과(와) 같은 claude.ai 계정 — 모두 하나의 플랜 한도를 공유합니다
+zh: 与 {0} 是同一个 claude.ai 账号 — 它们共用一个套餐的限制
+
+@ Same claude.ai account as {0} — one plan's limits for all of them.
+ko: {0}과(와) 같은 claude.ai 계정 — 모두 하나의 플랜 한도를 공유합니다.
+zh: 与 {0} 是同一个 claude.ai 账号 — 它们共用一个套餐的限制。
+
+@ Same claude.ai account as {0} — one plan's limits for both
+ko: {0}과(와) 같은 claude.ai 계정 — 둘이 하나의 플랜 한도를 공유합니다
+zh: 与 {0} 是同一个 claude.ai 账号 — 两者共用一个套餐的限制
+
+@ Same claude.ai account as {0} — one plan's limits for both.
+ko: {0}과(와) 같은 claude.ai 계정 — 둘이 하나의 플랜 한도를 공유합니다.
+zh: 与 {0} 是同一个 claude.ai 账号 — 两者共用一个套餐的限制。
+
+@ Signed in to the same claude.ai account: {0}. Each group draws on one plan's limits; automatic dispatch is not changed by it.
+ko: 같은 claude.ai 계정으로 로그인됨: {0}. 각 그룹은 하나의 플랜 한도를 함께 사용하며, 자동 디스패치는 이로 인해 달라지지 않습니다.
+zh: 登录的是同一个 claude.ai 账号：{0}。每组共用一个套餐的限制；自动分发不受此影响。
+
+@ Some accounts here are one claude.ai account
+ko: 여기의 일부 계정은 하나의 claude.ai 계정입니다
+zh: 这里的部分账号其实是同一个 claude.ai 账号
+
+@ This account's CLI recommends: {0}
+ko: 이 계정의 CLI 추천: {0}
+zh: 此账号的 CLI 推荐：{0}
+
+@ same claude.ai account as {0}
+ko: {0}과(와) 같은 claude.ai 계정
+zh: 与 {0} 是同一个 claude.ai 账号
+
+@ the CLI's default
+ko: CLI 기본값
+zh: CLI 默认值
+
+@ {0} is pinned exactly: the worker runs this model. The alias "{1}" would follow the newest {1} model its CLI offers.
+ko: {0}은(는) 정확히 고정되었습니다. 워커는 이 모델로 실행됩니다. 별칭 "{1}"은(는) CLI가 제공하는 최신 {1} 모델을 따라갑니다.
+zh: {0} 已被精确固定：该 worker 会运行这个模型。别名 "{1}" 则会跟随其 CLI 提供的最新 {1} 模型。

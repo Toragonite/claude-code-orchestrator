@@ -3,4 +3,14 @@ out/
 *.vsix
 .mcp.json
 CLAUDE.md
-.orchestrator/
+# Orchestration work is private (contracts, verification records, review reports, builds,
+# dispatch logs) — except the test harnesses and the tools that check a build, which are
+# tracked so that a clone can run `bash .orchestrator/tools/gate.sh`.
+.orchestrator/*
+!.orchestrator/fixes/
+!.orchestrator/suites/
+!.orchestrator/tools/
+!.orchestrator/detach/
+!.orchestrator/mesh2/
+!.orchestrator/providers/
+!.orchestrator/lockfix/

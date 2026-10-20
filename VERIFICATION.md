@@ -38,9 +38,10 @@ was run against the real code, not reasoned about.
    disabling the owner transfers the recorded hash to the other claimant rather
    than deleting the file. (`test-assets3`)
 3. **Corrupt ledger.** `.claude/cco-assets.json` containing `{ this is not json`.
-   *Observed:* read yields an empty state, the original is preserved as
-   `cco-assets.json.corrupt`, and the next write does not silently replace it.
-   (`test-assets3`)
+   *Observed in v1.3 (`test-assets3`; behaviour since changed):* read yielded
+   an empty state and the original was preserved as `cco-assets.json.corrupt`.
+   From 2.0 the read is refused, the file is left exactly as it is (not moved
+   aside), and nothing is written over it.
 4. **Pack rename.** An installed asset's pack changes its `pack.json` name,
    changing every asset key.
    *Observed:* the ledger record migrates to the new key; no orphan is

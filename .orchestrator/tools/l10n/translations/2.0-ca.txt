@@ -1,0 +1,97 @@
+# 2.0.0 CA: login state of Claude Code accounts — Check Login Now, Show Login Diagnostics, states.
+
+@ "{0}" is logged out — {1}.
+ko: "{0}" 계정이 로그아웃되었습니다 — {1}.
+zh: "{0}" 已登出 — {1}。
+
+@ Account whose login to check
+ko: 로그인을 확인할 계정
+zh: 要检查登录的账号
+
+@ Check Again
+ko: 다시 확인
+zh: 重新检查
+
+@ Check Login Now
+ko: 지금 로그인 확인
+zh: 立即检查登录
+
+@ Check login now
+ko: 지금 로그인 확인
+zh: 立即检查登录
+
+@ Checking login
+ko: 로그인 확인 중
+zh: 正在检查登录
+
+@ Checking the login of {0}
+ko: {0} 계정의 로그인 확인 중
+zh: 正在检查 {0} 的登录
+
+@ Couldn't check the login — retrying
+ko: 로그인을 확인하지 못함 — 다시 시도 중
+zh: 无法检查登录 — 正在重试
+
+@ Login not confirmed · checking
+ko: 로그인 미확인 · 확인 중
+zh: 登录未确认 · 正在检查
+
+@ Login of "{0}": ok — {1}.
+ko: "{0}" 계정 로그인: 정상 — {1}.
+zh: "{0}" 的登录：正常 — {1}。
+
+@ Login ok · checked {0}
+ko: 로그인 정상 · {0} 확인함
+zh: 登录正常 · {0}已检查
+
+@ Login: being checked now ({0}).
+ko: 로그인: 지금 확인 중 ({0}).
+zh: 登录：正在检查（{0}）。
+
+@ Login: could not be checked ({0}) — this says nothing about the login and it is retried. Right-click → "Check Login Now" to check again.
+ko: 로그인: 확인하지 못했습니다 ({0}) — 로그인 상태와는 무관하며 다시 시도합니다. 다시 확인하려면 우클릭 → "지금 로그인 확인"을 실행하세요.
+zh: 登录：无法检查（{0}）— 这与登录状态本身无关，系统会重试。要再次检查，请右键 →“立即检查登录”。
+
+@ Login: logged out — {0}.
+ko: 로그인: 로그아웃됨 — {0}.
+zh: 登录：已登出 — {0}。
+
+@ Login: not confirmed ({0}) — a check is due. Right-click → "Check Login Now" to check now.
+ko: 로그인: 미확인 ({0}) — 곧 확인합니다. 지금 확인하려면 우클릭 → "지금 로그인 확인"을 실행하세요.
+zh: 登录：未确认（{0}）— 即将检查。要立即检查，请右键 →“立即检查登录”。
+
+@ Login: ok — {0} (checked {1}).
+ko: 로그인: 정상 — {0} ({1} 확인).
+zh: 登录：正常 — {0}（{1}已检查）。
+
+@ Re-login Account
+ko: 계정 재로그인
+zh: 重新登录账号
+
+@ The CLI says "{0}" is not logged in. A second check in {1} seconds confirms it before it is shown as logged out.
+ko: CLI에 따르면 "{0}" 계정은 로그인되어 있지 않습니다. 로그아웃으로 표시하기 전에 {1}초 후 두 번째 확인으로 확정합니다.
+zh: CLI 显示 "{0}" 未登录。{1} 秒后会再检查一次，确认后才显示为已登出。
+
+@ The login of "{0}" could not be checked: {1}. That says nothing about the login itself.
+ko: "{0}" 계정의 로그인을 확인하지 못했습니다: {1}. 이는 로그인 상태 자체와는 무관합니다.
+zh: 无法检查 "{0}" 的登录：{1}。这与登录状态本身无关。
+
+@ The login of "{0}" is not confirmed yet: {1}.
+ko: "{0}" 계정의 로그인이 아직 확인되지 않았습니다: {1}.
+zh: "{0}" 的登录尚未确认：{1}。
+
+@ checking login
+ko: 로그인 확인 중
+zh: 正在检查登录
+
+@ couldn't check login
+ko: 로그인 확인 실패
+zh: 无法检查登录
+
+@ login not confirmed
+ko: 로그인 미확인
+zh: 登录未确认
+
+@ login not confirmed — checking
+ko: 로그인 미확인 — 확인 중
+zh: 登录未确认 — 正在检查

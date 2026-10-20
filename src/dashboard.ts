@@ -1,989 +1,1523 @@
-import * as fs from 'fs';
+/**
+ * The dashboard panel — extension-host side.
+ *
+ * The page (media/dashboard/dashboard.js + dashboard.css) is a pure renderer of ONE object,
+ * `DashboardModel`, and speaks ONE protocol, `HostToWebview` / `WebviewToHost` (src/uiTypes.ts).
+ * This file owns everything the page must not be trusted with:
+ *
+ *  - the document it runs in: a strict Content-Security-Policy with a per-render nonce, one
+ *    external stylesheet, one external script, and one inline nonce'd script that assigns the
+ *    localized string table and nothing else;
+ *  - every inbound message: checked by shape AND by value before it has any effect. The page
+ *    names things by opaque keys (task id, session key, account key); this side resolves them,
+ *    and an id it cannot resolve does nothing;
+ *  - the refresh loop: the model is built only while the panel is visible and posted only when
+ *    it differs from the last one posted.
+ *
+ * The data itself is assembled by `uiModel.ts` / `team.ts`, which do not import `vscode`.
+ */
+import * as path from 'path';
 import * as vscode from 'vscode';
+import { flattenChars, flattenOneLine, sliceOneLine } from './displayText';
 import {
-  clearOrchestrator,
-  readOrchestrators,
-  readRegistry,
-  readStats,
-  readTaskEvents,
-  TaskEvent,
-  windowUsage,
-} from './registry';
-import { isFrontierTier } from './prompts';
+  CONFIG_SECTION,
+  confirmWideningSetting,
+  needsWideningConfirmation,
+  userClaudePath,
+  userSetting,
+} from './settings';
 import {
-  formatAge,
-  formatRelativeReset,
-  getCachedUsage,
-  isElevated,
-  isLoginExpired,
-  listAccounts,
-  USAGE_CACHE_FILE,
-} from './usage';
-import { jsonForScript } from './webviewUtil';
+  claudeVersionAtLeast,
+  isAcceptableClaudePath,
+  MIN_CLAUDE_VERSION_FOR_SESSION_WORKERS,
+  normalizeModel,
+  normalizePermissionMode,
+  WORKER_MODELS,
+  WORKER_PERMISSION_MODES,
+} from './platform';
+import { policyState, type PolicyState } from './prompts';
+import { allProviders, normalizeProviderModel, parseProvider, providerModelHint } from './providers';
+import { isStateWriteRefusal, isTaskFileId, readRegistry, resolveTaskFile, ROOT_DIR } from './registry';
+import { readTextSafe, statFileSafe } from './safeFs';
+import { collectSessions, invalidateTeamCache, resolveSession } from './team';
+import { hasTeamAgent, TEAM_AGENT_FILE } from './teamAgent';
+import { buildDashboardModel, probeClaudeVersion, resolveAccount, validateSetting } from './uiModel';
+import type {
+  DashboardModel,
+  HostToWebview,
+  UiAccountAction,
+  UiCommandId,
+  UiGuardSetting,
+  UiHealth,
+  UiProvider,
+  UiSessionAction,
+  UiSettingKey,
+  UiSettings,
+} from './uiTypes';
+import { createPageActionLimiter, escapeHtml, jsonForScript, makeNonce } from './webviewUtil';
+import { openRegistryFile, registryIsUnreadable } from './workerManager';
+// mcpJsonRegistersDispatch: whether a workspace's `.mcp.json` registers the dispatch server — the
+// one reading the extension's nag and Update Workspace Setup's item 4 use as well.
+import { canDispatchFrom, launcherPresent, mcpJsonRegistersDispatch } from './workspaceSetup';
 
-const NO_LIMITS_MESSAGE =
-  'No plan limits — this login is a token / non-subscription account. Live usage appears only for ' +
-  'subscription logins (log this dir into a subscription, or point the main session at a subscription config dir).';
+const VIEW_TYPE = 'ccOrchestratorDashboard';
+const COMMAND_PREFIX = 'claudeCodeOrchestrator.';
+/** `workspaceState` key the scope switch is remembered under, per workspace. */
+const SCOPE_STATE_KEY = 'dashboard.scope';
 
-const EXPIRED_MESSAGE =
-  'Subscription login expired or logged out — plan usage is unavailable and dispatches to this ' +
-  'account will fail until you re-login.';
+/**
+ * Everything this side posts: the protocol's messages, plus `settingPending` — "the setting you
+ * asked to save is waiting for the user's answer in a dialog of the editor". The page then
+ * stops expecting a prompt `settingResult` for that key (which would otherwise read as "the
+ * editor did not answer") and waits for the real one, however long the dialog stays open.
+ */
+type HostMessage = HostToWebview | { type: 'settingPending'; key: UiSettingKey };
 
-/** One usage card, fully resolved for the webview. `state` picks the message the card renders. */
-interface UsageCard {
-  name: string;
-  label: string;
-  /**
-   * The account's CLAUDE_CONFIG_DIR — the identity the Re-login button carries.
-   * Names are not unique (a registry worker may legally be named 'main', which
-   * `listAccounts` also prepends for the orchestrator's own dir), so resolving a
-   * re-login by name can open `claude auth login` against the wrong directory.
-   */
-  configDir: string;
-  state: 'refreshing' | 'error' | 'unavailable' | 'expired' | 'ok';
-  message: string | null;
-  subscriptionType: string | null;
-  ageMinutes: number | null;
-  windows: { label: string; percent: number; severity: string; elevated: boolean; reset: string }[];
-  /** Overage billing state for an `ok` card; null on every other state and when unreported. */
-  overage: { enabled: boolean; percent: number | null; spendLabel: string | null } | null;
-  /**
-   * Set on an `ok` card only when the plan-usage windows are the last-good
-   * reading carried forward (upstream get_usage returned no data); null when
-   * the numbers are fresh and on every other state. `since` is the age of that
-   * last-good reading, e.g. `6m ago`.
-   */
-  stale: { since: string } | null;
-  /**
-   * Set on an `ok` card only when it has NO windows yet has reported windows
-   * before (`lastGoodWindowsAt` is finite): upstream get_usage is intermittently
-   * returning no rate-limit data. The value is the age of that last good reading,
-   * e.g. `6m ago`. null when windows are present and on every other state.
-   */
-  tempUnavailableSince: string | null;
+const REFRESH_MS = 2_000;
+/** How often to ask `probeClaudeVersion` again; it caches for ten minutes on its own. */
+const VERSION_RECHECK_MS = 60_000;
+/** Longest the first model waits for the first version reading (see `whenFirstReading`). */
+const FIRST_VERSION_WAIT_MS = 1_200;
+
+/** Read caps for the three workspace files the setup checks look at. */
+const MCP_JSON_MAX_BYTES = 1024 * 1024;
+const POLICY_FILE_MAX_BYTES = 4 * 1024 * 1024;
+const TEAM_AGENT_MAX_BYTES = 256 * 1024;
+
+/**
+ * How a message from the page is bounded before it has an effect outside the page (see
+ * `createPageActionLimiter`; one limiter per panel, one action per second per lane):
+ *
+ *  - `terminal`: it opens a terminal. ONE lane for all of them, so a page gets one terminal a
+ *    second whatever it asks for and on whichever account or session;
+ *  - `modal`: it ends in a modal dialog. One lane, and nothing more is admitted while the
+ *    action that opened a dialog is still running;
+ *  - `own`: it starts a process or opens other UI. A lane of its own per kind of message, so
+ *    two different buttons pressed one after the other do not get in each other's way;
+ *  - `null`: none of those — not bounded.
+ */
+type PageLane = 'terminal' | 'modal' | 'own' | null;
+
+/** Shortest time between two actions of one lane (see PageLane). */
+const PAGE_ACTION_INTERVAL_MS = 1_000;
+
+/*
+ * The four unions the page may name, as lookup tables. `Record<Union, …>` makes the
+ * compiler reject a table that lacks a member, so adding a command to `UiCommandId` without
+ * deciding here whether the page may invoke it — and how it is bounded — is a build error,
+ * not a silent "ignored".
+ */
+const SETTING_KEYS: Record<UiSettingKey, true> = {
+  workerPermissionMode: true,
+  claudePath: true,
+  quotaCooldownMinutes: true,
+  workerTimeoutMinutes: true,
+  frontierWorkerDispatch: true,
+  overageWorkerDispatch: true,
+  meshMode: true,
+  meshMaxLiveWorkers: true,
+  meshHistoryLimit: true,
+  sessionKeepalive: true,
+  providerUsagePolling: true,
+};
+const COMMAND_IDS: Record<UiCommandId, PageLane> = {
+  installMcp: 'own',
+  // Each asks before it replaces a block or a definition that differs from this version's.
+  addDispatchPolicy: 'modal',
+  installTeamAgent: 'modal',
+  // Its list stays open for as long as the user looks at it, and its writes follow the answer:
+  // nothing else that ends in a question is admitted meanwhile.
+  updateWorkspaceSetup: 'modal',
+  addWorker: 'own',
+  importWorkers: 'own',
+  openAssetManager: 'own',
+  refreshUsage: 'own',
+  clearTasks: 'modal',
+  cancelAllTasks: 'modal',
+  resetCheckin: 'modal',
+  cleanSessionLitter: 'own',
+  openSettings: 'own',
+};
+const SESSION_ACTIONS: Record<UiSessionAction, PageLane> = {
+  attach: 'terminal',
+  logs: 'terminal',
+  stop: 'modal',
+  copyName: null,
+  // Runs git.
+  openDiff: 'own',
+};
+const ACCOUNT_ACTIONS: Record<UiAccountAction, PageLane> = {
+  relogin: 'terminal',
+  // One live login probe, a few seconds at most.
+  checkLogin: 'own',
+  openSession: 'terminal',
+  togglePreferred: null,
+  // The lane of a `setModel` that carries NO value (the menu's "Other…"): it opens the model
+  // picker, which can start the helper that asks the account's CLI for its models. A
+  // `setModel` WITH a value — a row of the page's own list — is one registry write and is not
+  // bounded at all; the table holds one lane per action, so that distinction is made where
+  // the message is handled (`case 'account'`).
+  setModel: 'own',
+  // A mode that turns a sandbox off is confirmed in a modal.
+  setPermissionMode: 'modal',
+  remove: 'modal',
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Is `value` one of the keys of `table`? An OWN-key test, so `toString` is not a setting. */
+function isMember<T extends string>(table: Record<T, unknown>, value: unknown): value is T {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(table, value);
+}
+
+/** One display-safe line from anything (an Error, a string from a file, a page message). */
+function safeLine(value: unknown, max: number): string {
+  const text = value instanceof Error ? value.message : value;
+  return sliceOneLine(flattenOneLine(text), max);
+}
+
+/* ------------------------------------------------------------------------- *
+ * Output channel
+ * ------------------------------------------------------------------------- */
+
+let logSink: ((line: string) => void) | undefined;
+let ownChannel: vscode.OutputChannel | undefined;
+
+/**
+ * Route the dashboard's diagnostics into the extension's own output channel. Optional: when
+ * nobody calls this, the first diagnostic lazily creates a channel instead, so a message the
+ * page should never have sent is recorded either way.
+ */
+export function setDashboardLog(sink: (line: string) => void): void {
+  logSink = sink;
 }
 
 /**
- * Normalize `AccountUsage.extraUsage` from the cache file. The file is external
- * input (hand-editable, truncatable), so the declared type is not a guarantee:
- * anything off-shape degrades to the safe reading rather than to a misleading
- * "overage is on" or a rendered `null` / `NaN`.
+ * Settings the dispatch SERVER acts on. It reads them from the shared registry, where the
+ * extension copies them after every change — so for these, a write to the editor's settings is
+ * only half of "saved". `sessionKeepalive` is the one setting the editor alone reads.
+ * `Record<UiSettingKey, boolean>` so that a new key cannot be added without deciding this.
  */
-function parseOverage(raw: unknown): UsageCard['overage'] {
-  if (typeof raw !== 'object' || raw === null) {
-    return null;
-  }
-  const rec = raw as Record<string, unknown>;
-  return {
-    enabled: rec.enabled === true,
-    percent:
-      typeof rec.percent === 'number' && isFinite(rec.percent)
-        ? Math.max(0, Math.min(100, rec.percent))
-        : null,
-    spendLabel: typeof rec.spendLabel === 'string' ? rec.spendLabel : null,
-  };
+const REGISTRY_SETTING: Record<UiSettingKey, boolean> = {
+  workerPermissionMode: true,
+  claudePath: true,
+  quotaCooldownMinutes: true,
+  workerTimeoutMinutes: true,
+  frontierWorkerDispatch: true,
+  overageWorkerDispatch: true,
+  meshMode: true,
+  meshMaxLiveWorkers: true,
+  meshHistoryLimit: true,
+  sessionKeepalive: false,
+  providerUsagePolling: true,
+};
+
+/** Room for the registry lock's own message, which names a file and a process and says what to do. */
+const SETTINGS_SYNC_ERROR_MAX = 600;
+
+let settingsSync: (() => string | undefined) | undefined;
+
+/**
+ * Give the dashboard the extension's "copy the settings into the shared registry" step: a
+ * function that does it (or knows it was just refused) and returns undefined when the registry
+ * holds the settings, else why it does not — for a registry whose lock stayed held, the lock's
+ * own message. It must not throw. Optional: without it a setting is reported saved once the
+ * editor has stored it, as before.
+ *
+ * Why the dashboard asks at all: "Saved" on a control must mean dispatch will use the value.
+ * The registry is written under a lock that can refuse, and a setting the server cannot see
+ * yet is not in effect, whatever settings.json says.
+ */
+export function setDashboardSettingsSync(sync: () => string | undefined): void {
+  settingsSync = sync;
 }
 
-/** Cached (never spawning) usage for 'main' + every worker, shaped for rendering. */
-function usageCards(now: number): UsageCard[] {
-  let accounts: { name: string; configDir: string }[];
+function log(context: vscode.ExtensionContext, line: string): void {
+  const stamped = `[dashboard] ${line}`;
+  if (logSink) {
+    logSink(stamped);
+    return;
+  }
+  if (!ownChannel) {
+    ownChannel = vscode.window.createOutputChannel('Claude Code Orchestrator');
+    context.subscriptions.push(ownChannel);
+  }
+  ownChannel.appendLine(stamped);
+}
+
+/* ------------------------------------------------------------------------- *
+ * Settings and health — the two model inputs this file assembles
+ * ------------------------------------------------------------------------- */
+
+/**
+ * A whole-number setting as it is in effect: the USER's value (`userSetting` — never a
+ * workspace's, and a value that is not a finite number reads as the default), rounded and
+ * clamped to the range the dispatch side enforces. The page must show what will actually be
+ * used.
+ */
+function intSetting(
+  key: 'quotaCooldownMinutes' | 'workerTimeoutMinutes' | 'meshMaxLiveWorkers' | 'meshHistoryLimit',
+  min: number,
+  max: number,
+): number {
+  return Math.min(max, Math.max(min, Math.round(userSetting(key))));
+}
+
+/**
+ * A billing guard as three facts: what THIS editor is set to, what the shared registry
+ * enforces, and — only when they differ — which editor set the enforced value. Several
+ * editors share one registry file, so "my dropdown says block" and "dispatch is blocked" are
+ * different statements and the page shows both.
+ */
+function guardSetting(own: unknown, enforced: unknown, setBy: unknown): UiGuardSetting {
+  const value = own === 'allow' ? 'allow' : 'block';
+  const effective = enforced === undefined ? value : enforced === 'allow' ? 'allow' : 'block';
+  const by = effective !== value && typeof setBy === 'string' ? sliceOneLine(flattenOneLine(setBy), 64) : '';
+  return { value, effective, setBy: by === '' ? null : by };
+}
+
+/**
+ * Every CLI a worker can run on, as the page's pickers need it. The facts are `providers.ts`'s
+ * own; this only copies them into the wire shape, so a provider added there appears in the
+ * card menus and in the drawer's list with no change here or in the page.
+ */
+function readProviders(): UiProvider[] {
+  return allProviders().map((info) => ({
+    id: info.id,
+    label: sliceOneLine(flattenOneLine(info.label), 32),
+    models: [...info.suggestedModels],
+    permissionModes: [...info.permissionModes],
+    isolation: info.isolation,
+    isolationVerified: info.isolationVerified,
+    sessionWorkers: info.sessionWorkers,
+  }));
+}
+
+function readSettings(): UiSettings {
+  // Every value is the user's own setting (`userSetting`): the page shows, and edits, what
+  // this extension acts on, and a workspace's settings file is no part of that.
+  // The dispatch server enforces the SHARED registry's guards, which another editor may have
+  // set. A read failure degrades to "in effect = this editor's value", never to a throw.
+  let registry: { frontierWorkerDispatch?: unknown; frontierGuardSetBy?: unknown; overageWorkerDispatch?: unknown; overageGuardSetBy?: unknown } | undefined;
   try {
-    accounts = listAccounts();
+    registry = readRegistry();
   } catch {
-    return [];
+    registry = undefined;
   }
-  return accounts.map(({ name, configDir }): UsageCard => {
-    const label = name === 'main' ? 'main (this session)' : name;
-    const card: UsageCard = {
-      name,
-      label,
-      configDir,
-      state: 'refreshing',
-      message: 'usage: — (refreshing)',
-      subscriptionType: null,
-      ageMinutes: null,
-      windows: [],
-      overage: null,
-      stale: null,
-      tempUnavailableSince: null,
-    };
-    const u = getCachedUsage(configDir);
-    if (!u) {
-      return card;
-    }
-    card.subscriptionType = u.subscriptionType;
-    card.ageMinutes =
-      typeof u.fetchedAt === 'number' && isFinite(u.fetchedAt)
-        ? Math.max(0, Math.floor((now - u.fetchedAt) / 60_000))
-        : null;
-    if (u.error !== undefined) {
-      return { ...card, state: 'error', message: `usage unavailable: ${u.error}` };
-    }
-    if (!u.available) {
-      // An expired/logged-out subscription reports the same "no limits" shape as a
-      // genuine token account. isLoginExpired is the single source of truth that
-      // separates them; when it can't tell (missing or malformed auth in an old
-      // cache file) the card degrades to the long-standing no-limits reading.
-      return isLoginExpired(u)
-        ? { ...card, state: 'expired', message: EXPIRED_MESSAGE }
-        : { ...card, state: 'unavailable', message: NO_LIMITS_MESSAGE };
-    }
-    // The cache file is external input: a truncated/hand-edited entry may lack
-    // windows, or carry null / non-object / malformed elements inside them.
-    const windows = (Array.isArray(u.windows) ? u.windows : [])
-      .filter((w) => typeof w === 'object' && w !== null)
-      .map((w) => {
-        const rec = w as unknown as Record<string, unknown>;
-        const percent =
-          typeof rec.percent === 'number' && isFinite(rec.percent)
-            ? Math.max(0, Math.min(100, rec.percent))
-            : 0;
-        const severity = typeof rec.severity === 'string' ? rec.severity : 'normal';
-        return {
-          label: typeof rec.label === 'string' ? rec.label : '',
-          percent,
-          severity,
-          elevated: isElevated(severity),
-          reset: formatRelativeReset(typeof rec.resetsAt === 'string' ? rec.resetsAt : null),
-        };
-      });
-    // No windows now but windows were seen before => upstream is intermittently
-    // returning no data. Distinct from an account that never reported windows.
-    const tempUnavailableSince =
-      windows.length === 0 && typeof u.lastGoodWindowsAt === 'number' && isFinite(u.lastGoodWindowsAt)
-        ? formatAge(u.lastGoodWindowsAt)
-        : null;
-    return {
-      ...card,
-      state: 'ok',
-      message: null,
-      overage: parseOverage(u.extraUsage),
-      stale: u.windowsStale === true ? { since: formatAge(u.windowsFetchedAt) } : null,
-      tempUnavailableSince,
-      windows,
-    };
-  });
+  return {
+    workerPermissionMode: normalizePermissionMode(userSetting('workerPermissionMode')),
+    permissionModes: [...WORKER_PERMISSION_MODES],
+    // The value as the user stored it, so that one this extension does not use (see
+    // `userClaudePath`) can be seen and corrected in its box.
+    // flattenChars, not flattenOneLine: a path is shown in an editable box, so its own
+    // whitespace must survive — only invisible, bidi and control characters are removed.
+    claudePath: sliceOneLine(flattenChars(userSetting('claudePath')), 1024),
+    quotaCooldownMinutes: intSetting('quotaCooldownMinutes', 1, 1440),
+    workerTimeoutMinutes: intSetting('workerTimeoutMinutes', 1, 480),
+    frontierWorkerDispatch: guardSetting(userSetting('frontierWorkerDispatch'), registry?.frontierWorkerDispatch, registry?.frontierGuardSetBy),
+    overageWorkerDispatch: guardSetting(userSetting('overageWorkerDispatch'), registry?.overageWorkerDispatch, registry?.overageGuardSetBy),
+    meshMode: userSetting('meshMode') === true,
+    meshMaxLiveWorkers: intSetting('meshMaxLiveWorkers', 1, 64),
+    meshHistoryLimit: intSetting('meshHistoryLimit', 1, 1000),
+    sessionKeepalive: userSetting('sessionKeepalive') === true,
+    workerModels: [...WORKER_MODELS],
+    // On unless it was turned off: the contributed default is true, and a hand-edited value
+    // that is not a boolean must not silently stop the readings.
+    providerUsagePolling: userSetting('providerUsagePolling') !== false,
+    providers: readProviders(),
+  };
 }
 
-const SETTING_KEYS = [
-  'workerPermissionMode',
-  'claudePath',
-  'quotaCooldownMinutes',
-  'frontierWorkerDispatch',
-  'overageWorkerDispatch',
-  'meshMode',
-  'meshGatewayModel',
-  'meshWorkerIdleTimeoutMin',
-  'meshMaxLiveWorkers',
-  'meshHistoryLimit',
-] as const;
-const COMMAND_IDS = ['installMcp', 'addDispatchPolicy', 'addWorker', 'clearTasks', 'openAssetManager'] as const;
+/** What a setting is right now, as the plain value its control holds. */
+function effectiveSetting(key: UiSettingKey): string | number | boolean {
+  const value = readSettings()[key];
+  return typeof value === 'object' ? value.value : value;
+}
 
-/** Per-day done/error counts for the trailing N days, scoped to a workspace. */
-function dailyCounts(root: string | undefined, days: number) {
-  const byId = new Map<string, TaskEvent>();
-  for (const e of readTaskEvents()) {
-    byId.set(e.id, e);
+/** The `claude` executable dispatch actually runs: the registry's resolved path. */
+function dispatchClaudePath(): string {
+  try {
+    const fromRegistry: unknown = readRegistry().claudePath;
+    if (typeof fromRegistry === 'string' && fromRegistry.trim() !== '') {
+      return fromRegistry;
+    }
+  } catch {
+    /* fall through to the setting */
   }
-  const dayMs = 24 * 60 * 60 * 1000;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const start = today.getTime() - (days - 1) * dayMs;
-  const buckets = Array.from({ length: days }, (_, i) => {
-    const d = new Date(start + i * dayMs);
-    return { label: `${d.getMonth() + 1}/${d.getDate()}`, done: 0, error: 0 };
-  });
-  for (const e of byId.values()) {
-    if (e.status === 'running' || e.ts < start) {
-      continue;
-    }
-    if (root && !(e.cwd && (e.cwd === root || e.cwd.startsWith(root + '/')))) {
-      continue;
-    }
-    const idx = Math.floor((e.ts - start) / dayMs);
-    if (idx >= 0 && idx < days) {
-      buckets[idx][e.status === 'done' ? 'done' : 'error']++;
-    }
-  }
-  return buckets;
+  return userClaudePath();
 }
 
 /**
- * Editor-tab dashboard: stat tiles, activity/usage charts, worker + task
- * tables, and a settings panel. Data is pushed every 2s; setting edits and
- * quick actions round-trip through the extension host.
+ * "What does this workspace file hold of X?", answered from a cache keyed by (size, mtime) so
+ * the 2-second refresh costs three `stat` calls, not three reads. A file that is absent, not a
+ * regular file, over its cap or unreadable answers `otherwise` — "nothing of it": the setup
+ * step is offered again, which is the safe direction.
  */
-export function openDashboard(): void {
-  const panel = vscode.window.createWebviewPanel(
-    'ccOrchestratorDashboard',
-    vscode.l10n.t('Orchestrator Dashboard'),
-    vscode.ViewColumn.Active,
-    { enableScripts: true, retainContextWhenHidden: true },
-  );
-  panel.webview.html = dashboardHtml(dashboardStrings());
+const fileChecks = new Map<string, { size: number; mtimeMs: number; answer: unknown }>();
 
-  const send = () => {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const registry = readRegistry();
-    const stats = readStats();
-    const now = Date.now();
-    const workers = registry.workers.map((w) => {
-      const s = stats[w.name];
-      return {
-        name: w.name,
-        preferred: Boolean(w.preferred),
-        model: w.model,
-        coolingDown: (s?.cooldownUntil ?? 0) > now,
-        cooldownUntil: s?.cooldownUntil,
-        totals: s ?? null,
-        session: windowUsage(w.name, 5 * 60 * 60 * 1000),
-        week: windowUsage(w.name, 7 * 24 * 60 * 60 * 1000),
-      };
-    });
-    const byId = new Map<string, TaskEvent>();
-    for (const e of readTaskEvents()) {
-      byId.set(e.id, e);
-    }
-    const all = [...byId.values()];
-    const tasks = all
-      .sort((a, b) => b.ts - a.ts)
-      .slice(0, 100)
-      .map((e) => ({
-        ...e,
-        inWorkspace: Boolean(root && e.cwd && (e.cwd === root || e.cwd.startsWith(root + '/'))),
-      }));
-    const checkin = root ? readOrchestrators()[root] : undefined;
-    const cfg = vscode.workspace.getConfiguration('claudeCodeOrchestrator');
-    // The dispatch server enforces the SHARED registry's guard, which a different
-    // editor may have set — read it so the UI can flag a mismatch. A read failure
-    // degrades to no note (effective mirrors this editor), never a crash.
-    let reg;
+function fileAnswer<T>(file: string, maxBytes: number, test: (text: string) => T, otherwise: T): T {
+  const stat = statFileSafe(file);
+  if (!stat) {
+    fileChecks.delete(file);
+    return otherwise;
+  }
+  const cached = fileChecks.get(file);
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    return cached.answer as T;
+  }
+  const read = readTextSafe(file, maxBytes);
+  let answer = otherwise;
+  if (read.ok) {
     try {
-      reg = readRegistry();
+      answer = test(read.text);
     } catch {
-      reg = undefined;
+      answer = otherwise;
     }
-    void panel.webview.postMessage({
-      type: 'data',
-      workspace: root ?? null,
-      orchestrator: checkin?.model
-        ? { model: checkin.model, ts: checkin.ts, calibrated: !isFrontierTier(checkin.model) }
-        : null,
-      sessionLastSeen: checkin?.lastSeen ?? null,
-      workers,
-      tasks,
-      running: all.filter((e) => e.status === 'running').length,
-      daily: dailyCounts(root, 14),
-      usage: usageCards(now),
-      settings: {
-        workerPermissionMode: cfg.get('workerPermissionMode', 'acceptEdits'),
-        claudePath: cfg.get('claudePath', 'claude'),
-        quotaCooldownMinutes: cfg.get('quotaCooldownMinutes', 30),
-        frontierWorkerDispatch: cfg.get('frontierWorkerDispatch', 'block'),
-        frontierEffective: reg ? reg.frontierWorkerDispatch : cfg.get('frontierWorkerDispatch', 'block'),
-        frontierSetBy: reg ? (reg.frontierGuardSetBy ?? null) : null,
-        overageWorkerDispatch: cfg.get('overageWorkerDispatch', 'block'),
-        overageEffective: reg ? reg.overageWorkerDispatch : cfg.get('overageWorkerDispatch', 'block'),
-        overageSetBy: reg ? (reg.overageGuardSetBy ?? null) : null,
-        meshMode: cfg.get('meshMode', false),
-        meshGatewayModel: cfg.get('meshGatewayModel', 'haiku'),
-        meshWorkerIdleTimeoutMin: cfg.get('meshWorkerIdleTimeoutMin', 15),
-        meshMaxLiveWorkers: cfg.get('meshMaxLiveWorkers', 8),
-        meshHistoryLimit: cfg.get('meshHistoryLimit', 50),
-      },
+  }
+  // Only this window's three files are ever asked about; the bound is a backstop against a
+  // session that walks through many workspace folders.
+  if (fileChecks.size > 64) {
+    fileChecks.clear();
+  }
+  fileChecks.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, answer });
+  return answer;
+}
+
+/** "Does this workspace file contain X?" — `fileAnswer` for a yes / no question. */
+function fileSays(file: string, maxBytes: number, test: (text: string) => boolean): boolean {
+  return fileAnswer(file, maxBytes, (text) => test(text) === true, false);
+}
+
+function readHealth(root: string | undefined, claudeVersion: string | null): UiHealth {
+  // One read of CLAUDE.md answers both policy questions: is a block there, and is it this
+  // version's text (prompts.policyState). A block that differs is an earlier version's or an
+  // edited one — the two cannot be told apart, and the page says exactly that.
+  const policy: PolicyState | undefined =
+    root === undefined ? undefined : fileAnswer(path.join(root, 'CLAUDE.md'), POLICY_FILE_MAX_BYTES, policyState, 'absent');
+  // The registration is read by THE one rule (workspaceSetup.mcpJsonRegistersDispatch: either
+  // name, value a JSON object) that "can dispatch" in the extension and item 4 of Update
+  // Workspace Setup use too — the chip must not say "cannot dispatch" where the list says
+  // "present", nor the reverse.
+  const mcpInstalled =
+    root === undefined ? null : fileSays(path.join(root, '.mcp.json'), MCP_JSON_MAX_BYTES, mcpJsonRegistersDispatch);
+  return {
+    claudeVersion,
+    // A version that could not be read proves nothing either way: unknown, not "unsupported".
+    sessionWorkersSupported: claudeVersion === null ? null : claudeVersionAtLeast(claudeVersion, MIN_CLAUDE_VERSION_FOR_SESSION_WORKERS),
+    sessionWorkersMinVersion: MIN_CLAUDE_VERSION_FOR_SESSION_WORKERS,
+    // Set by buildDashboardModel when the task log cannot be read.
+    taskLogProblem: null,
+    // Set by buildDashboardModel from the checked read of the registry.
+    registryProblem: null,
+    mcpInstalled,
+    // "This folder can dispatch" (§15.7): the cco launcher (one stat a refresh) and this
+    // version's policy block, or the MCP registration. The chip that offers a fix is shown
+    // only when this is false.
+    canDispatch:
+      root === undefined
+        ? null
+        : canDispatchFrom({ launcherPresent: launcherPresent(ROOT_DIR), policy, mcpRegistered: mcpInstalled === true }),
+    // Where cco does not run in this version, the MCP server is the way to dispatch.
+    dispatchFix: process.platform === 'win32' ? 'installMcp' : 'updateWorkspaceSetup',
+    policyInstalled: policy === undefined ? null : policy !== 'absent',
+    policyOutdated: policy === undefined || policy === 'absent' ? null : policy === 'differs',
+    teamAgentInstalled: root === undefined ? null : fileSays(path.join(root, ...TEAM_AGENT_FILE.split('/')), TEAM_AGENT_MAX_BYTES, hasTeamAgent),
+  };
+}
+
+/* ------------------------------------------------------------------------- *
+ * The panel
+ * ------------------------------------------------------------------------- */
+
+/** The one live panel. A second "open" reveals it instead of starting a second refresh loop. */
+let current: vscode.WebviewPanel | undefined;
+
+export function openDashboard(context: vscode.ExtensionContext): void {
+  if (current) {
+    current.reveal();
+    return;
+  }
+
+  const mediaRoot = vscode.Uri.joinPath(context.extensionUri, 'media', 'dashboard');
+  const panel = vscode.window.createWebviewPanel(VIEW_TYPE, vscode.l10n.t('Orchestrator Dashboard'), vscode.ViewColumn.Active, {
+    enableScripts: true,
+    retainContextWhenHidden: true,
+    localResourceRoots: [mediaRoot],
+  });
+  current = panel;
+
+  let disposed = false;
+  /** The page has booted and asked for data; nothing is posted before that. */
+  let ready = false;
+  let scope: 'workspace' | 'all' = context.workspaceState.get<unknown>(SCOPE_STATE_KEY) === 'all' ? 'all' : 'workspace';
+  /** JSON of the last model posted, `generatedAt` excluded: the change detector. */
+  let lastSignature = '';
+  /** Task ids the page has been shown — the only ids it may name back. */
+  let shownTaskIds = new Set<string>();
+  /**
+   * From the model LAST BUILT: which CLI each account runs on, and which permission modes
+   * each CLI offers. An account action that carries a value (a model, a permission mode) is
+   * checked against these — the value has to be a choice that model could have offered for
+   * that account, not merely a well-formed string.
+   */
+  let builtAccountProviders = new Map<string, string>();
+  let builtPermissionModes = new Map<string, readonly string[]>();
+  let lastBuildFailure = '';
+  const loggedOnce = new Set<string>();
+
+  let claudeVersion: string | null = null;
+  let versionAskedFor: string | undefined;
+  let versionAskedAt = 0;
+  let versionInFlight: Promise<void> | undefined;
+
+  const workspaceRoot = (): string | undefined => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+  const post = (message: HostMessage): Thenable<boolean> => panel.webview.postMessage(message);
+
+  const notice = (level: 'info' | 'warning' | 'error', text: string): void => {
+    if (!disposed) {
+      void post({ type: 'notice', level, text: sliceOneLine(flattenOneLine(text), 400) });
+    }
+  };
+
+  /** Record something the page should never have sent — once per distinct thing. */
+  const logOnce = (what: string, detail: unknown): void => {
+    let shown: string;
+    try {
+      shown = typeof detail === 'string' ? detail : (JSON.stringify(detail) ?? typeof detail);
+    } catch {
+      // A structured-clone value JSON cannot express (a BigInt, a cycle): its type will do.
+      shown = typeof detail;
+    }
+    const line = `ignored ${what}: ${safeLine(shown, 120)}`;
+    if (loggedOnce.has(line) || loggedOnce.size >= 64) {
+      return;
+    }
+    loggedOnce.add(line);
+    log(context, line);
+  };
+
+  /**
+   * Keep `claudeVersion` current without ever blocking a refresh on a child process. The
+   * reading belongs to the path it was asked for: a result that arrives after the path
+   * changed is dropped rather than shown against the new path.
+   */
+  const refreshVersion = (): Promise<void> => {
+    const claudePath = dispatchClaudePath();
+    if (versionAskedFor === claudePath) {
+      if (versionInFlight) {
+        return versionInFlight;
+      }
+      if (Date.now() - versionAskedAt < VERSION_RECHECK_MS) {
+        return Promise.resolve();
+      }
+    }
+    versionAskedFor = claudePath;
+    versionAskedAt = Date.now();
+    // Called inside a promise executor so that even a synchronous throw from the probe
+    // becomes "no reading" instead of escaping into the refresh that asked for it.
+    const asked: Promise<void> = new Promise<string | null>((resolve) => resolve(probeClaudeVersion(claudePath)))
+      .then(
+        (value) => value,
+        () => null,
+      )
+      .then((value) => {
+        if (versionInFlight === asked) {
+          versionInFlight = undefined;
+        }
+        if (disposed || versionAskedFor !== claudePath) {
+          return;
+        }
+        const next = typeof value === 'string' ? sliceOneLine(flattenOneLine(value), 40) : '';
+        const reading = next === '' ? null : next;
+        if (reading !== claudeVersion) {
+          claudeVersion = reading;
+          refresh();
+        }
+      });
+    versionInFlight = asked;
+    return asked;
+  };
+
+  /** Record what `builtAccountProviders` / `builtPermissionModes` describe. Never throws. */
+  const rememberBuilt = (model: DashboardModel): void => {
+    const accounts = new Map<string, string>();
+    const accountList: unknown = model.accounts;
+    for (const account of Array.isArray(accountList) ? accountList : []) {
+      if (isRecord(account) && typeof account.key === 'string' && typeof account.provider === 'string') {
+        accounts.set(account.key, account.provider);
+      }
+    }
+    const modes = new Map<string, readonly string[]>();
+    const providerList: unknown = isRecord(model.settings) ? model.settings.providers : undefined;
+    for (const provider of Array.isArray(providerList) ? providerList : []) {
+      // First entry wins, as it does on the page: a repeated id cannot widen what is accepted.
+      if (isRecord(provider) && typeof provider.id === 'string' && !modes.has(provider.id)) {
+        const offered: unknown = provider.permissionModes;
+        modes.set(provider.id, Array.isArray(offered) ? offered.filter((mode): mode is string => typeof mode === 'string') : []);
+      }
+    }
+    builtAccountProviders = accounts;
+    builtPermissionModes = modes;
+  };
+
+  const buildModel = (): DashboardModel => {
+    const root = workspaceRoot();
+    return buildDashboardModel({
+      workspaceRoot: root,
+      scope,
+      settings: readSettings(),
+      health: readHealth(root, claudeVersion),
+      sessions: collectSessions({ workspaceRoot: root, scope }),
     });
   };
 
-  const timer = setInterval(send, 2000);
-  // The cache is rewritten by the background refresher; re-push as soon as it changes.
-  const onCacheChange = () => send();
-  fs.watchFile(USAGE_CACHE_FILE, { interval: 2000 }, onCacheChange);
-  panel.onDidDispose(() => {
-    clearInterval(timer);
-    fs.unwatchFile(USAGE_CACHE_FILE, onCacheChange);
-  });
-  panel.webview.onDidReceiveMessage(
-    async (msg: {
-      type: string;
-      file?: string;
-      key?: string;
-      value?: unknown;
-      id?: string;
-      dir?: string;
-    }) => {
-      if (msg.type === 'openTask' && msg.file) {
-        try {
-          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.file));
-          await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
-        } catch {
-          void vscode.window.showWarningMessage(vscode.l10n.t('Task output not found: {0}', msg.file));
-        }
-      } else if (msg.type === 'setSetting' && (SETTING_KEYS as readonly string[]).includes(msg.key ?? '')) {
-        await vscode.workspace
-          .getConfiguration('claudeCodeOrchestrator')
-          .update(msg.key!, msg.value, vscode.ConfigurationTarget.Global);
-        send();
-      } else if (msg.type === 'runCommand' && (COMMAND_IDS as readonly string[]).includes(msg.id ?? '')) {
-        await vscode.commands.executeCommand(`claudeCodeOrchestrator.${msg.id}`);
-        send();
-      } else if (msg.type === 'cancelTask' && msg.id) {
-        await vscode.commands.executeCommand('claudeCodeOrchestrator.cancelTask', { id: msg.id });
-      } else if (msg.type === 'cancelAllTasks') {
-        await vscode.commands.executeCommand('claudeCodeOrchestrator.cancelAllTasks');
-      } else if (msg.type === 'relogin' && typeof msg.dir === 'string') {
-        // A dedicated message type rather than a widened runCommand allowlist:
-        // this command takes an argument from the webview, so it must stay out
-        // of the argument-less COMMAND_IDS surface (mirrors cancelTask). The
-        // argument is the config DIRECTORY, not the name: account names are not
-        // unique, so a name would resolve to whichever entry comes first.
-        await vscode.commands.executeCommand('claudeCodeOrchestrator.reloginWorker', {
-          configDir: msg.dir,
-        });
-      } else if (msg.type === 'resetCheckin') {
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (root) {
-          clearOrchestrator(root);
-        }
-        send();
+  /**
+   * Build the model and post it IF it changed. Does nothing while the panel is hidden: the
+   * page keeps its last state (`retainContextWhenHidden`) and gets a fresh model the moment
+   * it is shown again.
+   */
+  function refresh(force = false): void {
+    if (disposed || !ready || !panel.visible) {
+      return;
+    }
+    void refreshVersion();
+    let model: DashboardModel;
+    try {
+      model = buildModel();
+    } catch (err) {
+      // The builders are written never to throw; if one does, say so once per distinct
+      // failure instead of once per tick, and keep the page on its last good model.
+      const text = safeLine(err, 200);
+      if (text !== lastBuildFailure) {
+        lastBuildFailure = text;
+        log(context, `model build failed: ${text}`);
+        notice('error', vscode.l10n.t('The dashboard data could not be built: {0}', text));
       }
-    },
-  );
-  send();
-}
+      return;
+    }
+    lastBuildFailure = '';
+    rememberBuilt(model);
+    const signature = JSON.stringify({ ...model, generatedAt: 0 });
+    if (!force && signature === lastSignature) {
+      return;
+    }
+    lastSignature = signature;
+    shownTaskIds = new Set(model.tasks.map((task) => task.id));
+    void post({ type: 'model', model }).then(
+      (delivered) => {
+        if (!delivered) {
+          lastSignature = '';
+        }
+      },
+      () => {
+        lastSignature = '';
+      },
+    );
+  }
 
-export interface DashboardStrings {
-  title: string;
-  chartTasksTitle: string;
-  legendDone: string;
-  legendError: string;
-  chartTokensTitle: string;
-  legendInput: string;
-  legendOutput: string;
-  workersTitle: string;
-  thAccount: string;
-  thModel: string;
-  thStatus: string;
-  thSession5h: string;
-  thWeekly7d: string;
-  thAllTime: string;
-  tasksTitle: string;
-  scopeLabel: string;
-  thTitle: string;
-  thWorker: string;
-  thTokens: string;
-  thWhen: string;
-  settingsTitle: string;
-  savedNote: string;
-  permLabel: string;
-  pathLabel: string;
-  coolLabel: string;
-  frontierLabel: string;
-  frontierBlock: string;
-  frontierAllow: string;
-  meshTitle: string;
-  meshModeLabel: string;
-  meshGatewayModelLabel: string;
-  meshIdleLabel: string;
-  meshMaxLiveLabel: string;
-  meshHistoryLabel: string;
-  meshNote: string;
-  btnInstallMcp: string;
-  btnAddPolicy: string;
-  btnAddWorker: string;
-  btnManageAssets: string;
-  btnClearTasks: string;
-  btnResetCheckin: string;
-  resetCheckinTip: string;
-  footnote: string;
-  metaWorkspace: string;
-  metaNoWorkspace: string;
-  metaMainSession: string;
-  calibrationActive: string;
-  frontierTier: string;
-  briefedAgo: string;
-  activeAgo: string;
-  sessionPendingBrief: string;
-  notCheckedIn: string;
-  tileRunningNow: string;
-  tileRunningNowSub: string;
-  tileTasks7d: string;
-  tileTasksSub: string;
-  tileSuccess: string;
-  tileSuccessSub: string;
-  tileTokens: string;
-  tileTokensSub: string;
-  tileCost: string;
-  tileCostSub: string;
-  emptyDaily: string;
-  emptyWorkerUsage: string;
-  ariaTasksPerDay: string;
-  chartDayTip: string;
-  ariaTokensPerWorker: string;
-  chartWorkerTip: string;
-  statusCoolingUntil: string;
-  statusAvailable: string;
-  emptyWorkers: string;
-  badgeOtherWs: string;
-  emptyTasks: string;
-}
+  /**
+   * The first model waits briefly for the first `claude --version` reading. Without that, a
+   * healthy install would open with a "CLI not found" chip that vanishes a moment later —
+   * `claudeVersion: null` cannot tell "not asked yet" from "asked and failed".
+   */
+  const whenFirstReading = (): Promise<void> =>
+    Promise.race([refreshVersion(), new Promise<void>((resolve) => setTimeout(resolve, FIRST_VERSION_WAIT_MS))]);
 
-/** Localized strings for the page. Must be called from the extension host. */
-export function dashboardStrings(): DashboardStrings {
-  return {
-    title: vscode.l10n.t('Orchestrator Dashboard'),
-    chartTasksTitle: vscode.l10n.t('Tasks · last 14 days (this workspace)'),
-    legendDone: vscode.l10n.t('done'),
-    legendError: vscode.l10n.t('error'),
-    chartTokensTitle: vscode.l10n.t('Tokens by worker · 7 days (all workspaces)'),
-    legendInput: vscode.l10n.t('input'),
-    legendOutput: vscode.l10n.t('output'),
-    workersTitle: vscode.l10n.t('Worker accounts'),
-    thAccount: vscode.l10n.t('account'),
-    thModel: vscode.l10n.t('model'),
-    thStatus: vscode.l10n.t('status'),
-    thSession5h: vscode.l10n.t('session 5h'),
-    thWeekly7d: vscode.l10n.t('weekly 7d'),
-    thAllTime: vscode.l10n.t('all time'),
-    tasksTitle: vscode.l10n.t('Dispatched tasks'),
-    scopeLabel: vscode.l10n.t('this workspace only'),
-    thTitle: vscode.l10n.t('title'),
-    thWorker: vscode.l10n.t('worker'),
-    thTokens: vscode.l10n.t('tokens'),
-    thWhen: vscode.l10n.t('when'),
-    settingsTitle: vscode.l10n.t('Settings'),
-    savedNote: vscode.l10n.t('saved ✓'),
-    permLabel: vscode.l10n.t('worker permission mode'),
-    pathLabel: vscode.l10n.t('claude CLI path'),
-    coolLabel: vscode.l10n.t('quota cooldown (minutes)'),
-    frontierLabel: vscode.l10n.t('frontier model dispatch (claude-fable-5 only — its own quota / per-use billing)'),
-    frontierBlock: vscode.l10n.t('block (billing guard)'),
-    frontierAllow: vscode.l10n.t('allow'),
-    meshTitle: vscode.l10n.t('Mesh Mode — attachable dispatch (experimental)'),
-    meshModeLabel: vscode.l10n.t('Enable Mesh Mode — dispatched workers become attachable background sessions'),
-    meshGatewayModelLabel: vscode.l10n.t('gateway model'),
-    meshIdleLabel: vscode.l10n.t('idle auto-stop (minutes, 0 = off)'),
-    meshMaxLiveLabel: vscode.l10n.t('max live attachable workers'),
-    meshHistoryLabel: vscode.l10n.t('worker history limit'),
-    meshNote: vscode.l10n.t('With Mesh Mode on, every dispatched worker runs as a persistent `claude --bg` session you can attach to in a terminal instead of a one-shot; dispatch tools, results, timeouts, cancellation and failover are unchanged, and detached tasks stay one-shot. Teardown backstops: orphan reaping on session end, idle auto-stop, and the live-worker cap (dispatches past it are refused, not queued). Requires Claude Code ≥ 2.1.224 on macOS/Linux. Off by default; toggling here takes effect on the next Claude session in this workspace.'),
-    btnInstallMcp: vscode.l10n.t('Register MCP here'),
-    btnAddPolicy: vscode.l10n.t('Add policy to CLAUDE.md'),
-    btnAddWorker: vscode.l10n.t('Add worker'),
-    btnManageAssets: vscode.l10n.t('Manage assets'),
-    btnClearTasks: vscode.l10n.t('Clear task history'),
-    btnResetCheckin: vscode.l10n.t('Reset session check-in'),
-    resetCheckinTip: vscode.l10n.t(
-      'Clear the recorded main-session check-in for this workspace — use after switching the main account; the next orchestrator_briefing call re-registers it.',
-    ),
-    footnote: vscode.l10n.t(
-      "Charts and the Worker Accounts table count only dispatches made through this extension, not the account's overall consumption. For an account's real plan quota, see the Live plan usage panel above — it refreshes automatically and via the Refresh Account Usage command.",
-    ),
-    metaWorkspace: vscode.l10n.t('workspace: {0}'),
-    metaNoWorkspace: vscode.l10n.t('no workspace open'),
-    metaMainSession: vscode.l10n.t('main session: {0}'),
-    calibrationActive: vscode.l10n.t('(calibration active)'),
-    frontierTier: vscode.l10n.t('(frontier tier)'),
-    briefedAgo: vscode.l10n.t('briefed {0} ago'),
-    activeAgo: vscode.l10n.t('active {0} ago'),
-    sessionPendingBrief: vscode.l10n.t('active {0} ago — briefing pending (model unknown)'),
-    notCheckedIn: vscode.l10n.t('not checked in yet'),
-    tileRunningNow: vscode.l10n.t('Running now'),
-    tileRunningNowSub: vscode.l10n.t('active dispatches'),
-    tileTasks7d: vscode.l10n.t('Tasks · 7d'),
-    tileTasksSub: vscode.l10n.t('{0} done · {1} error'),
-    tileSuccess: vscode.l10n.t('Success rate · 7d'),
-    tileSuccessSub: vscode.l10n.t('this workspace'),
-    tileTokens: vscode.l10n.t('Tokens · 7d'),
-    tileTokensSub: vscode.l10n.t('{0} in / {1} out'),
-    tileCost: vscode.l10n.t('Est. cost · 7d'),
-    tileCostSub: vscode.l10n.t('all workers'),
-    emptyDaily: vscode.l10n.t('no dispatches in the last 14 days'),
-    emptyWorkerUsage: vscode.l10n.t('no worker usage in the last 7 days'),
-    ariaTasksPerDay: vscode.l10n.t('tasks per day'),
-    chartDayTip: vscode.l10n.t('{0} — {1} done, {2} error'),
-    ariaTokensPerWorker: vscode.l10n.t('tokens per worker'),
-    chartWorkerTip: vscode.l10n.t('{0} — {1} in / {2} out'),
-    statusCoolingUntil: vscode.l10n.t('⏸ until {0}'),
-    statusAvailable: vscode.l10n.t('available'),
-    emptyWorkers: vscode.l10n.t('no workers registered'),
-    badgeOtherWs: vscode.l10n.t('other ws'),
-    emptyTasks: vscode.l10n.t('no dispatched tasks yet'),
+  const run = (command: string, ...args: unknown[]): Thenable<unknown> => vscode.commands.executeCommand(command, ...args);
+
+  const limiter = createPageActionLimiter({
+    intervalMs: PAGE_ACTION_INTERVAL_MS,
+    onBurst: () =>
+      notice(
+        'warning',
+        vscode.l10n.t('The dashboard asked for several actions at once. Only the first was carried out — wait a moment, then try again.'),
+      ),
+  });
+
+  /**
+   * Carry out `action` when the page may have one more of its kind now (see PageLane); a
+   * message that arrives too soon is dropped, and the page is told once per burst. `own` is the
+   * lane's name for a message kind that has a lane of its own.
+   */
+  const bounded = async (lane: PageLane, own: string, action: () => Thenable<unknown>): Promise<void> => {
+    if (lane === null) {
+      await action();
+      return;
+    }
+    const finished = limiter.admit(lane === 'own' ? own : lane, lane === 'modal');
+    if (finished === undefined) {
+      return;
+    }
+    try {
+      await action();
+    } finally {
+      finished();
+    }
   };
+
+  const answerSetting = (key: UiSettingKey, ok: boolean, error: string | null): void => {
+    void post({ type: 'settingResult', key, ok, value: effectiveSetting(key), error });
+  };
+
+  /**
+   * Store one validated setting for the user and answer the page. Called only after the value
+   * was confirmed where it needed to be.
+   */
+  const storeSetting = async (key: UiSettingKey, value: string | number | boolean): Promise<void> => {
+    try {
+      // Global, always: a dispatch setting belongs to the machine's accounts, not to one
+      // folder — and only the user's own value is ever read back (`userSetting`).
+      await vscode.workspace.getConfiguration(CONFIG_SECTION).update(key, value, vscode.ConfigurationTarget.Global);
+    } catch (err) {
+      answerSetting(key, false, safeLine(err, 200));
+      return;
+    }
+    // Stored in the editor. For a setting the dispatch server reads, the registry has to
+    // take it too, and that write can be refused (the registry's lock stayed held). Then
+    // the control must not say "Saved": the answer is the refusal, in the lock's own words,
+    // and the model's "in effect" keeps showing what dispatch really uses. The editor's
+    // setting is not rolled back — the extension writes the registry again at its next
+    // settings change or usage refresh, and the value is then in effect.
+    if (REGISTRY_SETTING[key] && settingsSync !== undefined) {
+      let problem: string | undefined;
+      try {
+        problem = settingsSync();
+      } catch (err) {
+        problem = safeLine(err, SETTINGS_SYNC_ERROR_MAX);
+      }
+      if (problem !== undefined) {
+        answerSetting(
+          key,
+          false,
+          // Shown after the page's own "Not saved: ".
+          vscode.l10n.t(
+            'the shared registry could not be written, so dispatch keeps the previous value. {0}',
+            safeLine(problem, SETTINGS_SYNC_ERROR_MAX),
+          ),
+        );
+        return;
+      }
+    }
+    answerSetting(key, true, null);
+  };
+
+  async function handle(raw: unknown): Promise<void> {
+    if (!isRecord(raw) || typeof raw.type !== 'string') {
+      logOnce('message without a type', raw);
+      return;
+    }
+    switch (raw.type) {
+      case 'ready': {
+        // Also sent again if the page is ever reloaded inside the same panel: every `ready`
+        // gets a full model, whatever was posted before.
+        ready = true;
+        lastSignature = '';
+        await whenFirstReading();
+        refresh(true);
+        return;
+      }
+
+      case 'setScope': {
+        if (raw.scope !== 'workspace' && raw.scope !== 'all') {
+          logOnce('scope', raw.scope);
+          return;
+        }
+        scope = raw.scope;
+        await context.workspaceState.update(SCOPE_STATE_KEY, scope);
+        return;
+      }
+
+      case 'setSetting': {
+        if (!isMember(SETTING_KEYS, raw.key)) {
+          logOnce('setting key', raw.key);
+          return;
+        }
+        const checked = validateSetting(raw.key, raw.value);
+        if (!checked.ok) {
+          answerSetting(raw.key, false, safeLine(checked.error, 200));
+          return;
+        }
+        const key = checked.key;
+        const value = checked.value;
+        if (key === 'claudePath' && !isAcceptableClaudePath(value)) {
+          // The same rule the extension reads the setting by: a value it would not use is not
+          // stored as if it had been accepted.
+          answerSetting(
+            key,
+            false,
+            // Shown after the page's own "Not saved: ".
+            vscode.l10n.t('the Claude path must be a command name such as "claude" or an absolute path.'),
+          );
+          return;
+        }
+        if (!needsWideningConfirmation(key, value)) {
+          await storeSetting(key, value);
+          return;
+        }
+        // A value that widens what a worker may do or spend is stored only on the user's own
+        // confirmation, in a modal on this side: a message from the page is not that. Through
+        // the limiter, so the page cannot stack dialogs either.
+        let asked = false;
+        await bounded('modal', '', async () => {
+          asked = true;
+          // The dialog may stay open for as long as the user likes. The page is told that the
+          // answer is theirs to give, so the control does not report a host that went silent;
+          // whatever happens next, exactly one `settingResult` follows.
+          void post({ type: 'settingPending', key });
+          let confirmed = false;
+          try {
+            confirmed = await confirmWideningSetting(key, value);
+          } catch (err) {
+            // The dialog could not be shown: nothing was confirmed, so nothing is stored.
+            answerSetting(key, false, safeLine(err, 200));
+            return;
+          }
+          if (confirmed) {
+            await storeSetting(key, value);
+          } else {
+            answerSetting(
+              key,
+              false,
+              // Shown after the page's own "Not saved: ".
+              vscode.l10n.t('the change was not confirmed, so the previous value stays in effect.'),
+            );
+          }
+        });
+        if (!asked) {
+          // Dropped by the limiter: the control still has to go back to the value in effect.
+          answerSetting(
+            key,
+            false,
+            // Shown after the page's own "Not saved: ".
+            vscode.l10n.t('too many confirmations were asked for at once — wait a moment, then try again.'),
+          );
+        }
+        return;
+      }
+
+      case 'command': {
+        if (!isMember(COMMAND_IDS, raw.id)) {
+          logOnce('command', raw.id);
+          return;
+        }
+        const id = raw.id;
+        await bounded(COMMAND_IDS[id], `command:${id}`, () =>
+          id === 'openSettings'
+            ? run('workbench.action.openSettings', `@ext:${context.extension.id}`)
+            : run(COMMAND_PREFIX + id),
+        );
+        return;
+      }
+
+      case 'openTask': {
+        if (typeof raw.id !== 'string' || !shownTaskIds.has(raw.id)) {
+          logOnce('task id (open)', raw.id);
+          return;
+        }
+        // The page sends an id, never a path: the file is the report that id names in the
+        // tasks directory (`resolveTaskFile` — a regular file there, never a link), found on
+        // this side. No path from the page or from the task log is opened.
+        const file = isTaskFileId(raw.id) ? resolveTaskFile(raw.id, 'output') : undefined;
+        if (file === undefined) {
+          notice('warning', vscode.l10n.t('The output of that task is no longer available.'));
+          return;
+        }
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+        await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+        return;
+      }
+
+      case 'openRegistryFile': {
+        // The message carries nothing: WHICH file is this side's knowledge (the registry this
+        // extension reads), and it is opened only while that file is the problem the page was
+        // shown. Otherwise the refresh that follows every message takes the notice away.
+        if (!registryIsUnreadable()) {
+          return;
+        }
+        await bounded('own', 'openRegistryFile', async () => {
+          openRegistryFile();
+        });
+        return;
+      }
+
+      case 'cancelTask': {
+        if (typeof raw.id !== 'string' || !shownTaskIds.has(raw.id)) {
+          logOnce('task id (cancel)', raw.id);
+          return;
+        }
+        const id = raw.id;
+        // Stops a worker process: bounded like every message that starts or ends one.
+        await bounded('own', 'cancelTask', () => run(`${COMMAND_PREFIX}cancelTask`, { id }));
+        // A cancelled session task changes the Team lanes too; do not wait out the session cache.
+        invalidateTeamCache();
+        return;
+      }
+
+      case 'session': {
+        if (!isMember(SESSION_ACTIONS, raw.action)) {
+          logOnce('session action', raw.action);
+          return;
+        }
+        if (typeof raw.key !== 'string' || resolveSession(raw.key) === undefined) {
+          logOnce('session key', raw.key);
+          return;
+        }
+        const action = raw.action;
+        const key = raw.key;
+        await bounded(SESSION_ACTIONS[action], `session:${action}`, () =>
+          run(`${COMMAND_PREFIX}sessionAction`, { action, key }),
+        );
+        // So the refresh that follows this message shows the result of a stop at once,
+        // rather than the session list cached a moment before it.
+        invalidateTeamCache();
+        return;
+      }
+
+      case 'account': {
+        if (!isMember(ACCOUNT_ACTIONS, raw.action)) {
+          logOnce('account action', raw.action);
+          return;
+        }
+        if (typeof raw.account !== 'string' || resolveAccount(raw.account) === undefined) {
+          logOnce('account key', raw.account);
+          return;
+        }
+        const accountAction = `${COMMAND_PREFIX}accountAction`;
+        if (raw.action === 'setModel') {
+          // No value at all is the menu's "Other…": the command asks for the model itself, in
+          // a picker that may start a process — so it is bounded, on a lane of its own. Every
+          // branch below carries a value and is a write the page may make as often as it likes.
+          if (raw.value === undefined) {
+            const account = raw.account;
+            await bounded(ACCOUNT_ACTIONS.setModel, 'account:setModel', () =>
+              run(accountAction, { action: 'setModel', account }),
+            );
+            return;
+          }
+          // A value is judged for the CLI this account runs on, as the last model named it.
+          const provider = parseProvider(builtAccountProviders.get(raw.account));
+          if (provider === undefined) {
+            logOnce('account for a model choice (not in the last model)', raw.account);
+            return;
+          }
+          // `null` is "let the CLI choose". A Claude Code worker always has a default model,
+          // so there it is one more value that is not a model.
+          if (raw.value === null && provider !== 'claude') {
+            await run(accountAction, { action: raw.action, account: raw.account, value: null });
+            return;
+          }
+          // An explicitly chosen model that does not normalize is an error to show, never a
+          // silent fall-back to some other model. A Claude Code model is taken exactly, as the
+          // picker takes it: a full id chosen here is that model (it is stored pinned).
+          const model = provider === 'claude' ? normalizeModel(raw.value, { exact: true }) : normalizeProviderModel(provider, raw.value);
+          if (model === undefined) {
+            notice('error', vscode.l10n.t('That is not a model name this extension accepts. Use {0}.', providerModelHint(provider)));
+            return;
+          }
+          await run(accountAction, { action: raw.action, account: raw.account, value: model });
+          return;
+        }
+        if (raw.action === 'setPermissionMode') {
+          // `null` is "the default of that CLI". A string must be one of the modes the last
+          // model offered for THIS account's CLI: `plan` is a mode of two CLIs and means
+          // something different in each, so membership is checked per provider, never against
+          // the union. Anything else is not a choice the page could have shown.
+          const providerId = builtAccountProviders.get(raw.account);
+          if (providerId === undefined) {
+            logOnce('account for a permission mode (not in the last model)', raw.account);
+            return;
+          }
+          const value: unknown = raw.value;
+          const offered = builtPermissionModes.get(providerId);
+          if (value !== null && !(typeof value === 'string' && offered !== undefined && offered.includes(value))) {
+            logOnce('permission mode', value);
+            return;
+          }
+          const account = raw.account;
+          await bounded(ACCOUNT_ACTIONS.setPermissionMode, '', () =>
+            run(accountAction, { action: 'setPermissionMode', account, value }),
+          );
+          return;
+        }
+        const action = raw.action;
+        const account = raw.account;
+        await bounded(ACCOUNT_ACTIONS[action], `account:${action}`, () => run(accountAction, { action, account }));
+        return;
+      }
+
+      default:
+        logOnce('message type', raw.type);
+    }
+  }
+
+  const subscriptions: vscode.Disposable[] = [
+    panel.webview.onDidReceiveMessage((raw: unknown) => {
+      // One wrapper for every path: a throw anywhere below (a command that is not registered,
+      // a settings write that fails, a document that will not open) becomes a notice on the
+      // page, and the page is brought up to date either way.
+      handle(raw)
+        .catch((err: unknown) => {
+          if (isStateWriteRefusal(err)) {
+            // The registry refused a write: said in its own words, which name the file (and
+            // the process holding its lock) and say that nothing was changed.
+            notice('warning', safeLine(err, SETTINGS_SYNC_ERROR_MAX));
+            return;
+          }
+          const text = safeLine(err, 200);
+          log(context, `message handler failed: ${text}`);
+          notice('error', vscode.l10n.t('The dashboard could not complete that action: {0}', text));
+        })
+        .then(() => refresh());
+    }),
+    panel.onDidChangeViewState(() => {
+      if (panel.visible) {
+        refresh();
+      }
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration(CONFIG_SECTION)) {
+        refresh();
+      }
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => refresh()),
+  ];
+  const timer = setInterval(() => refresh(), REFRESH_MS);
+
+  panel.onDidDispose(() => {
+    disposed = true;
+    clearInterval(timer);
+    for (const subscription of subscriptions) {
+      subscription.dispose();
+    }
+    if (current === panel) {
+      current = undefined;
+    }
+  });
+
+  panel.webview.html = dashboardHtml({
+    cspSource: panel.webview.cspSource,
+    nonce: makeNonce(),
+    styleUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'dashboard.css')).toString(),
+    scriptUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'dashboard.js')).toString(),
+    language: vscode.env.language,
+    strings: dashboardStrings(),
+  });
+  // Start the version reading now so it has usually arrived by the time the page is ready.
+  void refreshVersion();
 }
 
-/** HTML-escape for static-body interpolation (localized strings are untrusted). */
-const HTML_ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
-const escHtml = (s: string): string => s.replace(/[&<>"]/g, (c) => HTML_ESC[c]);
+/* ------------------------------------------------------------------------- *
+ * The document
+ * ------------------------------------------------------------------------- */
 
-/** Pure: same strings in, same HTML out. Exported for headless rendering tests. */
-export function dashboardHtml(s: DashboardStrings): string {
-  return /* html */ `<!DOCTYPE html>
-<html>
+export interface DashboardHtmlParts {
+  /** `webview.cspSource` — the only origin the page may load style, script and images from. */
+  cspSource: string;
+  nonce: string;
+  styleUri: string;
+  scriptUri: string;
+  /** UI language tag (`vscode.env.language`); the page formats numbers and dates with it. */
+  language: string;
+  strings: DashboardStrings;
+}
+
+/**
+ * Pure: same parts in, same document out. The body is an empty mount point — the page script
+ * builds everything — plus a one-line placeholder for the instant before the script runs.
+ *
+ * The policy allows exactly: the stylesheet and images from the extension's own resource
+ * origin, and script carrying this render's nonce. No inline style, no inline handler and no
+ * network: a string that reaches the page can only ever be text.
+ */
+export function dashboardHtml(parts: DashboardHtmlParts): string {
+  const csp = [
+    `default-src 'none'`,
+    `img-src ${parts.cspSource} data:`,
+    `style-src ${parts.cspSource}`,
+    `script-src 'nonce-${parts.nonce}'`,
+    `font-src ${parts.cspSource}`,
+  ].join('; ');
+  const language = /^[A-Za-z0-9-]{1,35}$/.test(parts.language) ? parts.language : 'en';
+  return `<!DOCTYPE html>
+<html lang="${language}">
 <head>
 <meta charset="UTF-8">
-<style>
-  :root {
-    --c-done: var(--vscode-charts-blue, #3794ff);
-    --c-error: var(--vscode-charts-red, #f14c4c);
-    --c-in: var(--vscode-charts-blue, #3794ff);
-    --c-out: var(--vscode-charts-purple, #b180d7);
-    --c-muted: var(--vscode-descriptionForeground);
-    --c-usage: var(--vscode-charts-green, #89d185);
-    --c-usage-warn: var(--vscode-editorWarning-foreground, #cca700);
-    --c-usage-crit: var(--vscode-errorForeground, #f14c4c);
-    --card-bg: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
-    --border: var(--vscode-panel-border, #4444);
-  }
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 14px 18px 40px; }
-  h1 { font-size: 1.15em; margin: 0 0 2px; }
-  #meta { color: var(--c-muted); font-size: 0.88em; margin: 0 0 14px; }
-  .grid { display: grid; gap: 12px; }
-  .tiles { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom: 12px; }
-  .charts { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); margin-bottom: 12px; }
-  .bottom { grid-template-columns: 2fr 1fr; align-items: start; }
-  @media (max-width: 860px) { .bottom { grid-template-columns: 1fr; } }
-  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
-  .card h2 { font-size: 0.82em; font-weight: 600; color: var(--c-muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 8px; }
-  .tile .num { font-size: 1.55em; font-weight: 600; line-height: 1.2; }
-  .tile .sub { color: var(--c-muted); font-size: 0.82em; margin-top: 2px; }
-  table { border-collapse: collapse; width: 100%; font-size: 0.9em; }
-  th, td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  tr:last-child td { border-bottom: none; }
-  th { color: var(--c-muted); font-weight: 600; }
-  td.title { white-space: normal; }
-  .muted { color: var(--c-muted); }
-  .ok { color: var(--vscode-charts-green, #89d185); }
-  .err { color: var(--c-error); }
-  .warn { color: var(--vscode-editorWarning-foreground, #cca700); }
-  .task-link { cursor: pointer; text-decoration: underline; }
-  .badge { border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; font-size: 0.85em; }
-  .legend { display: flex; gap: 14px; margin-top: 6px; font-size: 0.82em; color: var(--c-muted); }
-  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline; }
-  svg text { fill: var(--c-muted); font-size: 9.5px; font-family: var(--vscode-font-family); }
-  svg .grid-line { stroke: var(--border); stroke-width: 1; }
-  svg .val { fill: var(--vscode-foreground); font-size: 10px; }
-  label { display: block; color: var(--c-muted); font-size: 0.82em; margin: 10px 0 3px; }
-  select, input { width: 100%; box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--border)); border-radius: 3px; padding: 4px 6px; font-family: inherit; }
-  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
-  button { background: var(--vscode-button-secondaryBackground, var(--card-bg)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--border); border-radius: 3px; padding: 4px 10px; cursor: pointer; font-family: inherit; }
-  button:hover { background: var(--vscode-button-secondaryHoverBackground, var(--border)); }
-  button:disabled { opacity: 0.5; cursor: default; }
-  button:disabled:hover { background: var(--vscode-button-secondaryBackground, var(--card-bg)); }
-  .cancel-btn { color: var(--vscode-errorForeground, #f14c4c); padding: 1px 8px; font-size: 0.85em; }
-  .relogin-btn { margin-top: 9px; padding: 2px 10px; font-size: 0.85em; }
-  #saved { color: var(--vscode-charts-green, #89d185); font-size: 0.8em; margin-left: 6px; opacity: 0; transition: opacity 0.3s; }
-  .empty { color: var(--c-muted); padding: 18px 0; text-align: center; }
-  .usage { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-bottom: 12px; }
-  .usage .card h2 { text-transform: none; letter-spacing: 0; font-size: 0.92em; color: var(--vscode-foreground); }
-  .u-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
-  .u-age { color: var(--c-muted); font-size: 0.78em; white-space: nowrap; }
-  .u-note { color: var(--c-muted); font-size: 0.85em; margin: 0; }
-  .u-note.err { color: var(--c-error); }
-  .u-win + .u-win { margin-top: 9px; }
-  .u-label { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82em; margin-bottom: 3px; }
-  .u-pct { font-variant-numeric: tabular-nums; }
-  .u-track { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
-  .u-fill { height: 100%; border-radius: 3px; background: var(--c-usage); }
-  .u-fill.warning { background: var(--c-usage-warn); }
-  .u-fill.critical { background: var(--c-usage-crit); }
-  .u-win.warning .u-pct { color: var(--c-usage-warn); }
-  .u-win.critical .u-pct { color: var(--c-usage-crit); }
-  .u-reset { color: var(--c-muted); font-size: 0.78em; margin-top: 3px; }
-  .u-extra { font-size: 0.8em; margin: 10px 0 0; color: var(--c-muted); cursor: help; }
-  .u-extra.on { color: var(--c-usage-warn); font-weight: 600; }
-  .u-stale { font-size: 0.8em; margin: 6px 0 0; color: var(--c-usage-warn); cursor: help; }
-</style>
+<meta http-equiv="Content-Security-Policy" content="${escapeHtml(csp)};">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${escapeHtml(parts.strings.panelTitle)}</title>
+<link rel="stylesheet" href="${escapeHtml(parts.styleUri)}">
 </head>
 <body>
-  <h1>${escHtml(s.title)}</h1>
-  <p id="meta"></p>
-
-  <div class="grid tiles" id="tiles"></div>
-
-  <div class="grid charts">
-    <div class="card">
-      <h2>${escHtml(s.chartTasksTitle)}</h2>
-      <div id="dailyChart"></div>
-      <div class="legend">
-        <span><span class="swatch" style="background:var(--c-done)"></span>${escHtml(s.legendDone)}</span>
-        <span><span class="swatch" style="background:var(--c-error)"></span>${escHtml(s.legendError)}</span>
-      </div>
-    </div>
-    <div class="card">
-      <h2>${escHtml(s.chartTokensTitle)}</h2>
-      <div id="workerChart"></div>
-      <div class="legend">
-        <span><span class="swatch" style="background:var(--c-in)"></span>${escHtml(s.legendInput)}</span>
-        <span><span class="swatch" style="background:var(--c-out)"></span>${escHtml(s.legendOutput)}</span>
-      </div>
-    </div>
-  </div>
-
-  <h2 style="font-size:0.82em;font-weight:600;color:var(--c-muted);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px">Live plan usage</h2>
-  <div class="grid usage" id="usage"></div>
-
-  <div class="grid bottom">
-    <div>
-      <div class="card" style="margin-bottom:12px">
-        <h2>${escHtml(s.workersTitle)}</h2>
-        <table id="workers"><thead><tr>
-          <th>${escHtml(s.thAccount)}</th><th>${escHtml(s.thModel)}</th><th>${escHtml(s.thStatus)}</th><th>${escHtml(s.thSession5h)}</th><th>${escHtml(s.thWeekly7d)}</th><th>${escHtml(s.thAllTime)}</th>
-        </tr></thead><tbody></tbody></table>
-      </div>
-      <div class="card">
-        <h2>${escHtml(s.tasksTitle)} <label style="display:inline;font-size:1em;margin-left:8px"><input type="checkbox" id="scope" checked style="width:auto"> ${escHtml(s.scopeLabel)}</label></h2>
-        <table id="tasks"><thead><tr>
-          <th></th><th>${escHtml(s.thTitle)}</th><th>${escHtml(s.thWorker)}</th><th>${escHtml(s.thModel)}</th><th>${escHtml(s.thTokens)}</th><th>${escHtml(s.thWhen)}</th>
-        </tr></thead><tbody></tbody></table>
-      </div>
-    </div>
-    <div class="card">
-      <h2>${escHtml(s.settingsTitle)}<span id="saved">${escHtml(s.savedNote)}</span></h2>
-      <label for="s-perm">${escHtml(s.permLabel)}</label>
-      <select id="s-perm">
-        <option>default</option><option>acceptEdits</option><option>plan</option><option>bypassPermissions</option>
-      </select>
-      <label for="s-path">${escHtml(s.pathLabel)}</label>
-      <input id="s-path" type="text" spellcheck="false">
-      <label for="s-cool">${escHtml(s.coolLabel)}</label>
-      <input id="s-cool" type="number" min="1">
-      <label for="s-frontier">${escHtml(s.frontierLabel)}</label>
-      <select id="s-frontier">
-        <option value="block">${escHtml(s.frontierBlock)}</option><option value="allow">${escHtml(s.frontierAllow)}</option>
-      </select>
-      <div id="s-frontier-note" style="font-size:0.8em;margin-top:4px"></div>
-      <label for="s-overage">overage dispatch (spend extra credit past plan limits — any model)</label>
-      <select id="s-overage">
-        <option value="block">block (billing guard)</option><option value="allow">allow</option>
-      </select>
-      <div id="s-overage-note" style="font-size:0.8em;margin-top:4px"></div>
-      <h3 style="margin:16px 0 6px;font-size:1em">${escHtml(s.meshTitle)}</h3>
-      <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
-        <input type="checkbox" id="s-mesh" style="width:auto"> ${escHtml(s.meshModeLabel)}
-      </label>
-      <label for="s-mesh-model" style="margin-top:6px">${escHtml(s.meshGatewayModelLabel)}</label>
-      <select id="s-mesh-model">
-        <option value="haiku">haiku</option><option value="sonnet">sonnet</option>
-      </select>
-      <label for="s-mesh-idle">${escHtml(s.meshIdleLabel)}</label>
-      <input id="s-mesh-idle" type="number" min="0" max="1440">
-      <label for="s-mesh-cap">${escHtml(s.meshMaxLiveLabel)}</label>
-      <input id="s-mesh-cap" type="number" min="1" max="64">
-      <label for="s-mesh-history">${escHtml(s.meshHistoryLabel)}</label>
-      <input id="s-mesh-history" type="number" min="1" max="1000">
-      <div class="muted" style="font-size:0.8em;margin-top:4px">${escHtml(s.meshNote)}</div>
-      <div class="actions">
-        <button data-cmd="installMcp">${escHtml(s.btnInstallMcp)}</button>
-        <button data-cmd="addDispatchPolicy">${escHtml(s.btnAddPolicy)}</button>
-        <button data-cmd="addWorker">${escHtml(s.btnAddWorker)}</button>
-        <button data-cmd="openAssetManager">${escHtml(s.btnManageAssets)}</button>
-        <button data-cmd="clearTasks">${escHtml(s.btnClearTasks)}</button>
-        <button id="cancel-all">Cancel all running</button>
-        <button id="reset-checkin" title="${escHtml(s.resetCheckinTip)}">${escHtml(s.btnResetCheckin)}</button>
-      </div>
-      <p class="muted" style="font-size:0.8em;margin-top:12px">
-        ${escHtml(s.footnote)}
-      </p>
-    </div>
-  </div>
-
-<script>
-  const vscode = acquireVsCodeApi();
-  const S = ${jsonForScript(s)};
-  const fmt = (s, ...a) => String(s).replace(/\\{(\\d+)\\}/g, (_, i) => a[i]);
-  let data = null;
-  let editing = null; // input id being edited — don't clobber while typing
-
-  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const tok = (n) => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e4 ? (n/1e3).toFixed(1)+'k' : String(n ?? 0);
-
-  window.addEventListener('message', (e) => { if (e.data.type === 'data') { data = e.data; render(); } });
-  document.getElementById('scope').addEventListener('change', render);
-
-  // --- settings wiring ---
-  function flashSaved() {
-    const el = document.getElementById('saved');
-    el.style.opacity = 1; setTimeout(() => (el.style.opacity = 0), 1200);
-  }
-  function bindSetting(id, key, parse, event, debounceMs) {
-    const el = document.getElementById(id);
-    let t;
-    el.addEventListener(event, () => {
-      editing = id;
-      clearTimeout(t);
-      t = setTimeout(() => {
-        vscode.postMessage({ type: 'setSetting', key, value: parse(el.value) });
-        editing = null; flashSaved();
-      }, debounceMs);
-    });
-    el.addEventListener('blur', () => { if (editing === id) editing = null; });
-  }
-  bindSetting('s-perm', 'workerPermissionMode', (v) => v, 'change', 0);
-  bindSetting('s-path', 'claudePath', (v) => v.trim(), 'input', 700);
-  bindSetting('s-cool', 'quotaCooldownMinutes', (v) => Math.max(1, Number(v) || 30), 'input', 700);
-  bindSetting('s-frontier', 'frontierWorkerDispatch', (v) => v, 'change', 0);
-  bindSetting('s-overage', 'overageWorkerDispatch', (v) => v, 'change', 0);
-  // Checkbox settings post the boolean checked state (the value property is a static "on").
-  function bindCheckbox(id, key) {
-    const el = document.getElementById(id);
-    el.addEventListener('change', () => {
-      editing = id;
-      vscode.postMessage({ type: 'setSetting', key, value: el.checked });
-      editing = null; flashSaved();
-    });
-  }
-  bindCheckbox('s-mesh', 'meshMode');
-  bindSetting('s-mesh-model', 'meshGatewayModel', (v) => v, 'change', 0);
-  // Teardown numbers are clamped here as well as on the extension side. 0 is a
-  // VALUE for the idle window (auto-stop off) and must be TYPED: an emptied box is
-  // absent, not zero, so it falls back to the default instead of silently disabling
-  // the backstop. The cap has no meaningful zero and floors at 1.
-  const clampNumber = (raw, min, max, fallback) => {
-    if (String(raw).trim() === '') return fallback;
-    const n = Number(raw);
-    return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
-  };
-  bindSetting('s-mesh-idle', 'meshWorkerIdleTimeoutMin', (v) => clampNumber(v, 0, 1440, 15), 'input', 700);
-  bindSetting('s-mesh-cap', 'meshMaxLiveWorkers', (v) => clampNumber(v, 1, 64, 8), 'input', 700);
-  bindSetting('s-mesh-history', 'meshHistoryLimit', (v) => clampNumber(v, 1, 1000, 50), 'input', 700);
-  for (const b of document.querySelectorAll('button[data-cmd]')) {
-    b.addEventListener('click', () => vscode.postMessage({ type: 'runCommand', id: b.dataset.cmd }));
-  }
-  document.getElementById('cancel-all').addEventListener('click', () => vscode.postMessage({ type: 'cancelAllTasks' }));
-  document.getElementById('reset-checkin').addEventListener('click', () => vscode.postMessage({ type: 'resetCheckin' }));
-
-  // --- charts (hand-rolled SVG, theme-var colors) ---
-  function dailyChart(daily) {
-    const W = 460, H = 150, padL = 26, padB = 16, padT = 8;
-    const plotW = W - padL - 6, plotH = H - padB - padT;
-    const max = Math.max(1, ...daily.map((d) => d.done + d.error));
-    const step = plotW / daily.length, barW = Math.max(6, step * 0.62);
-    let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="' + esc(S.ariaTasksPerDay) + '">';
-    // 3 recessive gridlines + y labels
-    for (let i = 0; i <= 2; i++) {
-      const v = Math.ceil(max * i / 2), y = padT + plotH - (plotH * i / 2);
-      s += '<line class="grid-line" x1="' + padL + '" y1="' + y + '" x2="' + W + '" y2="' + y + '"/>' +
-           '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end">' + v + '</text>';
-    }
-    daily.forEach((d, i) => {
-      const x = padL + i * step + (step - barW) / 2;
-      const hDone = plotH * d.done / max, hErr = plotH * d.error / max;
-      const yDone = padT + plotH - hDone;
-      const tip = '<title>' + esc(fmt(S.chartDayTip, d.label, d.done, d.error)) + '</title>';
-      if (d.done > 0) s += '<rect x="' + x + '" y="' + yDone + '" width="' + barW + '" height="' + hDone + '" rx="2" fill="var(--c-done)">' + tip + '</rect>';
-      if (d.error > 0) s += '<rect x="' + x + '" y="' + (yDone - hErr - 2) + '" width="' + barW + '" height="' + hErr + '" rx="2" fill="var(--c-error)">' + tip + '</rect>';
-      if (i % 2 === 0) s += '<text x="' + (x + barW / 2) + '" y="' + (H - 3) + '" text-anchor="middle">' + esc(d.label) + '</text>';
-    });
-    return s + '</svg>';
-  }
-
-  function workerChart(workers) {
-    const rows = workers.map((w) => ({ name: w.name, inT: w.week.inputTokens, outT: w.week.outputTokens }));
-    const max = Math.max(1, ...rows.map((r) => r.inT + r.outT));
-    const W = 460, rowH = 26, padL = 92, padR = 56;
-    const H = rows.length * rowH + 6;
-    let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="' + esc(S.ariaTokensPerWorker) + '">';
-    rows.forEach((r, i) => {
-      const y = i * rowH + 6, h = 12;
-      const wIn = (W - padL - padR) * r.inT / max, wOut = (W - padL - padR) * r.outT / max;
-      const tip = '<title>' + esc(fmt(S.chartWorkerTip, r.name, tok(r.inT), tok(r.outT))) + '</title>';
-      s += '<text x="' + (padL - 6) + '" y="' + (y + h - 2) + '" text-anchor="end">' + esc(r.name) + '</text>';
-      if (r.inT > 0) s += '<rect x="' + padL + '" y="' + y + '" width="' + Math.max(2, wIn) + '" height="' + h + '" rx="2" fill="var(--c-in)">' + tip + '</rect>';
-      if (r.outT > 0) s += '<rect x="' + (padL + Math.max(2, wIn) + 2) + '" y="' + y + '" width="' + Math.max(2, wOut) + '" height="' + h + '" rx="2" fill="var(--c-out)">' + tip + '</rect>';
-      s += '<text class="val" x="' + (padL + Math.max(2, wIn) + wOut + 8) + '" y="' + (y + h - 2) + '">' + tok(r.inT + r.outT) + '</text>';
-    });
-    return s + '</svg>';
-  }
-
-  // --- live plan usage ---
-  function usageBar(w) {
-    const cls = w.elevated ? (w.severity === 'critical' ? 'critical' : 'warning') : '';
-    const pct = Math.max(0, Math.min(100, Number(w.percent) || 0));
-    return '<div class="u-win ' + cls + '">' +
-      '<div class="u-label"><span>' + esc(w.label) + '</span><span class="u-pct">' + Math.round(pct) + '%</span></div>' +
-      '<div class="u-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(pct) +
-        '" aria-label="' + esc(w.label) + '"><div class="u-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
-      '<div class="u-reset">resets ' + esc(w.reset) + '</div></div>';
-  }
-
-  const OVERAGE_ON_TIP =
-    'Extra usage is ON: dispatching past a plan window bills real money against the monthly ' +
-    'overage cap for this account instead of being blocked.';
-  const OVERAGE_OFF_TIP =
-    'Extra usage is off: exhausting a plan window blocks further work on this account. No money is spent.';
-
-  // One line under the bars: money-risk signal when overage is on, muted when off, nothing when unreported.
-  function overageLine(o) {
-    if (!o) return '';
-    if (o.enabled !== true) {
-      return '<p class="u-extra" title="' + esc(OVERAGE_OFF_TIP) + '">Extra usage: off</p>';
-    }
-    const spend = typeof o.spendLabel === 'string' && o.spendLabel ? ' — ' + esc(o.spendLabel) : '';
-    const pct = Number.isFinite(o.percent) ? ' (' + Math.round(o.percent) + '% of cap)' : '';
-    return '<p class="u-extra on" title="' + esc(OVERAGE_ON_TIP) + '">⚠ Extra usage: ON' + spend + pct + '</p>';
-  }
-
-  const STALE_TIP =
-    'These plan-usage numbers are the last good reading, not a live one: upstream get_usage returned no ' +
-    'rate-limit data, so the previous window values are carried forward (up to 30 minutes) rather than shown as empty.';
-
-  // A warning line under the bars when the window numbers are carried-forward, not live.
-  function staleLine(stale) {
-    if (!stale) return '';
-    return '<p class="u-stale" title="' + esc(STALE_TIP) + '">⏱ plan usage as of ' + esc(stale.since) +
-      ' — upstream returned no data</p>';
-  }
-
-  const TEMP_UNAVAIL_TIP =
-    'Plan usage is temporarily unavailable: upstream get_usage is intermittently returning no rate-limit ' +
-    'data for this account. This is transient — the values return automatically once upstream reports them again.';
-
-  function usageCard(c) {
-    const age = Number.isFinite(c.ageMinutes) ? 'updated ' + c.ageMinutes + 'm ago' : '';
-    const plan = c.subscriptionType ? ' <span class="badge muted">' + esc(c.subscriptionType) + '</span>' : '';
-    let body;
-    if (c.state === 'ok') {
-      // No windows: distinguish the intermittent-upstream state (had windows before)
-      // from an account that never reported any.
-      const noWindows = c.tempUnavailableSince
-        ? '<p class="u-stale" title="' + esc(TEMP_UNAVAIL_TIP) +
-          '">⚠ plan usage temporarily unavailable — upstream returned no data (last ' +
-          esc(c.tempUnavailableSince) + ')</p>'
-        : '<p class="u-note">no rate-limit windows reported</p>';
-      body = (c.windows.length ? c.windows.map(usageBar).join('') : noWindows) +
-        staleLine(c.stale) +
-        overageLine(c.overage);
-    } else {
-      // 'expired' reads as an error — it is actionable, not informational — and
-      // carries the only fix: a terminal running \`claude auth login\`.
-      const bad = c.state === 'error' || c.state === 'expired';
-      const relogin = c.state === 'expired'
-        ? '<button class="relogin-btn" data-relogin-dir="' + esc(c.configDir) + '">Re-login</button>'
-        : '';
-      body = '<p class="u-note' + (bad ? ' err' : '') + '">' + esc(c.message) + '</p>' + relogin;
-    }
-    return '<div class="card"><div class="u-head"><h2>' + esc(c.label) + plan + '</h2>' +
-      '<span class="u-age">' + esc(age) + '</span></div>' + body + '</div>';
-  }
-  const ago = (t) => {
-    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-    return s < 90 ? s + 's' : s < 5400 ? Math.round(s / 60) + 'm' : Math.round(s / 3600) + 'h';
-  };
-
-  function render() {
-    if (!data) return;
-    const o = data.orchestrator;
-    let session;
-    if (o) {
-      session = o.model + ' ' + (o.calibrated ? S.calibrationActive : S.frontierTier) +
-        ' · ' + fmt(S.briefedAgo, ago(o.ts)) +
-        (data.sessionLastSeen && data.sessionLastSeen > o.ts ? ' · ' + fmt(S.activeAgo, ago(data.sessionLastSeen)) : '');
-    } else if (data.sessionLastSeen) {
-      session = fmt(S.sessionPendingBrief, ago(data.sessionLastSeen));
-    } else {
-      session = S.notCheckedIn;
-    }
-    document.getElementById('meta').textContent =
-      (data.workspace ? fmt(S.metaWorkspace, data.workspace) : S.metaNoWorkspace) + '   |   ' + fmt(S.metaMainSession, session);
-
-    // tiles
-    const d7 = data.daily.slice(-7);
-    const done7 = d7.reduce((a, d) => a + d.done, 0), err7 = d7.reduce((a, d) => a + d.error, 0);
-    const inW = data.workers.reduce((a, w) => a + w.week.inputTokens, 0);
-    const outW = data.workers.reduce((a, w) => a + w.week.outputTokens, 0);
-    const cost = data.workers.reduce((a, w) => a + w.week.costUsd, 0);
-    const rate = done7 + err7 > 0 ? Math.round(done7 / (done7 + err7) * 100) + '%' : '–';
-    document.getElementById('tiles').innerHTML = [
-      [S.tileRunningNow, data.running, S.tileRunningNowSub],
-      [S.tileTasks7d, done7 + err7, fmt(S.tileTasksSub, done7, err7)],
-      [S.tileSuccess, rate, S.tileSuccessSub],
-      [S.tileTokens, tok(inW + outW), fmt(S.tileTokensSub, tok(inW), tok(outW))],
-      [S.tileCost, cost > 0 ? '$' + cost.toFixed(2) : '–', S.tileCostSub],
-    ].map(([t, n, sub]) => '<div class="card tile"><h2>' + esc(t) + '</h2><div class="num">' + esc(n) + '</div><div class="sub">' + esc(sub) + '</div></div>').join('');
-
-    // charts
-    document.getElementById('dailyChart').innerHTML =
-      data.daily.some((d) => d.done + d.error > 0) ? dailyChart(data.daily) : '<div class="empty">' + esc(S.emptyDaily) + '</div>';
-    document.getElementById('workerChart').innerHTML =
-      data.workers.length && data.workers.some((w) => w.week.inputTokens + w.week.outputTokens > 0)
-        ? workerChart(data.workers) : '<div class="empty">' + esc(S.emptyWorkerUsage) + '</div>';
-
-    // live plan usage cards
-    const accounts = data.usage || [];
-    document.getElementById('usage').innerHTML =
-      accounts.length ? accounts.map(usageCard).join('') : '<div class="empty">no accounts configured</div>';
-
-    // workers table
-    const usage = (u) => u.tasks === 0 ? '<span class="muted">–</span>' : u.tasks + ' · ' + tok(u.inputTokens) + '/' + tok(u.outputTokens);
-    document.querySelector('#workers tbody').innerHTML = data.workers.map((w) => {
-      const status = w.coolingDown
-        ? '<span class="warn">' + esc(fmt(S.statusCoolingUntil, new Date(w.cooldownUntil).toLocaleTimeString())) + '</span>'
-        : '<span class="ok">' + esc(S.statusAvailable) + '</span>';
-      const total = w.totals
-        ? w.totals.tasks + ' · ' + tok(w.totals.inputTokens) + '/' + tok(w.totals.outputTokens) + (w.totals.costUsd ? ' · $' + w.totals.costUsd.toFixed(2) : '')
-        : '<span class="muted">–</span>';
-      return '<tr><td><b>' + (w.preferred ? '★ ' : '') + esc(w.name) + '</b></td><td>' + esc(w.model) + '</td><td>' + status +
-        '</td><td>' + usage(w.session) + '</td><td>' + usage(w.week) + '</td><td>' + total + '</td></tr>';
-    }).join('') || '<tr><td colspan="6" class="muted">' + esc(S.emptyWorkers) + '</td></tr>';
-
-    // tasks table
-    const scoped = document.getElementById('scope').checked;
-    const tasks = data.tasks.filter((t) => !scoped || t.inWorkspace);
-    document.querySelector('#tasks tbody').innerHTML = tasks.map((t) => {
-      const icon = t.status === 'running' ? '⟳' : t.status === 'done' ? '<span class="ok">✓</span>' : '<span class="err">✗</span>';
-      const tokens = t.inputTokens != null ? tok(t.inputTokens) + '/' + tok(t.outputTokens) : '<span class="muted">–</span>';
-      const ws = t.inWorkspace ? '' : ' <span class="badge muted">' + esc(S.badgeOtherWs) + '</span>';
-      const cancel = (t.status === 'running' && t.id)
-        ? ' <button class="cancel-btn" data-cancel="' + esc(t.id) + '">Cancel</button>' : '';
-      const previewTitle = (typeof t.promptPreview === 'string' && t.promptPreview)
-        ? ' title="' + esc(t.promptPreview) + '"' : '';
-      return '<tr><td>' + icon + '</td><td class="title"><span class="task-link"' + previewTitle + ' data-file="' + esc(t.outputFile) + '">' +
-        esc(t.title) + '</span>' + ws + '</td><td>' + esc(t.worker) + '</td><td>' + esc(t.model) +
-        '</td><td>' + tokens + '</td><td class="muted">' + new Date(t.ts).toLocaleTimeString() + cancel + '</td></tr>';
-    }).join('') || '<tr><td colspan="6" class="muted">' + esc(S.emptyTasks) + '</td></tr>';
-    for (const el of document.querySelectorAll('.task-link')) {
-      el.onclick = () => vscode.postMessage({ type: 'openTask', file: el.dataset.file });
-    }
-    for (const el of document.querySelectorAll('.cancel-btn')) {
-      el.onclick = () => vscode.postMessage({ type: 'cancelTask', id: el.dataset.cancel });
-    }
-    for (const el of document.querySelectorAll('.relogin-btn')) {
-      el.onclick = () => vscode.postMessage({ type: 'relogin', dir: el.dataset.reloginDir });
-    }
-    document.getElementById('cancel-all').disabled = !(data.running > 0);
-
-    // settings (skip fields being edited)
-    if (editing !== 's-perm') document.getElementById('s-perm').value = data.settings.workerPermissionMode;
-    if (editing !== 's-path') document.getElementById('s-path').value = data.settings.claudePath;
-    if (editing !== 's-cool') document.getElementById('s-cool').value = data.settings.quotaCooldownMinutes;
-    if (editing !== 's-frontier') document.getElementById('s-frontier').value = data.settings.frontierWorkerDispatch;
-    const fEff = data.settings.frontierEffective;
-    const fSetBy = data.settings.frontierSetBy;
-    const fNote = document.getElementById('s-frontier-note');
-    if (fEff !== data.settings.frontierWorkerDispatch) {
-      let msg = '⚠ In effect: ' + esc(fEff);
-      if (fSetBy != null) msg += ' — set in ' + esc(fSetBy) + '. Change this dropdown to take over.';
-      fNote.innerHTML = '<span class="warn">' + msg + '</span>';
-    } else {
-      fNote.innerHTML = '<span class="muted">In effect: ' + esc(fEff) + '</span>';
-    }
-    if (editing !== 's-overage') document.getElementById('s-overage').value = data.settings.overageWorkerDispatch;
-    const oEff = data.settings.overageEffective;
-    const oSetBy = data.settings.overageSetBy;
-    const oNote = document.getElementById('s-overage-note');
-    if (oEff !== data.settings.overageWorkerDispatch) {
-      let msg = '⚠ In effect: ' + esc(oEff);
-      if (oSetBy != null) msg += ' — set in ' + esc(oSetBy) + '. Change this dropdown to take over.';
-      oNote.innerHTML = '<span class="warn">' + msg + '</span>';
-    } else {
-      oNote.innerHTML = '<span class="muted">In effect: ' + esc(oEff) + '</span>';
-    }
-    if (editing !== 's-mesh') document.getElementById('s-mesh').checked = !!data.settings.meshMode;
-    if (editing !== 's-mesh-model') document.getElementById('s-mesh-model').value = data.settings.meshGatewayModel;
-    if (editing !== 's-mesh-idle') document.getElementById('s-mesh-idle').value = data.settings.meshWorkerIdleTimeoutMin;
-    if (editing !== 's-mesh-cap') document.getElementById('s-mesh-cap').value = data.settings.meshMaxLiveWorkers;
-    if (editing !== 's-mesh-history') document.getElementById('s-mesh-history').value = data.settings.meshHistoryLimit;
-  }
-</script>
+<div id="app" aria-busy="true"><p class="boot">${escapeHtml(parts.strings.loading)}</p></div>
+<script nonce="${parts.nonce}">window.__CCO_STRINGS__ = ${jsonForScript(parts.strings)};</script>
+<script nonce="${parts.nonce}" src="${escapeHtml(parts.scriptUri)}"></script>
 </body>
 </html>`;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Localized string table
+ * ------------------------------------------------------------------------- */
+
+export type DashboardStrings = ReturnType<typeof dashboardStrings>;
+
+/**
+ * Every piece of text the page shows. The page script holds no English of its own: it looks
+ * keys up in this table and fills `{0}`-style placeholders, so one `vscode.l10n.t` literal
+ * here is the single place a string is written and translated. Must run in the extension
+ * host. Each call is spelled `vscode.l10n.t('literal')` in full — never through an alias —
+ * because that exact shape is what the l10n bundle extraction looks for.
+ *
+ * Counts are written "label: {0}" / "{0} label" on purpose — no string depends on singular
+ * vs plural, which do not translate one-to-one.
+ */
+export function dashboardStrings() {
+  return {
+    /* general */
+    panelTitle: vscode.l10n.t('Orchestrator Dashboard'),
+    appName: vscode.l10n.t('Claude Code Orchestrator'),
+    loading: vscode.l10n.t('Loading the dashboard…'),
+    loadingLate: vscode.l10n.t('Still waiting for data from the extension. If nothing appears, close this tab and open the dashboard again.'),
+    schemaTitle: vscode.l10n.t('This dashboard is out of date'),
+    schemaBody: vscode.l10n.t('The extension sent data this page cannot read. Run "Developer: Reload Window" to load the matching version.'),
+    sep: ' · ',
+    nameSep: ', ',
+    pct: vscode.l10n.t('{0}%'),
+    on: vscode.l10n.t('On'),
+    off: vscode.l10n.t('Off'),
+    today: vscode.l10n.t('Today'),
+    dateTime: vscode.l10n.t('{0}, {1}'),
+    justNow: vscode.l10n.t('just now'),
+    ago: vscode.l10n.t('{0} ago'),
+    unitS: vscode.l10n.t('{0}s'),
+    unitM: vscode.l10n.t('{0}m'),
+    unitH: vscode.l10n.t('{0}h'),
+    unitD: vscode.l10n.t('{0}d'),
+    unitMS: vscode.l10n.t('{0}m {1}s'),
+    unitHM: vscode.l10n.t('{0}h {1}m'),
+    unitDH: vscode.l10n.t('{0}d {1}h'),
+    versionUnknown: vscode.l10n.t('an unreadable version'),
+    showAllWorkspaces: vscode.l10n.t('Show all workspaces'),
+    otherWorkspace: vscode.l10n.t('other workspace'),
+    otherWorkspaceTip: vscode.l10n.t('This belongs to a different workspace folder.'),
+    unmerged: vscode.l10n.t('unmerged'),
+    unmergedTip: vscode.l10n.t('The worktree holding this work still exists. Merge or discard its branch to clear it.'),
+    noticesLabel: vscode.l10n.t('Notifications'),
+    noticeDismiss: vscode.l10n.t('Dismiss'),
+
+    /* providers: the CLI an account or a task runs on */
+    provHome: vscode.l10n.t('Claude Code'),
+    provRunsOn: vscode.l10n.t('Runs on {0}'),
+    provLegendLabel: vscode.l10n.t('Accounts by CLI'),
+
+    /* header */
+    noWorkspaceName: vscode.l10n.t('No folder open'),
+    scopeLabel: vscode.l10n.t('Which workspaces to show'),
+    scopeWorkspace: vscode.l10n.t('This workspace'),
+    scopeAll: vscode.l10n.t('All workspaces'),
+    scopeWorkspaceTip: vscode.l10n.t('Show the sessions and tasks of the folder open in this window.'),
+    scopeAllTip: vscode.l10n.t('Show the sessions and tasks of every workspace on this machine.'),
+    scopeNoteWorkspace: vscode.l10n.t('this workspace'),
+    scopeNoteAll: vscode.l10n.t('all workspaces'),
+    scopeNoteMachine: vscode.l10n.t('this machine'),
+    refreshUsage: vscode.l10n.t('Refresh usage'),
+    refreshingUsage: vscode.l10n.t('Refreshing…'),
+    refreshUsageTip: vscode.l10n.t('Ask every account for its current plan usage now.'),
+    settings: vscode.l10n.t('Settings'),
+    orchNone: vscode.l10n.t('Orchestrator not checked in'),
+    orchNoneTip: vscode.l10n.t('No Claude Code session in this workspace has asked for its briefing yet.'),
+    orchPending: vscode.l10n.t('Orchestrator seen, briefing pending'),
+    orchPendingTip: vscode.l10n.t('A session connected but has not reported its model yet.'),
+    orchModel: vscode.l10n.t('Orchestrator {0}'),
+    orchModelTip: vscode.l10n.t('The model of the Claude Code session that dispatches from this workspace.'),
+    orchCalibrated: vscode.l10n.t('Calibration brief active'),
+    orchCalibratedTip: vscode.l10n.t('This model received the operating brief that calibrates it for orchestration.'),
+    orchFrontier: vscode.l10n.t('Frontier tier'),
+    orchFrontierTip: vscode.l10n.t('Frontier-tier models run without the calibration brief.'),
+    orchBriefed: vscode.l10n.t('briefed {0}'),
+    orchSeen: vscode.l10n.t('seen {0}'),
+    runningHere: vscode.l10n.t('Running here: {0}'),
+    runningAll: vscode.l10n.t('Running on this machine: {0}'),
+    runningHereAndElsewhere: vscode.l10n.t('Running here: {0} · in other workspaces: {1}'),
+
+    /* health chips and page banners */
+    healthLabel: vscode.l10n.t('Things that need attention'),
+    chipExpired: vscode.l10n.t('Login expired: {0}'),
+    chipExpiredTip: vscode.l10n.t('Go to the first account that needs a new login.'),
+    chipTaskLog: vscode.l10n.t('Task log unreadable'),
+    registryTitle: vscode.l10n.t('The worker registry could not be read'),
+    registryBody: vscode.l10n.t('Reason: {0}. No worker account is shown and no change can be saved until the file is fixed or deleted. This is not an empty registry.'),
+    registryOpen: vscode.l10n.t('Open File'),
+    chipCliUnknown: vscode.l10n.t('Claude CLI not found or unreadable'),
+    chipCliUnknownTip: vscode.l10n.t('Check the Claude CLI path in Settings.'),
+    chipCliOld: vscode.l10n.t('Session workers need Claude Code {0} or newer'),
+    chipUsageError: vscode.l10n.t('Account check failed: {0}'),
+    chipLimit: vscode.l10n.t('At a plan limit: {0}'),
+    chipLimitTip: vscode.l10n.t('Go to the first account that has used up a plan window.'),
+    chipCooling: vscode.l10n.t('Cooling down: {0}'),
+    chipCoolingTip: vscode.l10n.t('Accounts that automatic selection is skipping after a quota error.'),
+    chipMcp: vscode.l10n.t('Set up dispatch here'),
+    chipMcpTip: vscode.l10n.t(
+      'The Claude Code session in this workspace cannot dispatch: it has neither the cco command with this version\'s dispatch policy nor a cco-dispatch entry in .mcp.json.',
+    ),
+    chipPolicy: vscode.l10n.t('Add the dispatch policy'),
+    chipPolicyTip: vscode.l10n.t('CLAUDE.md in this workspace has no dispatch policy block.'),
+    chipPolicyOutdated: vscode.l10n.t('Update the dispatch policy'),
+    chipPolicyOutdatedTip: vscode.l10n.t('The dispatch policy block in CLAUDE.md is not this version\'s text: it is from another version of the extension, or was changed.'),
+    allExpiredTitle: vscode.l10n.t('No worker account is logged in'),
+    allExpiredBody: vscode.l10n.t('Every dispatch will fail until at least one worker logs in again. Use Re-login on a card below.'),
+    sameAccountTitle: vscode.l10n.t('Some accounts here are one claude.ai account'),
+    sameAccountBody: vscode.l10n.t(
+      "Signed in to the same claude.ai account: {0}. Each group draws on one plan's limits; automatic dispatch is not changed by it.",
+    ),
+    noWorkspaceTitle: vscode.l10n.t('No folder is open in this window'),
+    noWorkspaceBody: vscode.l10n.t('Sessions and tasks are tracked per workspace folder. Open a folder, or look across every workspace on this machine.'),
+    noWorkspaceBodyAll: vscode.l10n.t('Showing every workspace on this machine. Open a folder to set up dispatch for it.'),
+
+    /* accounts */
+    accountsTitle: vscode.l10n.t('Accounts'),
+    accountsReady: vscode.l10n.t('{0} ready'),
+    accountsExpired: vscode.l10n.t('{0} logged out'),
+    accountsLimit: vscode.l10n.t('{0} at a limit'),
+    accountsCooling: vscode.l10n.t('{0} cooling down'),
+    accountsError: vscode.l10n.t('{0} check failed'),
+    accountsChecking: vscode.l10n.t('{0} checking'),
+    accountsUnknown: vscode.l10n.t('{0} state unknown'),
+    addWorker: vscode.l10n.t('Add worker account'),
+    importWorkers: vscode.l10n.t('Import existing logins'),
+    tagMain: vscode.l10n.t('main'),
+    tagMainTip: vscode.l10n.t('The account the Claude session of this editor runs as.'),
+    tagPreferred: vscode.l10n.t('preferred'),
+    tagPreferredTip: vscode.l10n.t('Automatic selection tries this account first.'),
+    acctRunning: vscode.l10n.t('{0} running'),
+    acctPlanTip: vscode.l10n.t('Subscription plan: {0}'),
+    acctSameAccountOne: vscode.l10n.t("Same claude.ai account as {0} — one plan's limits for both"),
+    acctSameAccountMany: vscode.l10n.t("Same claude.ai account as {0} — one plan's limits for all of them"),
+    acctStateOk: vscode.l10n.t('Ready'),
+    acctStateExpired: vscode.l10n.t('Logged out'),
+    acctStateError: vscode.l10n.t('Account check failed'),
+    acctStateRefreshing: vscode.l10n.t('Checking usage…'),
+    acctStateNoLimits: vscode.l10n.t('Logged in, no plan limits'),
+    acctStateLoggedIn: vscode.l10n.t('Logged in'),
+    acctStateUnknown: vscode.l10n.t('State unknown'),
+    acctStateCooling: vscode.l10n.t('Cooling down'),
+    acctStateLimit: vscode.l10n.t('At a plan limit'),
+    acctDefaultModel: vscode.l10n.t('default {0}'),
+    acctModelCli: vscode.l10n.t('model chosen by the CLI'),
+    acctModelCliDefault: vscode.l10n.t('CLI default'),
+    acctLastRan: vscode.l10n.t('last ran {0}'),
+    acctLastRanTip: vscode.l10n.t('{0} is the model id the CLI of this account reported for its newest finished task that used the default.'),
+    acctChecked: vscode.l10n.t('checked {0}'),
+    acctLoginOk: vscode.l10n.t('Login ok · checked {0}'),
+    acctLoginUnconfirmed: vscode.l10n.t('Login not confirmed · checking'),
+    acctLoginChecking: vscode.l10n.t('Checking login'),
+    acctLoginProbeFailed: vscode.l10n.t("Couldn't check the login — retrying"),
+    acctExpiredTitle: vscode.l10n.t('Login expired'),
+    acctExpiredBody: vscode.l10n.t('Dispatches to this account fail until you log in again.'),
+    acctExpiredBodyMain: vscode.l10n.t('Plan usage cannot be read until you log in again.'),
+    acctExpiredBodyRun: vscode.l10n.t('The last dispatch to this account failed on login. Dispatches skip it until one succeeds or you log in again.'),
+    acctErrorTitle: vscode.l10n.t('The account check failed'),
+    acctErrorBody: vscode.l10n.t('The CLI gave no reason.'),
+    acctNoLimitsBody: vscode.l10n.t('This login is a token or API key, not a subscription, so there is no plan quota to show.'),
+    acctNoWindows: vscode.l10n.t('No rate-limit windows were reported.'),
+    acctUsageLabel: vscode.l10n.t('Plan usage'),
+    winPrimary: vscode.l10n.t('Primary limit'),
+    winSecondary: vscode.l10n.t('Secondary limit'),
+    winTotal: vscode.l10n.t('Total usage'),
+    winAuto: vscode.l10n.t('Auto + Composer'),
+    winApi: vscode.l10n.t('API usage'),
+    winGeminiWeekly: vscode.l10n.t('Gemini weekly'),
+    winGemini5h: vscode.l10n.t('Gemini 5-hour'),
+    win3pWeekly: vscode.l10n.t('Claude + GPT weekly'),
+    win3p5h: vscode.l10n.t('Claude + GPT 5-hour'),
+    acctNoReading: vscode.l10n.t('no reading'),
+    acctNoReadingBody: vscode.l10n.t('No plan-usage reading for {0}. Dispatches run as usual.'),
+    acctNoReadingOff: vscode.l10n.t('Usage readings for other providers are turned off in Settings.'),
+    acctOneShot: vscode.l10n.t('one-shot only'),
+    acctOneShotTip: vscode.l10n.t('{0} has no session workers. Dispatches to this account run one-shot and edit the working tree in place.'),
+    acctTempUnavailable: vscode.l10n.t('Plan usage is temporarily unavailable. Last reading: {0}.'),
+    acctStale: vscode.l10n.t('Showing the last reading, from {0}. The latest check returned no data.'),
+    acctCooldown: vscode.l10n.t('Cooling down · {0} left'),
+    acctCooldownTip: vscode.l10n.t('Automatic selection skips this account until {0}, after a quota error.'),
+    acctOverageOn: vscode.l10n.t('Extra usage on'),
+    acctOverageCap: vscode.l10n.t('{0}% of cap'),
+    acctOverageTip: vscode.l10n.t('This account bills real money once a plan window is used up.'),
+    stat5h: vscode.l10n.t('Last 5 h'),
+    stat7d: vscode.l10n.t('Last 7 d'),
+    statAll: vscode.l10n.t('All time'),
+    statTasks: vscode.l10n.t('{0} tasks'),
+    statTokens: vscode.l10n.t('{0} tokens'),
+    statTokensTip: vscode.l10n.t('Input {0} · output {1}'),
+    statTokensNA: vscode.l10n.t('tokens n/a'),
+    statTokensNATip: vscode.l10n.t('No token counts were reported for these dispatches.'),
+    statCostTip: vscode.l10n.t('Estimated cost the CLI reported for these dispatches.'),
+    statsTip: vscode.l10n.t('Counts only work dispatched through this extension. The meters above show the real plan quota of the account.'),
+    acctNoDispatches: vscode.l10n.t('No dispatches yet.'),
+    acctNotWorker: vscode.l10n.t('Not a dispatch target. This is the account your editor session runs as.'),
+    acctFailures: vscode.l10n.t('Failures: {0}'),
+    acctLastError: vscode.l10n.t('Last failure: {0}'),
+    relogin: vscode.l10n.t('Re-login'),
+    openSession: vscode.l10n.t('Open session'),
+    openSessionTip: vscode.l10n.t('Open a terminal running {0} as this account.'),
+    checkAgain: vscode.l10n.t('Check again'),
+    checkLoginNow: vscode.l10n.t('Check login now'),
+    moreActions: vscode.l10n.t('More actions'),
+    moreActionsFor: vscode.l10n.t('More actions for {0}'),
+    menuPrefer: vscode.l10n.t('Prefer this account'),
+    menuUnprefer: vscode.l10n.t('Stop preferring this account'),
+    menuDefaultModel: vscode.l10n.t('Default model'),
+    menuModelCli: vscode.l10n.t('Let the CLI choose'),
+    menuModelOther: vscode.l10n.t('Other…'),
+    menuPermission: vscode.l10n.t('Permission / sandbox mode'),
+    menuPermCli: vscode.l10n.t('CLI default'),
+    menuPermShared: vscode.l10n.t('{0} · change in Settings…'),
+    menuPermSharedTip: vscode.l10n.t('Every {0} worker uses the same permission mode. It is a setting, not a per-account choice.'),
+    menuRelogin: vscode.l10n.t('Re-login…'),
+    menuCheckLogin: vscode.l10n.t('Check Login Now'),
+    menuRemove: vscode.l10n.t('Remove account…'),
+    meterPaceTip: vscode.l10n.t('How far through this window the clock is. Usage ahead of the mark is being spent faster than the window refills.'),
+    resetsIn: vscode.l10n.t('resets in {0}'),
+    resetsNow: vscode.l10n.t('resetting now'),
+    severityWarning: vscode.l10n.t('high'),
+    severityCritical: vscode.l10n.t('at the limit'),
+    unsupportedTitle: vscode.l10n.t('Registry entries this version cannot use: {0}'),
+    unsupportedBody: vscode.l10n.t('This version of the extension cannot use these entries and leaves them in the registry untouched. A newer version may have written them. To delete one, use "Remove Registry Entry…" on its row in the Worker Accounts view.'),
+    unsupportedUnnamed: vscode.l10n.t('(unnamed entry)'),
+    onboardTitle: vscode.l10n.t('Add your first worker account'),
+    onboardBody: vscode.l10n.t('A worker is another account this session can hand tasks to. Each one brings its own plan quota.'),
+    onboardClis: vscode.l10n.t('Supported CLIs: {0}.'),
+    onboardStepWorker: vscode.l10n.t('Add or import a worker account'),
+    onboardStepMcp: vscode.l10n.t('Set up dispatch in this workspace'),
+    onboardStepPolicy: vscode.l10n.t('Add the dispatch policy to CLAUDE.md'),
+
+    /* team */
+    teamTitle: vscode.l10n.t('Team'),
+    teamWorking: vscode.l10n.t('{0} working'),
+    teamWaiting: vscode.l10n.t('{0} waiting'),
+    teamParked: vscode.l10n.t('{0} parked'),
+    laneWorking: vscode.l10n.t('Working'),
+    laneWaiting: vscode.l10n.t('Waiting on you'),
+    laneParked: vscode.l10n.t('Parked'),
+    laneWorkingEmpty: vscode.l10n.t('Nothing is working right now.'),
+    laneWaitingEmpty: vscode.l10n.t('Nothing is waiting on you.'),
+    laneParkedEmpty: vscode.l10n.t('No parked sessions.'),
+    teamOffTitle: vscode.l10n.t('Session workers are off'),
+    teamOffBody: vscode.l10n.t('A session worker keeps a dispatched task running as a live Claude Code session in its own git worktree. You can attach to it, read its log and steer it with SendMessage while it works.'),
+    teamEnable: vscode.l10n.t('Turn on session workers'),
+    teamEmptyTitle: vscode.l10n.t('No live sessions in this workspace'),
+    teamEmptyTitleAll: vscode.l10n.t('No live sessions on this machine'),
+    teamEmptyBody: vscode.l10n.t('Session workers, native teammates and other Claude Code sessions appear here while they are alive.'),
+    teamUnsupportedTitle: vscode.l10n.t('Session workers need Claude Code {0} or newer'),
+    teamUnsupportedBody: vscode.l10n.t('This machine runs {0}. Dispatches still run as one-shot workers; update Claude Code to get live sessions.'),
+    sessCopyTip: vscode.l10n.t('Copy {0}. It is the address SendMessage takes.'),
+    sessCopied: vscode.l10n.t('Copied {0}'),
+    sessBusy: vscode.l10n.t('working'),
+    sessBusyFor: vscode.l10n.t('working {0}'),
+    sessWaiting: vscode.l10n.t('waiting'),
+    sessWaitingFor: vscode.l10n.t('waiting {0}'),
+    sessIdle: vscode.l10n.t('idle'),
+    sessIdleFor: vscode.l10n.t('idle {0}'),
+    sessStopped: vscode.l10n.t('stopped'),
+    sessUnknown: vscode.l10n.t('status unknown'),
+    sessNoTask: vscode.l10n.t('No task recorded'),
+    sessTeammateNoTask: vscode.l10n.t('Native teammate'),
+    sessPeerNoTask: vscode.l10n.t('Claude Code session'),
+    sessWaitingOn: vscode.l10n.t('Waiting for: {0}'),
+    srcWorker: vscode.l10n.t('Session worker'),
+    srcWorkerTip: vscode.l10n.t('A session this extension dispatched.'),
+    srcTeammate: vscode.l10n.t('Teammate'),
+    srcTeammateRole: vscode.l10n.t('Teammate · {0}'),
+    srcTeammateOf: vscode.l10n.t('{0} in {1}'),
+    srcTeammateTip: vscode.l10n.t('A member of a native Claude Code agent team. Its team lead manages it.'),
+    srcPeer: vscode.l10n.t('Peer session'),
+    srcPeerBackground: vscode.l10n.t('Peer session · background'),
+    srcPeerTip: vscode.l10n.t('Another live Claude Code session here. No dispatch started it.'),
+    sessAccountTip: vscode.l10n.t('Runs as the account {0}.'),
+    sessSettled: vscode.l10n.t('result recorded'),
+    sessSettledTip: vscode.l10n.t('The dispatch that started this session has finished and its result was recorded.'),
+    sessBranchTip: vscode.l10n.t('Branch {0} in {1}'),
+    sessAttach: vscode.l10n.t('Attach'),
+    sessAttachTip: vscode.l10n.t('Open a terminal attached to this session.'),
+    sessLogs: vscode.l10n.t('Logs'),
+    sessLogsTip: vscode.l10n.t('Open a terminal showing the log of this session.'),
+    sessDiff: vscode.l10n.t('Diff'),
+    sessDiffTip: vscode.l10n.t('Show what the branch of this session changed.'),
+    sessStop: vscode.l10n.t('Stop'),
+    sessStopTip: vscode.l10n.t('Stop this session. A worktree that still holds work is kept. Asks first.'),
+
+    /* activity */
+    activityTitle: vscode.l10n.t('Activity'),
+    activityRunning: vscode.l10n.t('{0} running'),
+    rateLabel: vscode.l10n.t('Success · 14 days'),
+    rateNone: vscode.l10n.t('No finished tasks yet'),
+    rateNote: vscode.l10n.t('{0} of {1} finished tasks succeeded'),
+    stripLabel: vscode.l10n.t('Tasks per day'),
+    stripAria: vscode.l10n.t('Last 14 days: {0} done, {1} failed, {2} cancelled'),
+    stripDayTip: vscode.l10n.t('{0}: {1} done, {2} failed, {3} cancelled'),
+    filterStatusLabel: vscode.l10n.t('Filter tasks by status'),
+    filterAll: vscode.l10n.t('All'),
+    filterPlaceholder: vscode.l10n.t('Filter by title, account, model…'),
+    filterTextLabel: vscode.l10n.t('Filter tasks by text'),
+    filterResult: vscode.l10n.t('{0} of {1} match'),
+    filterClear: vscode.l10n.t('Clear filters'),
+    filterProviderLabel: vscode.l10n.t('Filter tasks by CLI'),
+    filterProviderHead: vscode.l10n.t('CLI'),
+    statusRunning: vscode.l10n.t('Running'),
+    statusDone: vscode.l10n.t('Done'),
+    statusFailed: vscode.l10n.t('Failed'),
+    statusCancelled: vscode.l10n.t('Cancelled'),
+    statusOrphaned: vscode.l10n.t('Orphaned'),
+    statusUnknown: vscode.l10n.t('Unknown'),
+    modeOneshot: vscode.l10n.t('one-shot'),
+    modeOneshotTip: vscode.l10n.t('Ran as a single headless {0} run.'),
+    modeDetached: vscode.l10n.t('detached'),
+    modeDetachedTip: vscode.l10n.t('A one-shot run that keeps going after the dispatching session ends.'),
+    modeSession: vscode.l10n.t('session'),
+    modeSessionTip: vscode.l10n.t('Ran as a live session worker.'),
+    colStatus: vscode.l10n.t('Status'),
+    colTask: vscode.l10n.t('Task'),
+    colMode: vscode.l10n.t('Mode'),
+    colAccount: vscode.l10n.t('Account'),
+    colModel: vscode.l10n.t('Model'),
+    colStarted: vscode.l10n.t('Started'),
+    colDuration: vscode.l10n.t('Duration'),
+    colTokens: vscode.l10n.t('Tokens'),
+    tokensInOut: vscode.l10n.t('{0} / {1}'),
+    tokensNA: vscode.l10n.t('n/a'),
+    tokensNATip: vscode.l10n.t('Session workers do not report token usage.'),
+    taskOpenTip: vscode.l10n.t('Open the output of this task.'),
+    taskProviderTip: vscode.l10n.t('Ran on {0}.'),
+    taskModelRan: vscode.l10n.t('{0} → {1}'),
+    taskModelTipDispatch: vscode.l10n.t('Asked for {0}, named by the dispatch.'),
+    taskModelTipWorker: vscode.l10n.t('Asked for {0}, the default of the worker account.'),
+    taskModelTipCli: vscode.l10n.t('No model was named, so the CLI used its own default.'),
+    taskModelTipDispatchAlone: vscode.l10n.t('The model was named by the dispatch.'),
+    taskModelTipWorkerAlone: vscode.l10n.t('The default of the worker account was used.'),
+    taskModelTipRan: vscode.l10n.t('The CLI reported that it ran {0}.'),
+    taskCancel: vscode.l10n.t('Cancel'),
+    taskCancelConfirm: vscode.l10n.t('Cancel task?'),
+    taskDetails: vscode.l10n.t('Details'),
+    detailError: vscode.l10n.t('Error'),
+    detailPrompt: vscode.l10n.t('Prompt'),
+    detailProvider: vscode.l10n.t('CLI'),
+    detailModelRan: vscode.l10n.t('Model that ran'),
+    detailModelSource: vscode.l10n.t('Model source'),
+    modelSourceDispatch: vscode.l10n.t('named by the dispatch'),
+    modelSourceWorker: vscode.l10n.t('worker default'),
+    modelSourceCli: vscode.l10n.t('CLI default'),
+    detailSession: vscode.l10n.t('Session'),
+    detailBranch: vscode.l10n.t('Branch'),
+    detailBranchUnmerged: vscode.l10n.t('{0} (unmerged)'),
+    detailEnded: vscode.l10n.t('Ended'),
+    detailTokens: vscode.l10n.t('Tokens'),
+    detailTokensValue: vscode.l10n.t('input {0} · output {1}'),
+    detailCost: vscode.l10n.t('Est. cost'),
+    detailId: vscode.l10n.t('Task id'),
+    tasksEmptyTitle: vscode.l10n.t('No dispatches in this workspace yet'),
+    tasksEmptyTitleAll: vscode.l10n.t('No dispatches on this machine yet'),
+    tasksEmptyBody: vscode.l10n.t('When your Claude Code session dispatches a task to a worker, it appears here with its status, duration and result.'),
+    tasksNoMatchTitle: vscode.l10n.t('No task matches these filters'),
+    tasksNoMatchBody: vscode.l10n.t('Try another filter, or clear them.'),
+    tasksShowMore: vscode.l10n.t('Show {0} more · {1} not shown'),
+    tasksCapped: vscode.l10n.t('Showing the newest {0} of {1} tasks.'),
+    taskLogTitle: vscode.l10n.t('The task log could not be read'),
+    taskLogBody: vscode.l10n.t('Reason: {0}. Activity is hidden until the log is readable. This is not an empty history.'),
+
+    /* settings drawer */
+    drawerClose: vscode.l10n.t('Close settings'),
+    groupDispatch: vscode.l10n.t('Dispatch'),
+    groupGuards: vscode.l10n.t('Billing guards'),
+    groupGuardsNote: vscode.l10n.t('Enforced by the dispatch server and shared by every editor on this machine.'),
+    groupSession: vscode.l10n.t('Session workers'),
+    groupSessionNote: vscode.l10n.t('Changes take effect at the next dispatch.'),
+    groupProviders: vscode.l10n.t('Other providers'),
+    groupProvidersNote: vscode.l10n.t('Worker accounts on the CLI of another vendor. A task goes to one only when the dispatch names that provider or worker.'),
+    groupSetup: vscode.l10n.t('Setup'),
+    groupDanger: vscode.l10n.t('Danger zone'),
+    setPermission: vscode.l10n.t('Permission mode of Claude Code workers'),
+    setPermissionHint: vscode.l10n.t('Workers cannot answer permission prompts, so a mode that asks stalls on the first edit. Workers on another CLI set theirs per account, in the menu of their card.'),
+    setPermissionBypassNote: vscode.l10n.t('Session workers never start in bypassPermissions. They run with acceptEdits instead.'),
+    setClaudePath: vscode.l10n.t('Claude CLI path'),
+    setClaudePathHint: vscode.l10n.t('The claude executable every worker runs.'),
+    setClaudePathVersion: vscode.l10n.t('Found: {0}'),
+    setClaudePathUnreadable: vscode.l10n.t('No version could be read from this path.'),
+    setTaskTimeout: vscode.l10n.t('Worker timeout (minutes)'),
+    setTaskTimeoutHint: vscode.l10n.t('How long a dispatched worker may run before it is stopped. A single task can override this.'),
+    setCooldown: vscode.l10n.t('Quota cooldown (minutes)'),
+    setCooldownHint: vscode.l10n.t('How long an account sits out after a quota or rate-limit error.'),
+    setKeepalive: vscode.l10n.t('Keep logins fresh'),
+    setKeepaliveHint: vscode.l10n.t('Send one minimal request per subscription account each day so logins do not expire. Uses a negligible amount of plan quota.'),
+    setFrontier: vscode.l10n.t('Frontier model dispatch'),
+    setFrontierHint: vscode.l10n.t('Block rejects dispatches that ask for the frontier tier (fable), which may bill per use or draw a separate quota.'),
+    setOverage: vscode.l10n.t('Overage dispatch'),
+    setOverageHint: vscode.l10n.t('Block never sends work to an account that has used up its plan, even when extra usage is enabled there.'),
+    guardBlock: vscode.l10n.t('Block'),
+    guardAllow: vscode.l10n.t('Allow'),
+    guardInEffect: vscode.l10n.t('In effect: {0}'),
+    guardMismatch: vscode.l10n.t('In effect: {0}. Another editor set this. Choose a value here to take over.'),
+    guardMismatchBy: vscode.l10n.t('In effect: {0}, set in {1}. Choose a value here to take over.'),
+    setMesh: vscode.l10n.t('Run dispatches as session workers'),
+    setMeshHint: vscode.l10n.t('Each task runs in its own git worktree as a live session you can attach to and steer. Detached tasks stay one-shot.'),
+    setMeshUnsupported: vscode.l10n.t('Needs Claude Code {0} or newer; this machine runs {1}. Dispatches fall back to one-shot workers.'),
+    setMeshCap: vscode.l10n.t('Session workers in flight'),
+    setMeshCapHint: vscode.l10n.t('The most session workers that may have a dispatch still running. Dispatches past it are refused, not queued.'),
+    setMeshHistory: vscode.l10n.t('Worker history limit'),
+    setMeshHistoryHint: vscode.l10n.t('How many finished session workers the Worker History view keeps.'),
+    setProviderPolling: vscode.l10n.t('Read usage from other providers'),
+    setProviderPollingHint: vscode.l10n.t('On the usage refresh schedule, asks the CLI or usage service of each vendor for a plan-usage reading. Off, those accounts show their login state only.'),
+    provTableCaption: vscode.l10n.t('What each CLI supports'),
+    provColProvider: vscode.l10n.t('CLI'),
+    provColLogins: vscode.l10n.t('Separate logins'),
+    provColSessions: vscode.l10n.t('Session workers'),
+    provYes: vscode.l10n.t('Yes'),
+    provNo: vscode.l10n.t('No'),
+    provUnverified: vscode.l10n.t('Not verified'),
+    provLoginsYesTip: vscode.l10n.t('Each worker account can have its own login.'),
+    provLoginsUnverifiedTip: vscode.l10n.t('A separate home directory is accepted, but a second login there is not confirmed to work.'),
+    provLoginsNoTip: vscode.l10n.t('One login per machine, so one worker account.'),
+    provSessionsYesTip: vscode.l10n.t('Dispatches can run as live sessions you attach to and steer.'),
+    provSessionsNoTip: vscode.l10n.t('Dispatches run one-shot and edit the working tree in place.'),
+    addWorkerOther: vscode.l10n.t('Add a worker on another CLI'),
+    setupMcp: vscode.l10n.t('Dispatch server'),
+    setupMcpHint: vscode.l10n.t('Adds cco-dispatch to .mcp.json so the Claude session here can dispatch.'),
+    setupPolicy: vscode.l10n.t('Dispatch policy'),
+    setupPolicyHint: vscode.l10n.t('Adds the orchestration policy block to CLAUDE.md.'),
+    setupAgent: vscode.l10n.t('Team proxy agent'),
+    setupAgentHint: vscode.l10n.t('Installs the cco-worker agent, which puts a worker account into a native agent team.'),
+    setupDone: vscode.l10n.t('Installed'),
+    setupMissing: vscode.l10n.t('Not installed'),
+    setupOutdated: vscode.l10n.t('Differs from this version'),
+    setupPolicyUpdate: vscode.l10n.t('Update Dispatch Policy'),
+    setupNoWorkspace: vscode.l10n.t('Open a folder first'),
+    setupRegister: vscode.l10n.t('Register'),
+    setupRegisterAgain: vscode.l10n.t('Register again'),
+    setupAdd: vscode.l10n.t('Add'),
+    setupUpdate: vscode.l10n.t('Update'),
+    setupInstall: vscode.l10n.t('Install'),
+    setupWorkspace: vscode.l10n.t('Update Workspace Setup'),
+    setupWorkspaceTip: vscode.l10n.t(
+      'Look at what this workspace has installed — the dispatch policy, the team proxy agent, the permission rules for the cco command, the MCP registration — and update what you check.',
+    ),
+    manageAssets: vscode.l10n.t('Manage assets'),
+    cleanLitter: vscode.l10n.t('Clean up stale session files'),
+    cleanLitterTip: vscode.l10n.t('Remove the session files that usage probes of earlier versions left behind.'),
+    openSettings: vscode.l10n.t('All extension settings'),
+    dangerCancelAll: vscode.l10n.t('Cancel all running'),
+    dangerCancelAllHint: vscode.l10n.t('Stops every running task in every workspace. Asks first.'),
+    dangerClearTasks: vscode.l10n.t('Clear task history'),
+    dangerClearTasksHint: vscode.l10n.t('Empties the task log on this machine. Asks first.'),
+    dangerResetCheckin: vscode.l10n.t('Reset check-in'),
+    dangerResetCheckinHint: vscode.l10n.t('Forgets which model orchestrates this workspace. Use it after switching the main account. Asks first.'),
+    saving: vscode.l10n.t('Saving…'),
+    saveConfirming: vscode.l10n.t('Waiting for your answer in the dialog…'),
+    saved: vscode.l10n.t('Saved'),
+    saveFailed: vscode.l10n.t('Not saved: {0}'),
+    saveFailedUnknown: vscode.l10n.t('the editor gave no reason'),
+    saveNoAnswer: vscode.l10n.t('Not saved: the editor did not answer.'),
+    fieldIntRange: vscode.l10n.t('Enter a whole number from {0} to {1}.'),
+    fieldTextEmpty: vscode.l10n.t('Enter a path.'),
+  } satisfies Record<string, string>;
 }

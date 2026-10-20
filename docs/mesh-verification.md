@@ -1,5 +1,7 @@
 # Mesh Mode (v1.4.0) — Verification record
 
+> **Historical record.** This describes Mesh Mode as it was in 1.4.0. The relay gateway and the `mesh_send`, `mesh_receive` and `mesh_spawn_workers` tools it tests were removed (the last of them in 2.0.0); for current behaviour see the README section *Session workers (Mesh Mode, experimental)*.
+
 Every gate below was executed by the orchestrator (main session), not by a worker
 (workers cannot run node/npx/builds here). Evidence is from live runs on Claude Code
 2.1.226, macOS, against `out/mcp/server.js` driven over stdio JSON-RPC. Probe harnesses

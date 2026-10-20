@@ -2,8 +2,11 @@
 src/**
 docs/**
 media/screenshots/**
+media/dashboard/preview.html
+media/dashboard/fixtures.js
 README.ko.md
 README.zh-CN.md
+VERIFICATION.md
 node_modules/**
 out/**/*.map
 tsconfig.json
@@ -12,6 +15,27 @@ tsconfig.json
 package-lock.json
 .orchestrator/**
 .claude/**
+.cco/**
 .github/**
 CLAUDE.md
 .mcp.json
+# Compiled modules that only the server bundles use (out/mcp/server.js, run-task.js and
+# provider-cli.js are self-contained esbuild bundles): nothing in the extension host loads
+# these, and provider-runner.js requires packages that do not ship.
+# `node .orchestrator/tools/pkg/verify-package.cjs` fails if the extension host starts to.
+out/mcp/task-runner.js
+out/mcp/bg-runner.js
+out/mcp/provider-runner.js
+out/mcp/dispatch-args.js
+out/mcp/dispatch-gate.js
+out/mcp/host.js
+out/mesh/bridge.js
+out/mcp/host-client.js
+# Team mode: the engine side runs inside the server/cli bundles only.
+out/team/driver.js
+out/team/engine.js
+out/team/render.js
+out/team/routing.js
+out/team/store.js
+out/team/surface.js
+out/team/worktree.js

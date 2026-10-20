@@ -1,0 +1,33 @@
+# 2.0.0 round 5: read-only / non-UTF-8 refusals, model alias notes, frontier default note.
+
+@ The MCP server was not registered: {0} is not valid UTF-8 text, and a file that cannot be read and written back byte for byte is not rewritten. Nothing was changed.
+ko: MCP 서버가 등록되지 않았습니다: {0}은(는) 올바른 UTF-8 텍스트가 아니며, 바이트 단위로 그대로 읽고 다시 쓸 수 없는 파일은 다시 쓰지 않습니다. 아무것도 변경하지 않았습니다.
+zh: 未注册 MCP 服务器：{0} 不是有效的 UTF-8 文本，而无法逐字节原样读取并写回的文件不会被重写。未做任何更改。
+
+@ The MCP server was not registered: {0} is read-only (its owner has no write permission), and this extension does not replace a file its owner cannot write. Nothing was changed.
+ko: MCP 서버가 등록되지 않았습니다: {0}은(는) 읽기 전용(소유자에게 쓰기 권한이 없음)이며, 이 확장은 소유자가 쓸 수 없는 파일을 교체하지 않습니다. 아무것도 변경하지 않았습니다.
+zh: 未注册 MCP 服务器：{0} 是只读的（其所有者没有写入权限），本扩展不会替换所有者无法写入的文件。未做任何更改。
+
+@ The default of the worker account was used.
+ko: 워커 계정의 기본 모델을 사용했습니다.
+zh: 使用了 worker 账号的默认模型。
+
+@ The dispatch policy was not written: {0} is not valid UTF-8 text, and a file that cannot be read and written back byte for byte is not rewritten. Nothing was changed.
+ko: 디스패치 정책을 기록하지 않았습니다: {0}은(는) 올바른 UTF-8 텍스트가 아니며, 바이트 단위로 그대로 읽고 다시 쓸 수 없는 파일은 다시 쓰지 않습니다. 아무것도 변경하지 않았습니다.
+zh: 未写入分发策略：{0} 不是有效的 UTF-8 文本，而无法逐字节原样读取并写回的文件不会被重写。未做任何更改。
+
+@ The dispatch policy was not written: {0} is read-only (its owner has no write permission), and this extension does not replace a file its owner cannot write. Nothing was changed.
+ko: 디스패치 정책을 기록하지 않았습니다: {0}은(는) 읽기 전용(소유자에게 쓰기 권한이 없음)이며, 이 확장은 소유자가 쓸 수 없는 파일을 교체하지 않습니다. 아무것도 변경하지 않았습니다.
+zh: 未写入分发策略：{0} 是只读的（其所有者没有写入权限），本扩展不会替换所有者无法写入的文件。未做任何更改。
+
+@ The frontier guard blocks this tier: while it does, dispatches that name no model skip this account.
+ko: 프런티어 가드가 이 등급을 차단합니다. 차단하는 동안 모델을 지정하지 않은 디스패치는 이 계정을 건너뜁니다.
+zh: 前沿防护会阻止此层级：在此期间，未指定模型的分发会跳过此账号。
+
+@ The model was named by the dispatch.
+ko: 디스패치가 모델을 지정했습니다.
+zh: 模型由分发指定。
+
+@ {0} · frontier tier, which the frontier guard blocks: while it does, dispatches that name no model will skip an account whose default this is
+ko: {0} · 프런티어 등급 — 프런티어 가드가 차단하며, 차단하는 동안 모델을 지정하지 않은 디스패치는 이 모델을 기본으로 쓰는 계정을 건너뜁니다
+zh: {0} · 前沿层级，被前沿防护阻止：在此期间，未指定模型的分发会跳过以此为默认模型的账号

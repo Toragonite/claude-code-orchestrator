@@ -1,0 +1,11 @@
+# 2.0.0 third round: asset-sync summary for files that could not be synced. Format: see build-l10n.cjs.
+# Follows the sibling counters: "설치된 파일 {0}개 유지" / "保留了 {0} 个已安装文件", "{0} 个已自定义文件保持不变".
+# {0} count, {1} up to five "<asset key> — <path>: <reason>" items joined by "; " (reasons are English engine text), {2} count.
+
+@ {0} file(s) not synced ({1})
+ko: 동기화되지 않은 파일 {0}개 ({1})
+zh: {0} 个文件未同步（{1}）
+
+@ {0} file(s) not synced ({1}; and {2} more)
+ko: 동기화되지 않은 파일 {0}개 ({1}; 외 {2}개 더 있음)
+zh: {0} 个文件未同步（{1}；另有 {2} 个）

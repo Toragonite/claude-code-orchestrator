@@ -2,6 +2,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { AssetPack, loadPack } from './assets';
+import { userSetting } from './settings';
 
 /**
  * Resolution of the configured asset-pack sources: the extension's bundled
@@ -23,10 +24,9 @@ export function resolvePackSources(context: vscode.ExtensionContext): PackSource
   const sources: PackSource[] = [
     { entry: 'bundled', root: bundledRoot, kind: 'bundled', pack: loadPack(bundledRoot, 'bundled') },
   ];
-  const entries = vscode.workspace
-    .getConfiguration('claudeCodeOrchestrator')
-    .get<string[]>('assetPacks', []);
-  for (const entry of entries) {
+  // The USER's list only: a pack directory is one the host copies files out of, and a
+  // workspace must not be able to add one.
+  for (const entry of userSetting('assetPacks')) {
     const root = entry.startsWith('~') ? path.join(os.homedir(), entry.slice(1)) : entry;
     sources.push({ entry, root, kind: 'setting', pack: loadPack(root) });
   }

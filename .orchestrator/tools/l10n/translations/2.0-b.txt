@@ -1,0 +1,345 @@
+# 2.0.0 additions, part B (registry problems, removal, session refusals). Format: see build-l10n.cjs.
+
+@ Reason: {0}. No worker account is shown and no change can be saved until the file is fixed or deleted. This is not an empty registry.
+ko: 원인: {0}. 파일을 고치거나 삭제하기 전까지 워커 계정이 표시되지 않으며 변경 사항도 저장할 수 없습니다. 레지스트리가 비어 있다는 뜻이 아닙니다.
+zh: 原因：{0}。在修复或删除该文件之前，不会显示任何 worker 账号，也无法保存任何更改。这并不表示注册表为空。
+
+@ Registry could not be read
+ko: 레지스트리를 읽을 수 없음
+zh: 无法读取注册表
+
+@ Registry entries this version cannot use: {0}
+ko: 이 버전에서 사용할 수 없는 레지스트리 항목: {0}
+zh: 此版本无法使用的注册表条目：{0}
+
+@ Registry entry "{0}" removed.
+ko: 레지스트리 항목 "{0}"을(를) 제거했습니다.
+zh: 已移除注册表条目 "{0}"。
+
+@ Remove Entry
+ko: 항목 제거
+zh: 移除条目
+
+@ Remove anyway
+ko: 그래도 제거
+zh: 仍然移除
+
+@ Remove the registry entry "{0}"?
+ko: 레지스트리 항목 "{0}"을(를) 제거할까요?
+zh: 移除注册表条目 "{0}"？
+
+@ Remove the registry entry that has no name?
+ko: 이름이 없는 레지스트리 항목을 제거할까요?
+zh: 移除没有名称的注册表条目？
+
+@ Replace
+ko: 교체
+zh: 替换
+
+@ Replace the team proxy agent at {0}?
+ko: {0}의 팀 프록시 에이전트를 교체할까요?
+zh: 替换 {0} 处的团队转发代理？
+
+@ Reset Check-in
+ko: 체크인 초기화
+zh: 重置签到
+
+@ Reset the session check-in of this workspace?
+ko: 이 워크스페이스의 세션 체크인을 초기화할까요?
+zh: 重置此工作区的会话签到？
+
+@ Run "{0}" as the Claude Code CLI?
+ko: "{0}"을(를) Claude Code CLI로 실행할까요?
+zh: 将 "{0}" 作为 Claude Code CLI 运行？
+
+@ Secondary limit
+ko: 보조 한도
+zh: 次要上限
+
+@ Session "{0}" cannot be opened from here. {1}
+ko: 세션 "{0}"은(는) 여기에서 열 수 없습니다. {1}
+zh: 无法从这里打开会话 "{0}"。{1}
+
+@ Session "{0}" cannot be opened from here: its job id is not in the form this extension types into a terminal (8 hexadecimal characters).
+ko: 세션 "{0}"은(는) 여기에서 열 수 없습니다: 이 세션의 job ID가 이 확장이 터미널에 입력하는 형식(16진수 8자)이 아닙니다.
+zh: 无法从这里打开会话 "{0}"：它的作业 ID 不符合本扩展输入到终端的格式（8 个十六进制字符）。
+
+@ Session "{0}" was not stopped. {1}
+ko: 세션 "{0}"을(를) 중지하지 않았습니다. {1}
+zh: 会话 "{0}" 未被停止。{1}
+
+@ Session "{0}" was not stopped; its running task is cancelled here only. {1}
+ko: 세션 "{0}"을(를) 중지하지 않았습니다. 실행 중이던 작업은 여기에서만 취소되었습니다. {1}
+zh: 会话 "{0}" 未被停止；其运行中的任务仅在此处被取消。{1}
+
+@ Session (5hr)
+ko: 세션 (5시간)
+zh: 会话（5小时）
+
+@ Session workers of this account still tracked: {0} (job ids: {1}). After removal they can no longer be stopped from this extension — only from a terminal, with `claude stop <job id>` under that account.
+ko: 이 계정의 세션 워커가 아직 추적 중입니다: {0}개 (job ID: {1}). 계정을 제거하면 이 확장에서는 더 이상 중지할 수 없고, 터미널에서 그 계정으로 `claude stop <job id>` 명령을 실행해야만 중지할 수 있습니다.
+zh: 此账号仍有被跟踪的会话 worker：{0} 个（作业 ID：{1}）。移除后将无法再通过本扩展停止它们 — 只能在终端中以该账号运行 `claude stop <job id>`。
+
+@ Session workers of this account still tracked: {0} (job ids: {1}, and more). After removal they can no longer be stopped from this extension — only from a terminal, with `claude stop <job id>` under that account.
+ko: 이 계정의 세션 워커가 아직 추적 중입니다: {0}개 (job ID: {1} 외 더 있음). 계정을 제거하면 이 확장에서는 더 이상 중지할 수 없고, 터미널에서 그 계정으로 `claude stop <job id>` 명령을 실행해야만 중지할 수 있습니다.
+zh: 此账号仍有被跟踪的会话 worker：{0} 个（作业 ID：{1}，另有更多）。移除后将无法再通过本扩展停止它们 — 只能在终端中以该账号运行 `claude stop <job id>`。
+
+@ Skip Permission Checks
+ko: 권한 검사 건너뛰기
+zh: 跳过权限检查
+
+@ Started {0} · running {1}m
+ko: 시작 {0} · {1}분째 실행 중
+zh: 开始于 {0} · 已运行 {1} 分钟
+
+@ Stop them and remove
+ko: 중지하고 제거
+zh: 停止并移除
+
+@ Stop this session. A worktree that still holds work is kept. Asks first.
+ko: 이 세션을 중지합니다. 작업 내용이 남아 있는 worktree는 유지됩니다. 실행 전에 확인합니다.
+zh: 停止此会话。仍含有工作成果的 worktree 会保留。执行前会先询问。
+
+@ Stopped {0} session worker(s) of "{1}" and removed the account.
+ko: "{1}"의 세션 워커 {0}개를 중지하고 계정을 제거했습니다.
+zh: 已停止 "{1}" 的 {0} 个会话 worker，并移除了该账号。
+
+@ Stopping the session workers of "{0}"…
+ko: "{0}"의 세션 워커를 중지하는 중…
+zh: 正在停止 "{0}" 的会话 worker…
+
+@ Takes every dispatch that names no provider.
+ko: 프로바이더를 지정하지 않은 모든 디스패치를 받습니다.
+zh: 承接所有未指定提供商的分发。
+
+@ Task log could not be read
+ko: 작업 로그를 읽을 수 없음
+zh: 无法读取任务日志
+
+@ Task {0}
+ko: 작업 {0}
+zh: 任务 {0}
+
+@ The "Claude Path" setting is not used: it must be a command name such as "claude" or an absolute path, and it is set to "{0}". The default "claude" is used instead.
+ko: "Claude Path" 설정을 사용하지 않습니다: 값은 "claude" 같은 명령 이름이거나 절대 경로여야 하는데 "{0}"(으)로 설정되어 있습니다. 대신 기본값 "claude"를 사용합니다.
+zh: 未使用 "Claude Path" 设置：它必须是 "claude" 之类的命令名，或绝对路径，而当前设置为 "{0}"。将改用默认值 "claude"。
+
+@ The MCP server was not registered: "mcpServers" in {0} is not a JSON object. Nothing was changed — correct the file, then register again.
+ko: MCP 서버가 등록되지 않았습니다: {0}의 "mcpServers"가 JSON 객체가 아닙니다. 아무것도 변경하지 않았습니다 — 파일을 수정한 뒤 다시 등록하세요.
+zh: 未注册 MCP 服务器：{0} 中的 "mcpServers" 不是 JSON 对象。未做任何更改 — 请修正该文件后再次注册。
+
+@ The MCP server was not registered: {0} changed while it was being updated. Nothing was written — run the command again.
+ko: MCP 서버가 등록되지 않았습니다: {0}이(가) 업데이트하는 도중 변경되었습니다. 아무것도 쓰지 않았습니다 — 명령을 다시 실행하세요.
+zh: 未注册 MCP 服务器：{0} 在更新过程中发生了变化。未写入任何内容 — 请再次运行该命令。
+
+@ The MCP server was not registered: {0} could not be read ({1}). Nothing was changed.
+ko: MCP 서버가 등록되지 않았습니다: {0}을(를) 읽을 수 없습니다 ({1}). 아무것도 변경하지 않았습니다.
+zh: 未注册 MCP 服务器：无法读取 {0}（{1}）。未做任何更改。
+
+@ The MCP server was not registered: {0} could not be written ({1}). The file is as it was.
+ko: MCP 서버가 등록되지 않았습니다: {0}에 쓸 수 없습니다 ({1}). 파일은 그대로입니다.
+zh: 未注册 MCP 服务器：无法写入 {0}（{1}）。文件保持原样。
+
+@ The MCP server was not registered: {0} does not hold a JSON object. Nothing was changed — correct the file, then register again.
+ko: MCP 서버가 등록되지 않았습니다: {0}에 JSON 객체가 들어 있지 않습니다. 아무것도 변경하지 않았습니다 — 파일을 수정한 뒤 다시 등록하세요.
+zh: 未注册 MCP 服务器：{0} 的内容不是 JSON 对象。未做任何更改 — 请修正该文件后再次注册。
+
+@ The MCP server was not registered: {0} is a symbolic link, and this extension does not write through one. Nothing was changed.
+ko: MCP 서버가 등록되지 않았습니다: {0}은(는) 심볼릭 링크이며, 이 확장은 심볼릭 링크를 통해 쓰지 않습니다. 아무것도 변경하지 않았습니다.
+zh: 未注册 MCP 服务器：{0} 是符号链接，本扩展不会通过符号链接写入。未做任何更改。
+
+@ The MCP server was not registered: {0} is larger than 1 MiB, which is more than this extension reads. Nothing was changed.
+ko: MCP 서버가 등록되지 않았습니다: {0}의 크기가 1 MiB를 넘어, 이 확장이 읽을 수 있는 한도를 초과합니다. 아무것도 변경하지 않았습니다.
+zh: 未注册 MCP 服务器：{0} 大于 1 MiB，超出本扩展可读取的大小。未做任何更改。
+
+@ The MCP server was not registered: {0} is not a regular file. Nothing was changed.
+ko: MCP 서버가 등록되지 않았습니다: {0}은(는) 일반 파일이 아닙니다. 아무것도 변경하지 않았습니다.
+zh: 未注册 MCP 服务器：{0} 不是常规文件。未做任何更改。
+
+@ The MCP server was not registered: {0} is not valid JSON ({1}). Nothing was changed — correct the file, then register again.
+ko: MCP 서버가 등록되지 않았습니다: {0}은(는) 올바른 JSON이 아닙니다 ({1}). 아무것도 변경하지 않았습니다 — 파일을 수정한 뒤 다시 등록하세요.
+zh: 未注册 MCP 服务器：{0} 不是有效的 JSON（{1}）。未做任何更改 — 请修正该文件后再次注册。
+
+@ The account has a subscription but reported no rate-limit windows in the last reading. This is a valid state, not an error.
+ko: 이 계정에는 구독이 있지만 마지막 조회에서 속도 제한 윈도우가 보고되지 않았습니다. 정상적인 상태이며 오류가 아닙니다.
+zh: 该账号有订阅，但最近一次读数没有报告任何速率限制窗口。这是正常状态，不是错误。
+
+@ The dashboard asked for several actions at once. Only the first was carried out — wait a moment, then try again.
+ko: 대시보드가 여러 동작을 한꺼번에 요청했습니다. 첫 번째 동작만 수행했습니다 — 잠시 기다린 뒤 다시 시도하세요.
+zh: 仪表板同时请求了多个操作。只执行了第一个 — 请稍候再试。
+
+@ The directory {0} leads to {1}, which already belongs to worker "{2}" — a second worker there would share that login. Choose a separate directory, or remove "{2}" first.
+ko: 디렉터리 {0}은(는) {1}(으)로 연결되는데, 그곳은 이미 워커 "{2}"의 것입니다 — 그곳에 두 번째 워커를 두면 같은 로그인을 공유하게 됩니다. 별도 디렉터리를 선택하거나 먼저 "{2}"을(를) 제거하세요.
+zh: 目录 {0} 指向 {1}，而它已属于 worker "{2}" — 在那里再建一个 worker 会共用该登录。请选择单独的目录，或先移除 "{2}"。
+
+@ The dispatch policy was not written: {0} could not be read ({1}), and a file that was not read is not rewritten. Nothing was changed.
+ko: 디스패치 정책을 기록하지 않았습니다: {0}을(를) 읽을 수 없으며 ({1}), 읽지 못한 파일은 다시 쓰지 않습니다. 아무것도 변경하지 않았습니다.
+zh: 未写入分发策略：无法读取 {0}（{1}），而未能读取的文件不会被重写。未做任何更改。
+
+@ The dispatch policy was not written: {0} could not be written ({1}).
+ko: 디스패치 정책을 기록하지 않았습니다: {0}에 쓸 수 없습니다 ({1}).
+zh: 未写入分发策略：无法写入 {0}（{1}）。
+
+@ The dispatch policy was not written: {0} is a symbolic link that leads outside this workspace folder, or nowhere. Nothing was changed.
+ko: 디스패치 정책을 기록하지 않았습니다: {0}은(는) 이 워크스페이스 폴더 밖을 가리키거나 아무것도 가리키지 않는 심볼릭 링크입니다. 아무것도 변경하지 않았습니다.
+zh: 未写入分发策略：{0} 是符号链接，它指向此工作区文件夹之外，或哪里都不指向。未做任何更改。
+
+@ The file differs from this version's definition — it was edited or comes from another version. Replacing it discards those differences.
+ko: 이 파일은 이 버전의 정의와 다릅니다 — 직접 편집했거나 다른 버전의 것입니다. 교체하면 그 차이가 사라집니다.
+zh: 该文件与此版本的定义不同 — 它被编辑过，或来自其他版本。替换会丢弃这些差异。
+
+@ The keychain setting was NOT applied for "{0}": its folder is no longer a new, empty folder of its own, so {1} was not created.
+ko: "{0}"에 키체인 설정을 적용하지 않았습니다: 해당 폴더가 더 이상 새로 만든 빈 전용 폴더가 아니어서 {1}을(를) 만들지 않았습니다.
+zh: 未为 "{0}" 应用钥匙串设置：它的文件夹已不再是全新的、空的专属文件夹，因此未创建 {1}。
+
+@ The last dispatch to this account failed on login ({0}). It counts as logged out, whatever the status check of the `{1}` CLI says, until a dispatch to it succeeds, you run "Re-login Account" (right-click the worker), or 30 minutes have passed.
+ko: 이 계정으로의 마지막 디스패치가 로그인 단계에서 실패했습니다 ({0}). `{1}` CLI의 상태 확인 결과와 상관없이, 이 계정으로의 디스패치가 성공하거나 "계정 재로그인"(워커 우클릭)을 실행하거나 30분이 지날 때까지 로그아웃된 것으로 간주됩니다.
+zh: 发往此账号的最近一次分发在登录时失败（{0}）。无论 `{1}` CLI 的状态检查结果如何，在发往它的分发成功、你运行“重新登录账号”（右键单击该 worker）或过去 30 分钟之前，它都会被视为已登出。
+
+@ The last dispatch to this account failed on login. Dispatches skip it until one succeeds or you log in again.
+ko: 이 계정으로의 마지막 디스패치가 로그인 단계에서 실패했습니다. 디스패치가 한 번 성공하거나 다시 로그인하기 전까지 디스패치는 이 계정을 건너뜁니다.
+zh: 发往此账号的最近一次分发在登录时失败。在有一次分发成功或你重新登录之前，分发会跳过它。
+
+@ The numbers below are the last good reading, not current. They are kept for up to 30 minutes while get_usage returns no rate-limit data, then cleared.
+ko: 아래 숫자는 현재 값이 아니라 마지막 정상 조회 값입니다. get_usage가 속도 제한 데이터를 반환하지 않는 동안 최대 30분간 유지된 뒤 지워집니다.
+zh: 下面的数字是上一次正常读数，而不是当前值。在 get_usage 没有返回速率限制数据期间，它们最多保留 30 分钟，之后会被清除。
+
+@ The output of that task could not be found.
+ko: 해당 작업의 출력을 찾을 수 없습니다.
+zh: 找不到该任务的输出。
+
+@ The preferred worker was not changed. {0}
+ko: 우선 워커를 변경하지 않았습니다. {0}
+zh: 未更改优先 worker。{0}
+
+@ The record of which model checked in as the main session of this workspace is removed. Until a session calls orchestrator_briefing again, the workspace has no checked-in orchestrator.
+ko: 이 워크스페이스의 메인 세션으로 체크인한 모델의 기록이 삭제됩니다. 세션이 orchestrator_briefing을 다시 호출하기 전까지 이 워크스페이스에는 체크인된 오케스트레이터가 없습니다.
+zh: 记录此工作区主会话由哪个模型签到的信息将被移除。在有会话再次调用 orchestrator_briefing 之前，此工作区没有已签到的编排器。
+
+@ The registry changed — refresh and try again. Nothing was removed.
+ko: 레지스트리가 변경되었습니다 — 새로 고친 뒤 다시 시도하세요. 아무것도 제거하지 않았습니다.
+zh: 注册表已发生变化 — 请刷新后重试。未移除任何内容。
+
+@ The registry entry that had no name was removed.
+ko: 이름이 없던 레지스트리 항목을 제거했습니다.
+zh: 已移除没有名称的注册表条目。
+
+@ The registry holds {0} more entries this version cannot use than are listed here. They are kept in the file untouched.
+ko: 이 버전에서 사용할 수 없는 항목이 여기에 나열된 것보다 {0}개 더 레지스트리에 있습니다. 파일에는 그대로 보관됩니다.
+zh: 注册表中还有 {0} 个此版本无法使用的条目未在此处列出。它们原样保留在文件中。
+
+@ The session's account is no longer registered as a Claude Code account, so it can only be reached from a terminal, with `claude {0} {1}` under that account.
+ko: 이 세션의 계정이 더 이상 Claude Code 계정으로 등록되어 있지 않으므로, 터미널에서 그 계정으로 `claude {0} {1}` 명령을 실행해야만 접근할 수 있습니다.
+zh: 该会话所属的账号已不再注册为 Claude Code 账号，因此只能在终端中以该账号运行 `claude {0} {1}` 来访问它。
+
+@ The session's account is no longer registered as a Claude Code account, so it has to be stopped from a terminal with `claude stop {0}` under that account.
+ko: 이 세션의 계정이 더 이상 Claude Code 계정으로 등록되어 있지 않으므로, 터미널에서 그 계정으로 `claude stop {0}` 명령을 실행해 중지해야 합니다.
+zh: 该会话所属的账号已不再注册为 Claude Code 账号，因此必须在终端中以该账号运行 `claude stop {0}` 来停止它。
+
+@ The settings change was not saved to the shared registry, so dispatch keeps using the previous values. {0} It is tried again at the next settings change and every few minutes.
+ko: 설정 변경이 공유 레지스트리에 저장되지 않아 디스패치는 이전 값을 계속 사용합니다. {0} 다음 설정 변경 시와 몇 분마다 다시 시도합니다.
+zh: 设置更改未保存到共享注册表，因此分发仍继续使用之前的值。{0} 下次设置更改时以及每隔几分钟会再次尝试。
+
+@ The sign-in token is a plain file, auth.json, in the account folder.
+ko: 로그인 토큰은 계정 폴더의 일반 파일 auth.json에 저장됩니다.
+zh: 登录令牌是账号文件夹中的普通文件 auth.json。
+
+@ The stopped workers were not cleared. {0}
+ko: 중지된 워커를 지우지 않았습니다. {0}
+zh: 未清除已停止的 worker。{0}
+
+@ The task history was not cleared. {0}
+ko: 작업 기록을 지우지 않았습니다. {0}
+zh: 未清除任务历史。{0}
+
+@ The task log could not be read ({0}), so the dispatches in this window cannot be counted. This is not "no dispatches".
+ko: 작업 로그를 읽을 수 없어 ({0}) 이 기간의 디스패치를 집계할 수 없습니다. "디스패치 없음"을 뜻하는 것이 아닙니다.
+zh: 无法读取任务日志（{0}），因此无法统计此时间窗口内的分发。这并不表示“无分发”。
+
+@ The task log could not be read: {0}. This is not "no tasks" — the tasks recorded in it cannot be listed until it can be read again.
+ko: 작업 로그를 읽을 수 없습니다: {0}. "작업 없음"을 뜻하는 것이 아닙니다 — 로그에 기록된 작업은 다시 읽을 수 있을 때까지 나열할 수 없습니다.
+zh: 无法读取任务日志：{0}。这并不表示“没有任务” — 在能够再次读取之前，无法列出其中记录的任务。
+
+@ The team proxy agent was not written: a directory on the way to {0} is a symbolic link that leads outside this workspace folder. Nothing was changed.
+ko: 팀 프록시 에이전트를 기록하지 않았습니다: {0}까지의 경로에 있는 디렉터리가 이 워크스페이스 폴더 밖을 가리키는 심볼릭 링크입니다. 아무것도 변경하지 않았습니다.
+zh: 未写入团队转发代理：通往 {0} 的路径上有一个目录是符号链接，指向此工作区文件夹之外。未做任何更改。
+
+@ The worker registry ({0}) could not be read: {1}. Its accounts cannot be shown, and nothing that changes the registry works until the file is fixed or deleted. Click to open the file.
+ko: 워커 레지스트리({0})를 읽을 수 없습니다: {1}. 레지스트리의 계정을 표시할 수 없으며, 파일을 고치거나 삭제하기 전까지 레지스트리를 변경하는 기능은 동작하지 않습니다. 클릭하면 파일을 엽니다.
+zh: 无法读取 worker 注册表（{0}）：{1}。无法显示其中的账号，在修复或删除该文件之前，任何会更改注册表的操作都无法使用。点击即可打开该文件。
+
+@ The worker registry could not be read
+ko: 워커 레지스트리를 읽을 수 없습니다
+zh: 无法读取 worker 注册表
+
+@ The workspace assets were not changed. {0}
+ko: 워크스페이스 에셋을 변경하지 않았습니다. {0}
+zh: 未更改工作区资源。{0}
+
+@ This account exposes no claude.ai plan rate limits — typically a setup-token or non-subscription login. This is a valid state, not an error.
+ko: 이 계정은 claude.ai 플랜 속도 제한을 제공하지 않습니다 — 보통 setup-token 또는 비구독 로그인입니다. 정상적인 상태이며 오류가 아닙니다.
+zh: 此账号不提供 claude.ai 的套餐速率限制 — 通常是 setup-token 或非订阅登录。这是正常状态，不是错误。
+
+@ This account's subscription login expired or was logged out. Plan usage is unavailable and dispatches to it fail until you run "Re-login Account" (right-click the worker).
+ko: 이 계정의 구독 로그인이 만료되었거나 로그아웃되었습니다. 플랜 사용량을 확인할 수 없고, "계정 재로그인"(워커 우클릭)을 실행하기 전까지 이 계정으로 가는 디스패치는 실패합니다.
+zh: 此账号的订阅登录已过期或已登出。套餐用量不可用，在你运行“重新登录账号”（右键单击该 worker）之前，发往它的分发都会失败。
+
+@ This editor's settings were not copied to the shared registry, so dispatch keeps using the values it holds. {0} It is tried again at the next settings change and every few minutes.
+ko: 이 에디터의 설정이 공유 레지스트리에 복사되지 않아 디스패치는 레지스트리에 이미 있는 값을 계속 사용합니다. {0} 다음 설정 변경 시와 몇 분마다 다시 시도합니다.
+zh: 此编辑器的设置未复制到共享注册表，因此分发仍继续使用注册表中已有的值。{0} 下次设置更改时以及每隔几分钟会再次尝试。
+
+@ This extension starts that program itself (to read versions, logins and usage), and every dispatch on this machine runs it with the task and with access to your files. Confirm only a program you trust.
+ko: 이 확장이 그 프로그램을 직접 실행하며(버전, 로그인, 사용량을 읽기 위해), 이 컴퓨터의 모든 디스패치도 작업을 전달하면서 그 프로그램을 실행합니다. 그 프로그램은 내 파일에 접근할 수 있습니다. 신뢰하는 프로그램만 승인하세요.
+zh: 本扩展会自行启动该程序（用于读取版本、登录状态和用量），本机上的每次分发也都会带着任务运行它，并让它能够访问你的文件。请仅确认你信任的程序。
+
+@ This list shows the newest {0} tasks; {1} older ones are not listed. The dashboard shows the totals and the daily history.
+ko: 이 목록에는 최신 작업 {0}개가 표시되며, 더 오래된 작업 {1}개는 나열되지 않습니다. 대시보드에서 합계와 일별 기록을 볼 수 있습니다.
+zh: 此列表显示最新的 {0} 个任务；另有 {1} 个较早的任务未列出。仪表板会显示总计和每日历史。
+
+@ This version cannot use it: an earlier entry of the registry already has this name.
+ko: 이 버전에서 사용할 수 없음: 레지스트리의 앞쪽 항목이 이미 같은 이름을 사용하고 있습니다.
+zh: 此版本无法使用它：注册表中靠前的另一个条目已使用相同名称。
+
+@ This version cannot use it: its provider "{0}" is not one this version knows.
+ko: 이 버전에서 사용할 수 없음: 프로바이더 "{0}"은(는) 이 버전이 알지 못하는 프로바이더입니다.
+zh: 此版本无法使用它：此版本不认识它的提供商 "{0}"。
+
+@ This version cannot use it: the entry is incomplete — it has no usable name or no account directory.
+ko: 이 버전에서 사용할 수 없음: 항목이 불완전합니다 — 사용할 수 있는 이름이나 계정 디렉터리가 없습니다.
+zh: 此版本无法使用它：该条目不完整 — 没有可用的名称，或没有账号目录。
+
+@ This version of the extension cannot use this registry entry ({0}). A newer version of the extension may have written it. It is kept in the registry file untouched and takes part in nothing. To delete it, right-click and choose "Remove Registry Entry…".
+ko: 이 확장 버전은 이 레지스트리 항목({0})을 사용할 수 없습니다. 더 새로운 버전의 확장이 기록했을 수 있습니다. 이 항목은 레지스트리 파일에 그대로 보관되며 어디에도 사용되지 않습니다. 삭제하려면 우클릭한 뒤 "레지스트리 항목 제거…"를 선택하세요.
+zh: 此版本的扩展无法使用这条注册表条目（{0}）。它可能是更新版本的扩展写入的。该条目原样保留在注册表文件中，不参与任何功能。若要删除它，请右键单击并选择“移除注册表条目…”。
+
+@ Use This Program
+ko: 이 프로그램 사용
+zh: 使用此程序
+
+@ Used only when a dispatch names {0} or the worker.
+ko: 디스패치가 {0} 또는 해당 워커를 지정할 때만 사용됩니다.
+zh: 仅当分发指定 {0} 或该 worker 时才会使用。
+
+@ Waiting for your answer in the dialog…
+ko: 대화 상자에서 답변을 기다리는 중…
+zh: 正在等待你在对话框中作答…
+
+@ Weekly (7 day)
+ko: 주간 (7일)
+zh: 每周（7天）
+
+@ Weekly Fable
+ko: 주간 Fable
+zh: 每周 Fable
+
+@ With this guard off, a worker account that has used up its plan window is still given work when it has extra usage enabled, and those dispatches bill real money against the account's monthly cap — without asking you. The setting applies to every workspace on this machine until you change it.
+ko: 이 가드를 끄면 플랜 윈도우를 모두 소진한 워커 계정이라도 추가 사용량이 켜져 있으면 계속 작업을 받으며, 이런 디스패치는 묻지 않고 계정의 월 한도에서 실제 비용이 청구됩니다. 이 설정은 변경하기 전까지 이 컴퓨터의 모든 워크스페이스에 적용됩니다.
+zh: 关闭此防护后，已用完套餐窗口的 worker 账号只要启用了额外用量，仍会被分配任务，这些分发会在不询问你的情况下，从该账号的每月上限中扣除实际费用。该设置在你更改之前，对本机上的所有工作区都有效。
+
+@ Worker account "{0}" was not removed. {1}
+ko: 워커 계정 "{0}"을(를) 제거하지 않았습니다. {1}
+zh: worker 账号 "{0}" 未被移除。{1}
+
+@ Worker account "{0}" was not removed: {1} of its {2} session workers could not be stopped ({3}). Stop them from a terminal with `claude stop <job id>` under that account, or remove the account anyway.
+ko: 워커 계정 "{0}"을(를) 제거하지 않았습니다: 세션 워커 {2}개 중 {1}개를 중지하지 못했습니다 ({3}). 터미널에서 그 계정으로 `claude stop <job id>` 명령을 실행해 중지하거나, 그래도 계정을 제거하세요.
+zh: worker 账号 "{0}" 未被移除：它的 {2} 个会话 worker 中有 {1} 个无法停止（{3}）。请在终端中以该账号运行 `claude stop <job id>` 来停止它们，或仍然移除该账号。

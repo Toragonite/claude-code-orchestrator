@@ -1,0 +1,189 @@
+# 2.0.0 round 4: model provenance (last ran as), model pickers, dispatch policy update. Format: see build-l10n.cjs.
+
+@ A full Claude model id, typed in — the CLI decides whether it exists.
+ko: 직접 입력한 전체 Claude 모델 ID입니다 — 실제로 존재하는지는 CLI가 판단합니다.
+zh: 手动输入的完整 Claude 模型 ID — 是否存在由 CLI 判断。
+
+@ A full model id: the CLI runs exactly this model, whatever is newest.
+ko: 전체 모델 ID: 최신 모델이 무엇이든 CLI는 정확히 이 모델로 실행합니다.
+zh: 完整的模型 ID：无论最新的是哪个模型，CLI 都会严格运行这个模型。
+
+@ Asked for {0}, named by the dispatch.
+ko: {0}을(를) 요청함 — 디스패치가 지정했습니다.
+zh: 请求的是 {0}，由分发指定。
+
+@ Asked for {0}, the default of the worker account.
+ko: {0}을(를) 요청함 — 워커 계정의 기본 모델입니다.
+zh: 请求的是 {0}，即 worker 账号的默认模型。
+
+@ Billed through this {0} account — not through that vendor's own account.
+ko: 해당 벤더 자체 계정이 아니라 이 {0} 계정을 통해 과금됩니다.
+zh: 通过此 {0} 账号计费 — 而不是通过该厂商自己的账号。
+
+@ CLI default · last ran {0}
+ko: CLI 기본값 · 마지막 실행: {0}
+zh: CLI 默认值 · 上次运行：{0}
+
+@ Default model {0} — last ran {1}
+ko: 기본 모델 {0} — 마지막 실행: {1}
+zh: 默认模型 {0} — 上次运行：{1}
+
+@ Differs from this version
+ko: 이 버전과 다름
+zh: 与此版本不同
+
+@ Dispatch policy written to CLAUDE.md — the policy block that was there was replaced.
+ko: 디스패치 정책을 CLAUDE.md에 기록했습니다 — 기존 정책 블록은 교체되었습니다.
+zh: 分发策略已写入 CLAUDE.md — 原有的策略块已被替换。
+
+@ Dispatch policy written to CLAUDE.md.
+ko: 디스패치 정책을 CLAUDE.md에 기록했습니다.
+zh: 分发策略已写入 CLAUDE.md。
+
+@ Dispatches that name no model run on {0}. An alias is resolved by the `{1}` CLI of this account to the newest model of that family it offers.
+ko: 모델을 지정하지 않은 디스패치는 {0}(으)로 실행됩니다. 별칭은 이 계정의 `{1}` CLI가 해당 계열에서 제공하는 최신 모델로 해석합니다.
+zh: 未指定模型的分发会使用 {0} 运行。别名由此账号的 `{1}` CLI 解析为该系列中它所提供的最新模型。
+
+@ Enter a model id…
+ko: 모델 ID 입력…
+zh: 输入模型 ID…
+
+@ Loading models from the `{0}` CLI…
+ko: `{0}` CLI에서 모델을 불러오는 중…
+zh: 正在从 `{0}` CLI 加载模型…
+
+@ Model source
+ko: 모델 출처
+zh: 模型来源
+
+@ Model source: CLI default
+ko: 모델 출처: CLI 기본값
+zh: 模型来源：CLI 默认值
+
+@ Model source: named by the dispatch
+ko: 모델 출처: 디스패치가 지정
+zh: 模型来源：由分发指定
+
+@ Model source: worker default
+ko: 모델 출처: 워커 기본값
+zh: 模型来源：worker 默认值
+
+@ Model that ran
+ko: 실행된 모델
+zh: 实际运行的模型
+
+@ Model {0} → {1} · Account {2}
+ko: 모델 {0} → {1} · 계정 {2}
+zh: 模型 {0} → {1} · 账号 {2}
+
+@ Models known for the `{0}` CLI — its built-in list, the CLI was not asked
+ko: `{0}` CLI에 대해 알려진 모델 — 내장 목록이며 CLI에는 조회하지 않았습니다
+zh: `{0}` CLI 已知的模型 — 来自内置列表，未向 CLI 查询
+
+@ Models the `{0}` CLI lists for this account
+ko: 이 계정에 대해 `{0}` CLI가 나열한 모델
+zh: `{0}` CLI 为此账号列出的模型
+
+@ Newest {0} model this account's CLI offers
+ko: 이 계정의 CLI가 제공하는 최신 {0} 모델
+zh: 此账号的 CLI 提供的最新 {0} 模型
+
+@ Newest {0} model this account's CLI offers · last ran as {1}
+ko: 이 계정의 CLI가 제공하는 최신 {0} 모델 · 마지막 실행 모델: {1}
+zh: 此账号的 CLI 提供的最新 {0} 模型 · 上次运行为 {1}
+
+@ Newest {0} model this account's CLI offers · last ran as {1} on another account here
+ko: 이 계정의 CLI가 제공하는 최신 {0} 모델 · 여기의 다른 계정에서 마지막 실행 모델: {1}
+zh: 此账号的 CLI 提供的最新 {0} 模型 · 在这里的另一个账号上上次运行为 {1}
+
+@ No default is stored: a dispatch that names no model runs on the model the `{0}` CLI chooses.
+ko: 저장된 기본값이 없습니다. 모델을 지정하지 않은 디스패치는 `{0}` CLI가 선택하는 모델로 실행됩니다.
+zh: 未保存默认值：未指定模型的分发将使用 `{0}` CLI 自行选择的模型运行。
+
+@ No default model (the CLI chooses) — last ran {0}
+ko: 기본 모델 없음 (CLI가 선택) — 마지막 실행: {0}
+zh: 无默认模型（由 CLI 选择）— 上次运行：{0}
+
+@ No finished task of this account has reported which model the default ran as yet.
+ko: 이 계정에서 기본 모델이 실제로 어떤 모델로 실행되었는지 보고한 종료된 작업이 아직 없습니다.
+zh: 此账号还没有已结束的任务报告过默认模型实际运行的是哪个模型。
+
+@ No model was named, so the CLI used its own default.
+ko: 모델을 지정하지 않아 CLI가 자체 기본값을 사용했습니다.
+zh: 未指定模型，因此 CLI 使用了它自己的默认值。
+
+@ Other vendors' models offered by {0}
+ko: {0}이(가) 제공하는 다른 벤더의 모델
+zh: {0} 提供的其他厂商的模型
+
+@ Stored for this worker; the CLI did not list it.
+ko: 이 워커에 저장된 값이며, CLI는 이를 나열하지 않았습니다.
+zh: 已为此 worker 保存；CLI 未列出它。
+
+@ The CLI reported that it ran {0}.
+ko: CLI가 {0}(으)로 실행했다고 보고했습니다.
+zh: CLI 报告其运行的是 {0}。
+
+@ The `{0}` CLI could not list its models — these are built-in suggestions.
+ko: `{0}` CLI가 모델 목록을 가져오지 못했습니다 — 아래는 내장 추천 목록입니다.
+zh: `{0}` CLI 无法列出其模型 — 以下是内置的建议。
+
+@ The dispatch policy block in CLAUDE.md is not this version's text: it is from another version of the extension, or was changed.
+ko: CLAUDE.md의 디스패치 정책 블록이 이 버전의 내용이 아닙니다. 다른 버전의 확장이 기록했거나 변경된 것입니다.
+zh: CLAUDE.md 中的分发策略块不是此版本的文本：它来自其他版本的扩展，或已被修改。
+
+@ The dispatch policy in CLAUDE.md is already current. Nothing was changed.
+ko: CLAUDE.md의 디스패치 정책이 이미 최신입니다. 아무것도 변경하지 않았습니다.
+zh: CLAUDE.md 中的分发策略已是最新。未做任何更改。
+
+@ The dispatch policy in {0} is from another version of the extension or was edited. Replacing it discards those differences. Only the text between the policy's markers is replaced; the rest of the file is left as it is.
+ko: {0}의 디스패치 정책은 다른 버전의 확장에서 온 것이거나 직접 편집된 것입니다. 교체하면 그 차이가 사라집니다. 정책 마커 사이의 텍스트만 교체되며, 파일의 나머지 부분은 그대로 유지됩니다.
+zh: {0} 中的分发策略来自其他版本的扩展，或已被编辑过。替换会丢弃这些差异。只有策略标记之间的文本会被替换，文件的其余部分保持原样。
+
+@ The newest finished task of this account that used the default ran {0} — the id its CLI reported.
+ko: 이 계정에서 기본 모델을 사용한 가장 최근 종료 작업은 {0}(으)로 실행되었습니다 — CLI가 보고한 ID입니다.
+zh: 此账号中使用默认模型的最新已结束任务运行的是 {0} — 这是其 CLI 报告的 ID。
+
+@ Update Dispatch Policy
+ko: 디스패치 정책 업데이트
+zh: 更新分发策略
+
+@ Update the dispatch policy
+ko: 디스패치 정책 업데이트
+zh: 更新分发策略
+
+@ last ran {0}
+ko: 마지막 실행: {0}
+zh: 上次运行：{0}
+
+@ named by the dispatch
+ko: 디스패치가 지정
+zh: 由分发指定
+
+@ worker default
+ko: 워커 기본값
+zh: worker 默认值
+
+@ {0} check failed
+ko: 확인 실패 {0}
+zh: {0} 个检查失败
+
+@ {0} checking
+ko: 확인 중 {0}
+zh: {0} 个检查中
+
+@ {0} is the model id the CLI of this account reported for its newest finished task that used the default.
+ko: {0}은(는) 이 계정의 CLI가, 기본 모델을 사용한 가장 최근 종료 작업에 대해 보고한 모델 ID입니다.
+zh: {0} 是此账号的 CLI 为其使用默认模型的最新已结束任务所报告的模型 ID。
+
+@ {0} state unknown
+ko: 상태 알 수 없음 {0}
+zh: {0} 个状态未知
+
+@ {0} · last ran {1}
+ko: {0} · 마지막 실행: {1}
+zh: {0} · 上次运行：{1}
+
+@ {0} → {1}
+ko: {0} → {1}
+zh: {0} → {1}
