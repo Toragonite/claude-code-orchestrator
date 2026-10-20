@@ -21,7 +21,7 @@ try {
   check('package.json parses', false, e.message);
   process.exit(1);
 }
-check('version is 2.0.0', pkg.version === '2.0.0', pkg.version);
+check('version is 2.0.1', pkg.version === '2.0.1', pkg.version);
 
 const NLS = { en: 'package.nls.json', ko: 'package.nls.ko.json', 'zh-cn': 'package.nls.zh-cn.json' };
 const nls = {};

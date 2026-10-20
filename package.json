@@ -2,7 +2,7 @@
   "name": "claude-code-orchestrator",
   "displayName": "Claude Code Orchestrator",
   "description": "%extension.description%",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "publisher": "toragonite",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -1175,10 +1175,10 @@
     "theme": "dark"
   },
   "dependencies": {
-    "@toragonite/agent-mesh": "0.1.3",
-    "@toragonite/agent-mesh-claude": "0.1.3",
-    "@toragonite/agent-mesh-codex": "0.1.3",
-    "@toragonite/agent-mesh-cursor": "0.1.3",
-    "@toragonite/agent-mesh-gemini": "0.1.3"
+    "@toragonite/agent-mesh": "0.1.4",
+    "@toragonite/agent-mesh-claude": "0.1.4",
+    "@toragonite/agent-mesh-codex": "0.1.4",
+    "@toragonite/agent-mesh-cursor": "0.1.4",
+    "@toragonite/agent-mesh-gemini": "0.1.4"
   }
 }

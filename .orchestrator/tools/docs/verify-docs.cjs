@@ -373,7 +373,7 @@ const facts = [
   ['stale-file cleanup interval (24 h)', /LITTER_MIN_INTERVAL_MS = ([^;]+);/.exec(ext)[1], '24 * 60 * 60 * 1000'],
   ['stale-file cleanup minimum age (10 min)', /DEFAULT_MIN_AGE_MS = ([^;]+);/.exec(read('src/sessionLitter.ts'))[1], '10 * 60_000'],
   ['engine', pkg.engines.vscode, '^1.90.0'],
-  ['version', pkg.version, '2.0.0'],
+  ['version', pkg.version, '2.0.1'],
   ['team agent file', /TEAM_AGENT_FILE = '([^']+)'/.exec(read('src/teamAgent.ts'))[1], '.claude/agents/cco-worker.md'],
   ['worktree path', String(/path\.join\('\.claude', 'worktrees', bgWorktreeName\(taskId\)\)/.test(read('src/mesh/contract.ts'))), 'true'],
   ['worktree branch prefix', String(/return `worktree-\$\{bgWorktreeName\(taskId\)\}`/.test(read('src/mesh/contract.ts'))), 'true'],
@@ -493,7 +493,14 @@ try {
   fail('generated README blocks are stale: ' + (e.stdout || e.message));
 }
 const cl = read('CHANGELOG.md');
-check(cl.slice(cl.search(/^## \[/m)).startsWith('## [2.0.0] — 2026-10-13'), 'CHANGELOG: the top entry is [2.0.0] dated 2026-10-13');
+// The newest DATED entry is package.json's version; only "— unreleased" entries may sit above it.
+{
+  const heads = cl.match(/^## \[[^\]]+\] — .*$/gm) || [];
+  const firstDated = heads.findIndex((h) => !/ — unreleased$/.test(h));
+  const pkgVersion = JSON.parse(read('package.json')).version;
+  check(firstDated >= 0 && heads[firstDated].startsWith(`## [${pkgVersion}] — `), `CHANGELOG: the newest dated entry is package.json's version ${pkgVersion}`, heads[firstDated]);
+  check(/^## \[2\.0\.0\] — 2026-10-20$/m.test(cl), 'CHANGELOG: 2.0.0 is dated 2026-10-20 (its release)');
+}
 for (const g of ['Breaking', 'Added', 'Changed', 'Fixed', 'Security', 'Removed']) check(changelogTop.includes(`\n### ${g}\n`), `CHANGELOG 2.0.0 has a "${g}" group`);
 check(!/\[Unreleased\]|## \[1\.6\.0\]/.test(cl), 'CHANGELOG has no [Unreleased] or [1.6.0] block');
 for (const rel of [...Object.values(READMES), ...WALK, 'CHANGELOG.md']) {

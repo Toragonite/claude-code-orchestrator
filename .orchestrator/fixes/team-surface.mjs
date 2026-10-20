@@ -821,12 +821,14 @@ async function sectionLead() {
       'alice was stopped.',
       `alice  cco/${SLUG}/alice  +3 commits, merged`,
       M.C.TEAM_TEXT.reviewLine(REPO_ROOT, BASE_SHA.slice(0, 7), `cco/${SLUG}/alice`),
-      M.C.TEAM_TEXT.mergeLine(REPO_ROOT, `cco/${SLUG}/alice`),
       M.C.TEAM_TEXT.worktreeRemoveLine('/wt/alice'),
       `bob  cco/${SLUG}/bob  +0 commits, dirty`,
+      M.C.TEAM_TEXT.mergeLine(REPO_ROOT, `cco/${SLUG}/bob`),
       'checkout failed',
     ]);
     checkLacks('lead.end.no-remove-unmerged', text, [M.C.TEAM_TEXT.worktreeRemoveLine('/wt/bob')]);
+    // 2.0.1 F-f: a merged branch gets no Merge line.
+    checkLacks('lead.end.no-merge-line-when-merged', text, [M.C.TEAM_TEXT.mergeLine(REPO_ROOT, `cco/${SLUG}/alice`)]);
     checkEq('lead.end.core-now', core.calls.find((c) => c[0] === 'end')?.slice(1), [true, 'lead']);
     checkEq('lead.end.host-ending-pushed', conns.of(obs, M.C.METHOD_TEAM.host).map((p) => p.params), [{ state: 'ending' }]);
   }

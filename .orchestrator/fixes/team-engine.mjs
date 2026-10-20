@@ -116,7 +116,7 @@ fs.writeFileSync(
   [
     `export { createTeamCoreWith, codexConfigRegistersDispatch } from ${JSON.stringify(path.join(REPO, 'src', 'team', 'engine'))};`,
     `export * as contract from ${JSON.stringify(path.join(REPO, 'src', 'team', 'contract'))};`,
-    `export { renderCreateAnswer } from ${JSON.stringify(path.join(REPO, 'src', 'team', 'render'))};`,
+    `export { renderCreateAnswer, renderEndAnswer, renderMemberStatus } from ${JSON.stringify(path.join(REPO, 'src', 'team', 'render'))};`,
     `export { routeMember, accountKeyOf, identityKeysOf, namesOfIdentities } from ${JSON.stringify(path.join(REPO, 'src', 'team', 'routing'))};`,
     '',
   ].join('\n'),
@@ -143,7 +143,7 @@ await esbuild.build({
   ],
 });
 const lib = require(BUNDLE);
-const { createTeamCoreWith, codexConfigRegistersDispatch, contract: C, renderCreateAnswer } = lib;
+const { createTeamCoreWith, codexConfigRegistersDispatch, contract: C, renderCreateAnswer, renderEndAnswer, renderMemberStatus } = lib;
 
 /* ------------------------------------------------------------------------- *
  * Fake store (TeamStores / TeamStore)
@@ -1545,6 +1545,86 @@ scenario('board: claim conflicts and limits, review needs a report, lead overlap
   const cancel = await w.core.board({ op: 'cancel', task: 'b3' }, 'lead');
   const again = await w.core.board({ op: 'reopen', task: 'b3' }, 'lead');
   check('board: cancelled is terminal', cancel.ok && !again.ok && again.code === 'invalid_transition', again);
+});
+
+scenario('update: a member’s same-state team_update is a no-op that writes nothing (2.0.1 F-e)', async () => {
+  const w = makeWorld();
+  const a = {};
+  const snap = () => ({ events: w.store.events.length, bodies: [...w.store.fileMap.keys()].filter((k) => k.startsWith('bodies/')).length, notices: w.notices().length });
+  const noop = async (key, args) => {
+    const before = snap();
+    a[key] = await w.core.memberTool('alice', 'team_update', args);
+    a[`${key}Snap`] = { before, after: snap() };
+  };
+  w.driver.script('alice', {
+    during: async () => {
+      await w.core.memberTool('alice', 'team_claim', { task_id: 'b1' });
+      await w.core.memberTool('alice', 'team_claim', { task_id: 'b2' });
+      await sleep(20);
+      await noop('claimed', { task_id: 'b1', state: 'claimed' });
+      await w.core.memberTool('alice', 'team_update', { task_id: 'b1', state: 'review', report: 'First report.' });
+      await noop('review', { task_id: 'b1', state: 'review', report: 'Second report after the lead asked.' });
+      await w.core.memberTool('alice', 'team_update', { task_id: 'b2', state: 'blocked', note: 'waiting on the API' });
+      await noop('blocked', { task_id: 'b2', state: 'blocked', note: 'still waiting' });
+      a.backToClaimed = await w.core.memberTool('alice', 'team_update', { task_id: 'b1', state: 'claimed' });
+      a.notHeld = await w.core.memberTool('alice', 'team_update', { task_id: 'b3', state: 'claimed' });
+    },
+  });
+  await createTeam(w, {
+    members: [member('alice'), member('bob', { start: false })],
+    tasks: [{ title: 'one' }, { title: 'two' }, { title: 'three', assignee: 'bob' }],
+  });
+  await waitFor(() => a.notHeld !== undefined, { timeoutMs: 3000 });
+  const same = (key) => {
+    const s = a[`${key}Snap`];
+    return s.before.events === s.after.events && s.before.bodies === s.after.bodies && s.before.notices === s.after.notices;
+  };
+  check('update no-op: claimed→claimed (no fields) succeeds with the exact text', a.claimed?.isError !== true && a.claimed?.content[0].text === 'b1 is already claimed; nothing changed.', a.claimed);
+  check('update no-op: claimed→claimed writes no log line, no body file, no notice', same('claimed'), a.claimedSnap);
+  check(
+    'update no-op: review→review with a report succeeds with the exact text',
+    a.review?.isError !== true && a.review?.content[0].text === 'b1 is already review; nothing changed. Your report was not recorded — to add to it, send it to the lead with team_send.',
+    a.review,
+  );
+  check('update no-op: review→review writes no log line, no body file, no lead notice', same('review'), a.reviewSnap);
+  check(
+    'update no-op: blocked→blocked with a note succeeds with the exact text',
+    a.blocked?.isError !== true && a.blocked?.content[0].text === 'b2 is already blocked; nothing changed. Your note was not recorded — to add to it, send it to the lead with team_send.',
+    a.blocked,
+  );
+  check('update no-op: blocked→blocked writes no log line, no body file, no lead notice', same('blocked'), a.blockedSnap);
+  check('update no-op: the board.updated count is only the real moves', w.ev('board.updated').filter((e) => e.by === 'member:alice').length === 4, w.ev('board.updated'));
+  check('update: review→claimed by the assignee is still invalid_transition', a.backToClaimed?.content[0].text.startsWith('invalid_transition:'), a.backToClaimed);
+  check('update: a same-state update of a task not held is still not_your_task', a.notHeld?.content[0].text.startsWith('not_your_task:'), a.notHeld);
+  check(
+    'update no-op text: report and note together',
+    C.TEAM_TOOL_TEXT.unchanged('b9', 'review', ['report', 'note']) === 'b9 is already review; nothing changed. Your report and note were not recorded — to add to them, send them to the lead with team_send.',
+  );
+});
+
+scenario('end and member status: no Merge line for a merged branch (2.0.1 F-f)', async () => {
+  const branch = (member, merged) => ({ member, branch: `cco/web-abcd/${member}`, worktree: `/wt/${member}`, baseCommit: 'a'.repeat(40), ahead: 1, ...(merged !== undefined ? { merged } : {}) });
+  const end = renderEndAnswer({ teamId: 't-abcd', name: 'web', mode: 'drain', lines: [], branches: [branch('alice', true), branch('bob', false), branch('carol', undefined)] }, '/repo', []);
+  const block = (member) => {
+    const lines = end.split('\n');
+    const i = lines.findIndex((l) => l.startsWith(`  ${member}  `));
+    const j = lines.findIndex((l, k) => k > i && !l.startsWith('    '));
+    return lines.slice(i + 1, j === -1 ? undefined : j);
+  };
+  const has = (lines, prefix) => lines.some((l) => l.trimStart().startsWith(prefix));
+  const alice = block('alice');
+  check('end: a merged branch has no Merge: line', !has(alice, 'Merge:'), alice);
+  check('end: a merged branch keeps Review, Verify and the git worktree remove line', has(alice, 'Review:') && has(alice, 'Verify:') && has(alice, 'git worktree remove /wt/alice'), alice);
+  check('end: an unmerged branch keeps its Merge: line', has(block('bob'), 'Merge:') && !has(block('bob'), 'git worktree remove'), block('bob'));
+  check('end: a branch with unknown facts keeps its Merge: line', has(block('carol'), 'Merge:'), block('carol'));
+  const st = { id: 't-abcd', name: 'web', repoRoot: '/repo', baseCommit: 'a'.repeat(40) };
+  const ms = (merged) => ({
+    name: 'alice', index: 1, role: 'r', state: 'idle', provider: 'claude', worker: 'w', accountLabel: 'w', machineLogin: false, sharesLeadPlan: false, billableOverage: false,
+    runsCommands: false, model: '', incarnation: 1, mailbox: 'tools', portBase: 20100, turns: 0, tasks: [], pending: 0,
+    worktree: { path: '/wt/alice', branch: 'cco/web-abcd/alice', baseCommit: 'a'.repeat(40), ready: true, ...(merged !== undefined ? { merged } : {}) },
+  });
+  const mergeIn = (merged) => renderMemberStatus(st, ms(merged), Date.now(), [], []).split('\n').some((l) => l.startsWith('Merge:'));
+  check('member status: no Merge: line for a merged branch; kept for unmerged and unknown', !mergeIn(true) && mergeIn(false) && mergeIn(undefined), renderMemberStatus(st, ms(true), Date.now(), [], []));
 });
 
 scenario('doorbell: wake-worthy, report coalescing, one waiter; cap-aware inbox read marks (M9, M11, M13, P25, P28)', async () => {

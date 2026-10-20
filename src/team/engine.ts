@@ -6695,6 +6695,16 @@ class Core implements TeamCore {
       return toolRefusal('invalid_arguments', TEAM_TOOL_TEXT.invalidArguments('state', 'must be open, blocked, claimed or review'));
     }
     const to = a.state as TaskState;
+    if (to === t.state) {
+      const dropped: ('report' | 'note')[] = [];
+      if (a.report !== undefined && a.report.trim() !== '') {
+        dropped.push('report');
+      }
+      if (a.note !== undefined && a.note.trim() !== '') {
+        dropped.push('note');
+      }
+      return this.withFooter(o, m.name, turn, TEAM_TOOL_TEXT.unchanged(t.id, to, dropped));
+    }
     const move = BOARD_TRANSITIONS[t.state][to]?.assignee;
     if (move === undefined) {
       return toolRefusal('invalid_transition', TEAM_TOOL_TEXT.invalidTransition(t.id, t.state, allowedBoardTargets(t.state, 'assignee')));

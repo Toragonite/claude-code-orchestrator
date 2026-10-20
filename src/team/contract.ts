@@ -2230,6 +2230,11 @@ export const TEAM_TOOL_TEXT = {
     `Claimed ${taskId} "${title}" — it is yours. Paths: ${paths.length > 0 ? paths.join(', ') : '(none)'}`,
   updated: (taskId: string, state: string): string =>
     `${taskId} is now ${state}. Your worktree is committed when this turn ends; the lead has been told.`,
+  unchanged: (taskId: string, state: string, dropped: readonly ('report' | 'note')[]): string =>
+    `${taskId} is already ${state}; nothing changed.` +
+    (dropped.length === 0
+      ? ''
+      : ` Your ${dropped.join(' and ')} ${dropped.length > 1 ? 'were not recorded — to add to them, send them' : 'was not recorded — to add to it, send it'} to the lead with team_send.`),
   inboxEmpty: (): string => 'No new messages.',
   inboxMore: (r: number): string => `(${r} more — call team_inbox again)`,
   inboxStopPolling: (): string => 'No new messages. Do not poll — end your turn; you will be woken.',

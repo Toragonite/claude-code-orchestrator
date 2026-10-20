@@ -402,7 +402,7 @@ export function renderMemberAnswer(a: MemberAnswer, warnings: readonly string[])
 
 /**
  * team_end (§7.4, §9.5): the effects, then every branch with ahead/dirty/merged and the review,
- * verify and merge commands; `git worktree remove` when the branch is merged (never --force); a
+ * verify and merge commands; a merged branch gets `git worktree remove` (never --force) instead of the merge command; a
  * failed restore of the merged vendor MCP file is stated.
  */
 export function renderEndAnswer(a: EndAnswer, repoRoot: string, warnings: readonly string[]): string {
@@ -427,9 +427,10 @@ export function renderEndAnswer(a: EndAnswer, repoRoot: string, warnings: readon
     lines.push(`  ${b.member}  ${oneLine(b.branch, 160)}  ${facts.join(', ')}`);
     lines.push(`    ${TEAM_TEXT.reviewLine(repoRoot, sha7(b.baseCommit), b.branch)}`);
     lines.push(`    ${TEAM_TEXT.verifyLine(b.worktree)}`);
-    lines.push(`    ${TEAM_TEXT.mergeLine(repoRoot, b.branch)}`);
     if (b.merged === true) {
       lines.push(`    ${TEAM_TEXT.worktreeRemoveLine(b.worktree)}`);
+    } else {
+      lines.push(`    ${TEAM_TEXT.mergeLine(repoRoot, b.branch)}`);
     }
     if (b.restoreError !== undefined) {
       // T5b wording (§9.2: a failed restore is stated in the end answer).
@@ -662,7 +663,9 @@ export function renderMemberStatus(
   }
   lines.push(TEAM_TEXT.reviewLine(st.repoRoot, sha7(base), branch));
   lines.push(TEAM_TEXT.verifyLine(wt?.path ?? '-'));
-  lines.push(TEAM_TEXT.mergeLine(st.repoRoot, branch));
+  if (wt?.merged !== true) {
+    lines.push(TEAM_TEXT.mergeLine(st.repoRoot, branch));
+  }
   if (m.state === 'running' || m.state === 'pausing') {
     lines.push(TEAM_TEXT.neverMergeWhileRunning());
   }

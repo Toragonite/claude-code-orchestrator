@@ -4,6 +4,15 @@ All notable changes to **Claude Code Orchestrator** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-10-20
+
+### Fixed
+- **A team member that re-submits its task in the state it is already in is no longer refused.** `team_update` to the same state (`review` again after a question from the lead, `blocked` again, `claimed` again) now answers `<task> is already <state>; nothing changed.` instead of an `invalid_transition` error, and records nothing: no board change, no report file, no notice to the lead. If the call carried a `report` or a `note`, the answer says it was not recorded and that the member should send it to the lead with `team_send`.
+- **`team_end` and `team_status --member` no longer print a `Merge:` command for a branch that is already merged.** A merged branch still shows its Review and Verify lines, and `team_end` still prints its `git worktree remove` line. A branch whose merge state could not be read keeps its `Merge:` line.
+
+### Changed
+- **Bundled agent adapters updated to 0.1.4.** Antigravity's usage read now runs in a per-user working directory, so another local user on a shared machine can no longer block it; the other changes are internal.
+
 ## [2.0.0] — 2026-10-20
 
 Realigned with Claude Code 2.1.283 and newer. What Claude Code now does by itself is removed; session workers (Mesh Mode) are peer sessions that your own session messages with `SendMessage`; worker accounts can also run on Codex, Cursor and Antigravity; and there is a Team view and a redesigned dashboard. This release also contains the durable dispatch reconcile work that was planned as 1.6.0 and was never released on its own. See *Upgrading from 1.x* in the README for the removed settings and tools and what replaces each.
